@@ -38,6 +38,11 @@ def tools_by_name() -> dict:
     return {t.name: t.handler for t in build_default_tools()}
 
 
+def tools_meta() -> dict:
+    """name -> full T (for static risk metadata, untrusted_output flags, ...)."""
+    return {t.name: t for t in build_default_tools()}
+
+
 def tools_litellm() -> list[dict]:
     return [
         {

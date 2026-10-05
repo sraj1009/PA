@@ -55,7 +55,8 @@ def run_offline(task: str, workspace) -> str:
     if t:
         return f"[offline·deterministic] {t}"
     if re.search(r"\b(time|date|day)\b", task, re.I):
-        return f"[offline·deterministic] Now: {datetime.datetime.now():%Y-%m-%d %H:%M:%S} (Asia/Kolkata)"
+        now = datetime.datetime.now().astimezone()
+        return f"[offline·deterministic] Now: {now:%Y-%m-%d %H:%M:%S} ({now.tzname()})"
     if re.search(r"\b(who are you|your name|what are you)\b", task, re.I):
         return "[offline] I'm BEE. The language models (local & cloud) are unreachable right now, " \
                "so I can only run deterministic operations: math, sorting, file listing, and time."

@@ -5,20 +5,10 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from dataclasses import dataclass
 
-from .base import envelope
+from .base import envelope, T
 
 _PY = sys.executable
-
-
-@dataclass
-class T:
-    name: str
-    description: str
-    parameters: dict
-    handler: object
-
 
 def code_tools():
     def h_code(ctx, code: str, timeout: int = 120):

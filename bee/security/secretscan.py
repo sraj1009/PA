@@ -84,8 +84,8 @@ def _shannon(s: str) -> float:
 
 def scan_text(text: str, path: str = "<memory>") -> list[Finding]:
     out: list[Finding] = []
-    seen_spans: list[tuple[int, int]] = []
     for ln_no, line in enumerate(text.splitlines(), 1):
+        seen_spans: list[tuple[int, int]] = []  # per-line only (line offsets)
         def overlaps(a: int, b: int) -> bool:
             return any(not (b <= s or a >= e) for s, e in seen_spans)
         for kind, pat in PATTERNS:
@@ -145,12 +145,23 @@ def main(argv: list[str] | None = None) -> int:
     from .. import paths
     root = Path(argv[1]) if argv and len(argv) > 1 else paths.PROJECT_ROOT
     findings = scan_repo(root)
-    if not findings:
-        print(f"secret scan: CLEAN — no credentials found under {root}")
+    # The repo gate (tests/test_secretscan.py) allows synthetic fixtures only
+    # inside tests/ and evals/ — that is where redaction tests live by design.
+    # Findings outside that zone are treated as real leaks.
+    real = [f for f in findings
+            if not f.path.startswith(("tests/", "evals/"))]
+    fixture = [f for f in findings
+               if f.path.startswith(("tests/", "evals/"))]
+    if not real:
+        print(f"secret scan: CLEAN — no real credentials under {root}"
+              + (f" ({len(fixture)} expected synthetic findings in the "
+                 f"tests/evals fixture zone)" if fixture else ""))
         return 0
-    print(f"secret scan: {len(findings)} FINDING(S) under {root}:")
-    for f in findings:
+    print(f"secret scan: {len(real)} REAL FINDING(S) under {root}:")
+    for f in real:
         print(f"  {f}")
+    if fixture:
+        print(f"(+{len(fixture)} expected synthetic findings in tests/evals)")
     print("Move real values to .env (git-ignored) and ROTATE any exposed credential.")
     return 1
 

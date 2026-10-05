@@ -1,16 +1,7 @@
 """spawn_task — delegate a bounded sub-task to a fresh sub-agent (context isolation)."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-
-@dataclass
-class T:
-    name: str
-    description: str
-    parameters: dict
-    handler: object
-
+from .base import T
 
 def spawn_tool_fn():
     def h_spawn(ctx, description: str, max_iters: int = 15):

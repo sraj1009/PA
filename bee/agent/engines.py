@@ -74,6 +74,15 @@ def override_for(engine: str | None) -> str | None:
     return None
 
 
+def engine_labels(cfg=None) -> dict[str, str]:
+    """Human-facing engine labels. The api-cloud label reflects the ACTUAL
+    configured cloud model from config (no hard-coded provider assumption)."""
+    labels = {k: v["label"] for k, v in ENGINES.items()}
+    if cfg is not None and getattr(cfg.cloud, "llm", ""):
+        labels["api-cloud"] = f"API Cloud — {cfg.cloud.llm} (direct API, fastest)"
+    return labels
+
+
 def ask_engine(print_info: "callable | None" = None) -> str:
     """First-launch prompt. Non-interactive stdins (pipes/tests) default to hybrid."""
     saved = load_engine()

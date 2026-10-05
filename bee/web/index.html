@@ -43,6 +43,8 @@
   <a class="nav" href="/livekit" title="Realtime voice (agent must be running: python -m bee.cli livekit)">Live Voice</a>
   <a class="nav" href="/face" target="_blank" title="BEE's face — live state visualizer (F = fullscreen)">Face</a>
   <select class="eng" id="engine" title="BEE's brain — which model answers your tasks (choice is saved)"></select>
+  <button class="pill" id="key" title="Enter the web auth token (printed in the server console / temp/web_token.txt)"
+          style="cursor:pointer;background:none;border:1px solid var(--line);border-radius:99px;font-size:11px;color:var(--dim);">🔑 token</button>
   <span class="pill" id="status">…</span>
 </header>
 <main>
@@ -55,6 +57,27 @@
   <div class="hint">Voice: click 🎙, speak, stop — BEE transcribes locally (faster-whisper) and replies. "cloud:" prefix forces the cloud model.</div>
 </main>
 <script>
+// ---- auth: web UI requires a bearer token on stateful endpoints ----
+let beeToken = localStorage.getItem('beeToken') || '';
+function promptToken() {
+  beeToken = (prompt('Web auth token (printed in the server console, or in temp/web_token.txt):') || '').trim();
+  if (beeToken) localStorage.setItem('beeToken', beeToken);
+  return beeToken;
+}
+function authHeaders() { return beeToken ? { 'Authorization': 'Bearer ' + beeToken } : {}; }
+async function authedFetch(url, opts = {}) {
+  opts.headers = Object.assign({}, authHeaders(), opts.headers || {});
+  const r = await fetch(url, opts);
+  if (r.status === 401 && !beeToken) {           // first-time / lost token
+    if (promptToken()) return authedFetch(url, opts);  // retry once
+  } else if (r.status === 401) {                 // wrong token
+    beeToken = ''; localStorage.removeItem('beeToken');
+    add('err', '✗ auth: token rejected — press 🔑 token to re-enter it');
+  }
+  return r;
+}
+document.getElementById('key').onclick = () => { promptToken(); add('tool', 'token updated'); };
+
 const log = document.getElementById('log');
 const taskEl = document.getElementById('task');
 const status = document.getElementById('status');
@@ -84,8 +107,8 @@ async function loadEngine() {
     engineOverride = cur.override || null;
     sel.title = cur.label;
     sel.onchange = async () => {
-      const r = await fetch('/engine', {method:'POST', headers:{'Content-Type':'application/json'},
-                                        body: JSON.stringify({engine: sel.value})});
+      const r = await authedFetch('/engine', {method:'POST', headers:{'Content-Type':'application/json'},
+                                         body: JSON.stringify({engine: sel.value})});
       const k = await r.json();
       engineOverride = k.override || null;
       const opt = sel.options[sel.selectedIndex];
@@ -100,7 +123,7 @@ async function send(task) {
   add('user', task);
   const d = add('bee', 'thinking…');
   d.classList.add('busy');
-  const res = await fetch('/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+  const res = await authedFetch('/chat', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({task, model: engineOverride})});
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -150,7 +173,7 @@ document.getElementById('mic').onclick = async function() {
       add('user', '(voice)');
       const d = add('bee', 'transcribing locally…');
       const fd = new FormData(); fd.append('file', blob, 'voice.webm');
-      const r = await fetch('/voice', {method:'POST', body: fd});
+      const r = await authedFetch('/voice', {method:'POST', body: fd});
       const j = await r.json();
       d.textContent = (j.transcript ? '“' + j.transcript + '”\n\n' : '') + (j.output || j.error || '');
       if (j.error) d.classList.add('err');

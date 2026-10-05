@@ -17,17 +17,21 @@ import json
 import time
 from datetime import date
 
-from .. import paths
+from .. import paths, privacy
 
 MAX_EVENT_CHARS = 4000
 MAX_EVENTS = 200
 
 
 def _short(v, limit: int = MAX_EVENT_CHARS) -> str:
+    """Serialize + REDACT before persistence. Episodes feed SFT builds and
+    cloud teach-back — they are generated files and must never become a
+    secret/PII sink (Phase 1 security)."""
     try:
         s = json.dumps(v, ensure_ascii=False, default=str)
     except Exception:
         s = str(v)
+    s, _n = privacy.redact(s)
     return s[:limit]
 
 
@@ -56,15 +60,15 @@ class Episode:
                escalated: bool = False, verify: dict | None = None,
                tokens: int = 0) -> dict:
         self.ok = ok
-        self.output = (output or "")[:8000]
-        self.error = (error or "")[:1000]
+        self.output = privacy.redact((output or ""))[0][:8000]
+        self.error = privacy.redact((error or ""))[0][:1000]
         self.escalated = escalated
         self.verify = verify or {}
         self.tokens = tokens
         row = {
             "ts": round(self.t0, 1),
             "date": date.today().isoformat(),
-            "task": self.task[:4000],
+            "task": privacy.redact(self.task)[0][:4000],
             "model": self.model,
             "escalated": self.escalated,
             "ok": ok,

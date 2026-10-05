@@ -61,23 +61,31 @@ def test_state_roundtrip():
     state.set_state("idle")  # leave clean
 
 
-def test_web_livekit_and_face_endpoints():
+def test_web_livekit_and_face_endpoints(monkeypatch):
     from fastapi.testclient import TestClient
     from bee import webapp
+    # Phase 1: stateful endpoints (token mint, face state) require the web
+    # bearer token — fix it via env for deterministic tests.
+    monkeypatch.setenv("BEE_WEB_TOKEN", "test-token-livekit")
+    webapp.reset_token_for_tests()
+    H = {"Authorization": "Bearer test-token-livekit"}
 
     c = TestClient(webapp.app)
     r = c.get("/livekit")
     assert r.status_code == 200 and "Live Voice" in r.text
     r = c.get("/livekit/status")
     assert r.status_code == 200 and r.json()["configured"] is True
-    r = c.post("/livekit/token", json={"room": "bee-pa"})
+    # unauthenticated stateful calls are rejected
+    assert c.post("/livekit/token", json={"room": "bee-pa"}).status_code == 401
+    assert c.get("/face/state").status_code == 401
+    r = c.post("/livekit/token", json={"room": "bee-pa"}, headers=H)
     assert r.status_code == 200 and r.json()["token"].count(".") == 2
     assert r.json()["url"].startswith("wss://")
-    r = c.post("/livekit/token", json={"room": "bad room!"})
+    r = c.post("/livekit/token", json={"room": "bad room!"}, headers=H)
     assert r.status_code == 400
     r = c.get("/face")
     assert r.status_code == 200 and "BEE" in r.text
-    r = c.get("/face/state")
+    r = c.get("/face/state", headers=H)
     assert r.status_code == 200 and "state" in r.json()
 
 

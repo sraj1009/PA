@@ -1,12 +1,10 @@
 """Filesystem tools: file_read, file_write, file_list, file_edit."""
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .base import envelope, truncate
-
+from .base import envelope, truncate, T
 
 def resolve(root: Path, p: str | None) -> Path:
     root = root.resolve()
@@ -17,7 +15,6 @@ def resolve(root: Path, p: str | None) -> Path:
     if target != root and root not in target.parents:
         raise ValueError(f"path escapes workspace: {p}")
     return target
-
 
 def _read_file(root: Path, path: str, start: int = 0, end: int = 0, limit: int = 120000) -> dict:
     try:
@@ -43,7 +40,6 @@ def _read_file(root: Path, path: str, start: int = 0, end: int = 0, limit: int =
             "total_lines": total, "lines": f"{s + 1}-{min(e2, total)}",
             "chars": len(chunk), "content": truncate(chunk, limit)}
 
-
 def _write_file(root: Path, path: str, content: str, append: bool = False, create_dirs: bool = True) -> dict:
     try:
         f = resolve(root, path)
@@ -58,7 +54,6 @@ def _write_file(root: Path, path: str, content: str, append: bool = False, creat
         return {"path": str(f), "chars": len(content), "mode": mode}
     except Exception as e:
         return {"error": f"write failed: {e}"}
-
 
 def _file_list(root: Path, path: str = ".", max_entries: int = 300) -> dict:
     try:
@@ -80,7 +75,6 @@ def _file_list(root: Path, path: str = ".", max_entries: int = 300) -> dict:
         return {"error": str(e)}
     return {"path": str(f), "entries": out}
 
-
 def _edit_file(root: Path, path: str, old: str, new: str, replace_all: bool = False) -> dict:
     try:
         f = resolve(root, path)
@@ -99,14 +93,7 @@ def _edit_file(root: Path, path: str, old: str, new: str, replace_all: bool = Fa
     except Exception as e:
         return {"error": f"edit write failed: {e}"}
 
-
 def file_tools():
-    @dataclass
-    class _T:
-        name: str
-        description: str
-        parameters: dict
-        handler: Callable
 
     def h_read(ctx, path: str = "", start: int = 0, end: int = 0, limit: int = 120000):
         return _read_file(ctx.workspace, path, start, end, limit)
@@ -121,17 +108,17 @@ def file_tools():
         return _edit_file(ctx.workspace, path, old, new, replace_all)
 
     return [
-        _T("file_read", "Read a text file from the workspace. Returns numbered-free raw content with line range. Args: path (relative to workspace), start/end (1-based line bounds), limit (max chars, default 120000).",
+        T("file_read", "Read a text file from the workspace. Returns numbered-free raw content with line range. Args: path (relative to workspace), start/end (1-based line bounds), limit (max chars, default 120000).",
            {"type": "object", "properties": {
                "path": {"type": "string"}, "start": {"type": "integer"}, "end": {"type": "integer"},
                "limit": {"type": "integer"}}, "required": ["path"]}, h_read),
-        _T("file_write", "Write (overwrite) or append text to a file in the workspace. Creates parent dirs. Args: path, content, append (default false), create_dirs (default true).",
+        T("file_write", "Write (overwrite) or append text to a file in the workspace. Creates parent dirs. Args: path, content, append (default false), create_dirs (default true).",
            {"type": "object", "properties": {
                "path": {"type": "string"}, "content": {"type": "string"},
                "append": {"type": "boolean"}, "create_dirs": {"type": "boolean"}}, "required": ["path", "content"]}, h_write),
-        _T("file_list", "List directory entries (dirs first, then files, with sizes). Args: path (default '.'), max_entries.",
+        T("file_list", "List directory entries (dirs first, then files, with sizes). Args: path (default '.'), max_entries.",
            {"type": "object", "properties": {"path": {"type": "string"}, "max_entries": {"type": "integer"}}, "required": []}, h_list),
-        _T("file_edit", "Exact string replacement in a file (safer/faster than rewrite). old must match exactly; if it occurs multiple times, use replace_all or more context.",
+        T("file_edit", "Exact string replacement in a file (safer/faster than rewrite). old must match exactly; if it occurs multiple times, use replace_all or more context.",
            {"type": "object", "properties": {
                "path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"},
                "replace_all": {"type": "boolean"}}, "required": ["path", "old", "new"]}, h_edit),

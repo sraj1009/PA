@@ -1,17 +1,8 @@
 """Memory tools: diary (episodic), longterm (durable facts), profile, search."""
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime
-
-
-@dataclass
-class T:
-    name: str
-    description: str
-    parameters: dict
-    handler: object
-
+from .base import T
 
 def memory_tools():
     def h_diary(ctx, message: str, model: str = "", escalated: bool = False):

@@ -110,6 +110,15 @@ def _debug_fallback(code: str) -> str:
 
 
 def _llm(ctx, prompt: str, max_tokens: int = 1400) -> str | None:
+    # Phase 2: commands execute LLM work through the SAME kernel as main tasks
+    # (provider routing, receipts, events, telemetry). The fallback keeps bare
+    # ctx objects working (tests without a kernel).
+    kernel = getattr(ctx, "kernel", None)
+    if kernel is not None:
+        try:
+            return kernel.direct("code", prompt, max_tokens=max_tokens)
+        except Exception:
+            pass
     if ctx is None or ctx.client is None:
         return None
     try:

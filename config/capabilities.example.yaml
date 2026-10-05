@@ -1,0 +1,34 @@
+# BEE capability policies (Phase 3).
+#
+# Copy to config/capabilities.yaml to customize. Anything not listed here uses
+# the built-in default (see bee/security/capabilities.py).
+#
+# Per capability:
+#   policy:  always_allow | ask | task | deny
+#            always_allow  permitted without asking (confirm may still apply)
+#            ask           ask on first use; a 'yes' grants it for the CURRENT
+#                          TASK ONLY (never inferred for other tasks or
+#                          capabilities)
+#            task          only permitted inside a task that was explicitly
+#                          granted (e.g. by answering a confirm)
+#            deny          never permitted
+#   confirm: default | always | never
+#            always  forces a confirmation EVEN with policy always_allow
+#            never   disables the forced confirmation (explicit operator choice)
+#
+# Examples:
+#
+# files.delete:
+#   policy: ask
+#   confirm: always          # deleting files always confirms (the default)
+#
+# email.send:
+#   policy: ask              # sending mail asks unless explicitly trusted:
+#   # policy: always_allow
+#   # confirm: never
+#
+# purchase:
+#   policy: deny             # R5 stays denied unless you explicitly allow
+#
+# system.control:
+#   policy: deny             # shutdown/reboot stays denied by default

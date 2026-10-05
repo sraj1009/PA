@@ -7,6 +7,18 @@ No code was changed while producing this roadmap.
 
 ---
 
+## 0. Phase status (updated 2026-10-05, end of Phase 3)
+
+| Phase | Status | Evidence |
+|---|---|---|
+| 0 — Safety net (git, .gitignore, baseline) | **DONE** | git baseline commit 3548dbc (202 pytest / 71,914 verify / 10-21 eval recorded) |
+| 1 — Security (web auth, AST risk layer, eval_safe limits, episode redaction, archive-not-delete, sandbox hardening) | **DONE** | see `docs/SECURITY.md`; netguard 19 SSRF cases; risk/audit suites |
+| 2 — Kernel | **DONE** | `bee/kernel/` (13 modules): TaskState machine, Plan/Action/Observation, PermissionDecision, ExecutionReceipts, AgentEvent+EventBus, AgentSession (persistent follow-ups), RetryPolicy, effect verification, ToolBus; REPL+web+slash-commands unified. 45 kernel tests; 308 pytest / verify ALL PASS 71,914 |
+| 3 — Permissions + structured memory (capability policy, confirmations, memory architecture) | **DONE** | `bee/security/capabilities.py` (19 capabilities, R0–R5, task-scoped grants, pre-execution gate in loop.py); `bee/memory/store.py` (remember/recall/update/forget/summarize/expire + entity memory + provenance governance); kernel memory commands. tests/test_capabilities.py + tests/test_structured_memory.py. Remaining from original roadmap Phase 3: **real user-job scheduling (B1/M8)** — still open |
+| 4 — Memory & config | PARTIAL | Session store (Phase 2) + structured store (Phase 3); vector rebuild dup (B2/M12), config precedence doc (M14), metrics caps (M13) still open |
+| 5 — Provider abstraction | **DONE early (Phase 1, item 6)** | `bee/agent/providers.py` — ProviderRegistry/ProviderConfig/ProviderHealth, env-key centralization, provider-matched cloud availability |
+| 6 — Observability & UX | OPEN | real SSE (B3), /voice contract (B4 — docstring half-fixed), dashboard live data, eval expansion |
+
 ## 1. Completed capabilities (working, tested)
 
 | Capability | Evidence |
@@ -140,7 +152,22 @@ No code was changed while producing this roadmap.
 
 ## 7. Explicit non-claims
 
-- The system is **not** production-ready: 11/21 end-to-end eval tasks fail
-  (model quality ceiling), user scheduling is a no-op, the web surface is
-  unauthenticated, and the kernel responsibilities are implicit.
-- Nothing in this roadmap has been implemented yet; it is the plan.
+- The system is **not** production-ready: 8-11/21 end-to-end eval tasks fail
+  (model quality ceiling, not loop bugs — structural tasks stable across
+  runs), user scheduling is still a no-op (B1), the LiveKit worker and the
+  `/eval` runner still call `run_agent` directly instead of the kernel —
+  and therefore **do not pass through the Phase 3 capability gate**
+  (kernel-only by construction; `ctx.capability_gate` is None there).
+- The capability gate is a policy layer OVER the guard; it maps tools to
+  capabilities by name + argument heuristics, which a creative command
+  phrasing can under-map (e.g. an aliased delete). The guard/AST layers and
+  the sandbox remain the deeper protections.
+- The kernel verifies effects deterministically (file/edits/mkdir/target
+  probes); it does not understand arbitrary intent, and "unverified" work is
+  never reported as verified success.
+- Structured memory is a flat JSON store with keyword scoring — not a
+  vector DB, not graph memory; conflict resolution is key-based upsert,
+  not semantic dedup.
+- Realtime-voice event streaming and proactive automation are NOT
+  implemented; the typed event model that would carry them is.
+- Phases 4 (remainder) and 6 above are still the plan.

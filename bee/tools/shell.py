@@ -3,18 +3,8 @@ from __future__ import annotations
 
 import shlex
 import subprocess
-from dataclasses import dataclass
 
-from .base import envelope
-
-
-@dataclass
-class T:
-    name: str
-    description: str
-    parameters: dict
-    handler: object
-
+from .base import envelope, T
 
 def shell_tools():
     def h_shell(ctx, command: str, timeout: int = 120):

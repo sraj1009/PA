@@ -65,17 +65,14 @@ def validate_room(room: str) -> str:
 def _build_brain(cfg):
     """Returns (brain_fn, engine_label). brain_fn(task) -> reply text."""
     from ..agent import engines
-    from ..agent.client import LLMClient
-    from ..agent.context import Context
+    from ..agent.context import create_context
     from ..agent.loop import run_agent
 
     engine = engines.load_engine()
-    override = engines.override_for(engine)
 
-    ctx = Context(cfg, workspace=cfg.workspace, name="BEE")
-    ctx.client = LLMClient(cfg)
-    ctx.model_override = override
-    cfg.guard.mode = "unattended"  # never block live voice on input()
+    # guard_mode passed EXPLICITLY (was: cfg.guard.mode = "unattended", which
+    # mutated the shared config object for anything else holding it)
+    ctx = create_context(cfg, guard_mode="unattended")
 
     def brain(task: str) -> str:
         task = (task or "").strip()

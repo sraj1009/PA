@@ -40,12 +40,16 @@ def label_row(row: dict) -> str | None:
     return "cloud" if row.get("escalated") else "local"
 
 
-def main():
+def main(argv: list[str] | None = None, min_samples: int | None = None):
+    """`argv`/`min_samples` allow in-process callers (scheduler) to set the
+    sample floor WITHOUT mutating sys.argv (Phase 1: no global argv hacks)."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--min", type=int, default=50, help="min samples to actually fit a model")
     ap.add_argument("--model", default="auto", choices=["auto", *_MODEL_NAMES],
                     help="classifier to use (auto = pick best by cross-validation)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    if min_samples is not None:
+        args.min = min_samples
 
     from ..config import load_config
     cfg = load_config()

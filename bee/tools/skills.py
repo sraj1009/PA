@@ -6,19 +6,10 @@ system prompt, full content is loaded on demand via skill_get.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from pathlib import Path
+from .base import T
 
 from .. import paths
-
-
-@dataclass
-class T:
-    name: str
-    description: str
-    parameters: dict
-    handler: object
-
 
 def _skill_dir(name: str) -> Path:
     name = re.sub(r"[^A-Za-z0-9._-]+", "-", str(name or "").strip())
@@ -28,7 +19,6 @@ def _skill_dir(name: str) -> Path:
     if not d.exists() and not d.parent.exists():
         raise ValueError(f"unknown skill: {name}")
     return d
-
 
 TEMPLATE = """# {name}
 
@@ -43,7 +33,6 @@ description: {description}
 ## Gotchas
 - (pitfalls, VRAM/time limits, edge cases)
 """
-
 
 def skill_tools():
     def h_list(ctx):

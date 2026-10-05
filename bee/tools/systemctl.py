@@ -15,20 +15,10 @@ import ctypes
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
-
-
-@dataclass
-class T:
-    name: str
-    description: str
-    parameters: dict
-    handler: object
-
+from .base import T
 
 def _win() -> bool:
     return sys.platform == "win32"
-
 
 def _ps(expr: str) -> str:
     """One PowerShell query; '' on any failure (caller declines/handles)."""
@@ -42,7 +32,6 @@ def _ps(expr: str) -> str:
     except Exception:
         return ""
 
-
 # ------------------------------------------------------------------ keybd
 _VK_VOLUME_MUTE = 0xAD
 _VK_VOLUME_DOWN = 0xAE
@@ -53,7 +42,6 @@ _VK_MEDIA_PLAY_PAUSE = 0xB3
 _VK_LWIN = 0x5B
 _VK_D = 0x44
 _KEYUP = 0x0002
-
 
 def _keybd(vk: int, n: int = 1) -> bool:
     """Send n full press+release cycles of virtual key vk (no console, no deps)."""
@@ -68,7 +56,6 @@ def _keybd(vk: int, n: int = 1) -> bool:
     except Exception:
         return False
 
-
 def _show_desktop() -> bool:
     """Win+D via keybd_event (toggles the desktop)."""
     if not _win():
@@ -82,7 +69,6 @@ def _show_desktop() -> bool:
         return True
     except Exception:
         return False
-
 
 # ------------------------------------------------------------------ reads
 _BATTERY_RX = re.compile(r"bat=(-?\d+)\s+ac=(-?\d)")
@@ -100,7 +86,6 @@ _BATTERY_PS = (
     "\"bat=$($w.EstimatedChargeRemaining) ac=$ac\"}}"
 )
 
-
 def get_battery() -> tuple[int, int] | None:
     """(percent, ac) — ac: 1 = plugged in, 0 = on battery, -1 = unknown.
     None when no battery is present (desktop/AC power)."""
@@ -109,7 +94,6 @@ def get_battery() -> tuple[int, int] | None:
     if not m:
         return None
     return int(m.group(1)), int(m.group(2))
-
 
 def get_system_stats() -> dict | None:
     """CPU / RAM / disk / battery.
@@ -164,12 +148,10 @@ def get_system_stats() -> dict | None:
         "battery_pct": None if m.group(5) == "-1" else int(m.group(5)),
     }
 
-
 def format_system_stats(s: dict) -> str:
     ram = f"RAM {s['ram_free_mb']:,} MB free of {s['ram_total_mb']:,} MB ({s['ram_pct']}% used)"
     bat = f"Battery {s['battery_pct']}%" if s["battery_pct"] is not None else "Power: AC/desktop"
     return f"CPU {s['cpu_pct']}% · {ram} · C: {s['disk_free_gb']} GB free · {bat}"
-
 
 # ------------------------------------------------------------------ writes
 def set_volume(action: str, presses: int = 5) -> str:
@@ -198,7 +180,6 @@ def set_volume(action: str, presses: int = 5) -> str:
     except Exception as e:
         return f"Volume control error: {e}"
 
-
 def set_brightness(level) -> str:
     try:
         level = int(level)
@@ -214,7 +195,6 @@ def set_brightness(level) -> str:
         return f"Brightness set to {level}% (no WMI status returned — some displays ignore it)."
     return f"Brightness control returned status {out[:80]} (external displays are often not WMI-adjustable)."
 
-
 def lock_workstation() -> str:
     if not _win():
         return "Lock is only available on Windows."
@@ -225,7 +205,6 @@ def lock_workstation() -> str:
         return "PC locked."
     except Exception as e:
         return f"Could not lock the PC: {e}"
-
 
 def sleep_pc() -> str:
     if not _win():
@@ -238,7 +217,6 @@ def sleep_pc() -> str:
         return "Sleep requested (Windows declined — check power settings)."
     except Exception as e:
         return f"Could not put the PC to sleep: {e}"
-
 
 def media(action: str) -> str:
     """System media keys (play/pause, next, previous) — no Spotify API needed."""
@@ -255,12 +233,10 @@ def media(action: str) -> str:
         return f"Unknown media action '{action}' (playpause|next|prev)."
     return msg if ok else "Could not send the media key."
 
-
 def show_desktop() -> str:
     if not _win():
         return "Show-desktop is only available on Windows."
     return "Desktop shown (all windows minimized)." if _show_desktop() else "Could not show the desktop."
-
 
 # ------------------------------------------------------------------ tool
 def systemctl_tool(ctx, action: str, value: str = "") -> dict:
@@ -295,7 +271,6 @@ def systemctl_tool(ctx, action: str, value: str = "") -> dict:
     except Exception as e:
         return {"error": str(e)}
     return {"error": f"unknown action '{action}' (stats|battery|volume|brightness|lock|sleep|media|show_desktop)"}
-
 
 def systemctl_tools():
     return [

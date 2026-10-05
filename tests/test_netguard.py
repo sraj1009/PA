@@ -1,0 +1,149 @@
+"""SSRF netguard: URL validation (pure, fake resolver) + safe_get (fake transport).
+No network access in any test."""
+from __future__ import annotations
+
+import pytest
+
+from bee.security import netguard as ng
+
+
+# ---------------------------------------------------------------- validate
+def _fake_resolver(mapping):
+    def resolver(host):
+        if host in mapping:
+            return mapping[host]
+        raise OSError(f"no such host: {host}")
+    return resolver
+
+
+@pytest.mark.parametrize("url,why", [
+    ("http://127.0.0.1/x", "loopback v4"),
+    ("http://127.8.9.10/x", "loopback v4 range"),
+    ("http://[::1]/x", "loopback v6"),
+    ("http://0.0.0.0/x", "unspecified"),
+    ("http://10.0.0.5/x", "rfc1918 10/8"),
+    ("http://172.16.0.1/x", "rfc1918 172.16/12"),
+    ("http://172.31.255.255/x", "rfc1918 edge"),
+    ("http://192.168.1.1/x", "rfc1918 192.168/16"),
+    ("http://169.254.169.254/latest/meta-data/", "link-local cloud metadata"),
+    ("http://[fe80::1]/x", "link-local v6"),
+    ("http://100.64.0.1/x", "cgnat"),
+    ("http://localhost/x", "localhost hostname"),
+    ("http://LocalHost/x", "case-insensitive localhost"),
+    ("http://foo.local/x", "mDNS suffix"),
+    ("http://svc.internal/x", "internal suffix"),
+    ("file:///etc/passwd", "non-http scheme"),
+    ("ftp://example.com/x", "non-http scheme"),
+    ("gopher://127.0.0.1/", "non-http scheme"),
+    ("//127.0.0.1/x", "schemeless"),
+])
+def test_blocked_urls(url, why):
+    reason = ng.validate_url(url, resolver=_fake_resolver({}))
+    assert reason, f"{why}: expected blocked, got safe: {url}"
+
+
+def test_public_ip_literal_allowed():
+    assert ng.validate_url("https://93.184.216.34/x") == ""
+
+
+def test_public_domain_allowed():
+    r = _fake_resolver({"example.com": ["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"]})
+    assert ng.validate_url("https://example.com/page", resolver=r) == ""
+
+
+def test_dns_rebinding_mixed_public_private_blocked():
+    # one public + one private A record -> must block (any bad IP blocks)
+    r = _fake_resolver({"evil.com": ["93.184.216.34", "192.168.0.10"]})
+    reason = ng.validate_url("https://evil.com", resolver=r)
+    assert reason and "private" in reason
+
+
+def test_dns_rebinding_reloopback_blocked():
+    r = _fake_resolver({"ok.com": ["127.0.0.1"]})
+    assert "loopback" in ng.validate_url("https://ok.com", resolver=r)
+
+
+def test_dns_failure_blocks():
+    assert "dns failure" in ng.validate_url("https://nope.invalid", resolver=_fake_resolver({}))
+
+
+# ---------------------------------------------------------------- safe_get
+class FakeResp:
+    def __init__(self, status=200, headers=None, body=b"", url="http://x.test/"):
+        self.status_code = status
+        self.headers = headers or {}
+        self._body = body
+        self.url = url
+        self.encoding = "utf-8"
+
+    @property
+    def is_redirect(self):
+        return 300 <= self.status_code < 400 and "location" in self.headers
+
+    def iter_raw(self):
+        yield self._body
+
+
+class FakeClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requested = []
+
+    def get(self, url, headers=None, timeout=None):
+        self.requested.append(url)
+        r = self.responses.pop(0)
+        return r if isinstance(r, FakeResp) else r(self)  # callable hooks see client
+
+    def close(self):
+        pass
+
+
+def test_fetch_ok():
+    c = FakeClient([FakeResp(200, {"content-type": "text/html; charset=utf-8"}, b"<html>hi</html>")])
+    out = ng.safe_get("https://example.com", transport=c)
+    assert out.status == 200 and "hi" in out.text and out.content_type == "text/html"
+    assert c.requested == ["https://example.com"]
+
+
+def test_fetch_redirect_revalidated():
+    # public -> loopback redirect must be blocked even though hop 1 passed
+    hop1 = FakeResp(302, {"location": "http://127.0.0.1:8787/steal"}, url="https://example.com")
+    c = FakeClient([hop1])
+    with pytest.raises(ng.NetGuardError, match="loopback|blocked"):
+        ng.safe_get("https://example.com", transport=c)
+    assert c.requested == ["https://example.com"]  # never fetched the target
+
+
+def test_fetch_redirect_chain_ok_and_capped():
+    hop1 = FakeResp(302, {"location": "https://example.com/2"}, url="https://example.com/1")
+    hop2 = FakeResp(200, {"content-type": "text/plain"}, b"ok")
+    c = FakeClient([hop1, hop2])
+    out = ng.safe_get("https://example.com/1", transport=c,
+                      resolver=_fake_resolver({"example.com": ["93.184.216.34"]}))
+    assert out.status == 200 and out.redirects == 1
+
+    loop = [FakeResp(302, {"location": "https://example.com/1"}, url="https://example.com/x") for _ in range(10)]
+    c2 = FakeClient(loop)
+    with pytest.raises(ng.NetGuardError, match="too many redirects"):
+        ng.safe_get("https://example.com/1", transport=c2, max_redirects=3,
+                    resolver=_fake_resolver({"example.com": ["93.184.216.34"]}))
+
+
+def test_fetch_size_limit():
+    big = FakeResp(200, {"content-type": "text/plain"}, b"x" * 3000)
+    c = FakeClient([big])
+    with pytest.raises(ng.NetGuardError, match="size limit"):
+        ng.safe_get("https://example.com", transport=c, max_bytes=1000)
+
+
+def test_fetch_content_type_enforced():
+    pdf = FakeResp(200, {"content-type": "application/pdf"}, b"%PDF-1.4")
+    c = FakeClient([pdf])
+    with pytest.raises(ng.NetGuardError, match="content-type"):
+        ng.safe_get("https://example.com", transport=c)
+
+
+def test_fetch_no_content_type_allowed():
+    c = FakeClient([FakeResp(200, {}, b"plain bytes")])
+    out = ng.safe_get("https://example.com", transport=c)
+    assert out.bytes_read == len(b"plain bytes")

@@ -1,18 +1,7 @@
 """calculator — safe expression evaluation (AST whitelist, no imports)."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-from .base import eval_safe
-
-
-@dataclass
-class T:
-    name: str
-    description: str
-    parameters: dict
-    handler: object
-
+from .base import eval_safe, T
 
 def calc_tools():
     def h_calc(ctx, expression: str):

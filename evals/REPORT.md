@@ -1,6 +1,6 @@
 # BEE — Verification Report (Phase 4)
 
-- Generated: 2026-10-05 22:14 
+- Generated: 2026-10-05 23:38 
 - Machine: RTX 3050 8GB / Windows / Ollama `bee4b`
 - Cloud tier: configured (gemini/gemini-3.6-flash) — credentialed
 - Seed: 20261004
@@ -56,8 +56,8 @@ Notes per suite:
 > would come from a ≤4B model, a bigger card, or ~12 GB VRAM.
 > Latency is the only thing affected; correctness is unaffected.
 
-- Agent eval suite (latest run 2026-10-05T22:07:30): **10/21** tasks passed.
-  failing: file_roundtrip, verify_calc_pass, file_list_ws, dsa_lis, dsa_gcd_lcm, dsa_sort_check, dsa_graph, memory_write, memory_read, plan_complex, rag_gpu_memory
+- Agent eval suite (latest run 2026-10-05T23:17:30): **8/21** tasks passed.
+  failing: math_sieve, file_roundtrip, calculator, verify_calc_pass, file_list_ws, dsa_lis, dsa_gcd_lcm, dsa_sort_check, dsa_graph, memory_write, memory_read, plan_complex
 
 ## What this report does and does not guarantee
 
@@ -71,4 +71,4 @@ Notes per suite:
 3. **Not claimed:** no 99.9% on open-ended LLM behaviour — that target is only
    meaningful for deterministic components and is stated here with its interval.
 
-_Total checks: 71,914 · wall time: 4.8s · overall: ALL PASS_
+_Total checks: 71,914 · wall time: 5.2s · overall: ALL PASS_

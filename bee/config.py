@@ -77,6 +77,20 @@ class SandboxCfg:
     workdir: str = "/workspace"
     timeout: int = 300
     max_output: int = 12000
+    # --- Phase 1 hardening (sandbox runs UNTRUSTED, model-generated code) ---
+    # These are defaults; any can be overridden per-machine in config.yaml.
+    network: str = "none"        # docker network mode: "none" = no network at all
+    memory: str = "2g"           # memory cap (also used as the --memory-swap cap)
+    cpus: str = "2"              # CPU cap
+    pids_limit: int = 128        # fork-bomb guard
+    read_only_root: bool = True  # root FS read-only; /tmp is a size-capped tmpfs
+    tmpfs_size: str = "256m"     # size of the rw /tmp tmpfs
+    user: str = "1000:1000"      # non-root uid:gid inside the container; set ""
+                                 # to fall back to the image default (needed only
+                                 # for the pre-Phase-1 root image)
+    mask_env_file: bool = True   # mask <workspace>/.env from inside the
+                                 # container (tmpfs over the file) so untrusted
+                                 # code cannot read host credentials
 
 
 @dataclass
@@ -232,31 +246,24 @@ class Config:
 
 
 def _env_key_for(llm: str) -> str:
-    """Pick the API key env var that matches the model's provider prefix.
+    """Provider-matched API key for a model reference.
 
-    A blanket 'first key that exists' picks the WRONG key when several
-    providers are configured (e.g. an OpenAI key sent to a Gemini model).
+    DELEGATES to bee.agent.providers (the single source of truth for
+    provider kinds / env keys / aliases). A blanket 'first key that exists'
+    would send the WRONG key when several providers are configured (e.g. an
+    OpenAI key sent to a Gemini model).
     """
-    import os
-    prefix = (llm or "").split("/", 1)[0].lower()
-    by_prefix = {
-        "gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
-        "google": ("GOOGLE_API_KEY",),
-        "xai": ("XAI_API_KEY",),
-        "x_ai": ("XAI_API_KEY",),
-        "grok": ("XAI_API_KEY",),
-        "openai": ("OPENAI_API_KEY",),
-        "openrouter": ("OPENROUTER_API_KEY",),
-        "anthropic": ("ANTHROPIC_API_KEY",),
-    }
-    for var in by_prefix.get(prefix, ()):
-        if os.environ.get(var):
-            return os.environ[var]
-    # no prefix match — try all known provider vars (legacy behaviour)
-    for var in ("OPENROUTER_API_KEY", "GOOGLE_API_KEY", "XAI_API_KEY",
-                "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
-        if os.environ.get(var):
-            return os.environ[var]
+    from .agent.providers import env_key_for
+    key = env_key_for(llm)
+    if key:
+        return key
+    # no provider-prefix match — legacy behaviour: any configured cloud key
+    from .agent.providers import ProviderKind, key_for
+    for k in ProviderKind:
+        if k == ProviderKind.OLLAMA:
+            continue
+        if key_for(k):
+            return key_for(k)
     return ""
 
 

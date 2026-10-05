@@ -44,6 +44,8 @@
   <label>Room</label>
   <input type="text" id="room" value="bee-pa" spellcheck="false">
   <button id="join" disabled>Request join token…</button>
+  <button id="key" class="leave" style="margin-top:8px;width:auto;float:right;"
+          title="Enter the web auth token (printed in the server console / temp/web_token.txt)">🔑 token</button>
   <div id="status">loading…</div>
 
   <div class="live" id="live">
@@ -60,6 +62,26 @@
 const $ = id => document.getElementById(id);
 let room = null;
 const statusEl = $("status");
+
+// ---- auth: shared with the chat page (same-origin localStorage) ----
+let beeToken = localStorage.getItem('beeToken') || '';
+function promptToken() {
+  beeToken = (prompt('Web auth token (printed in the server console, or in temp/web_token.txt):') || '').trim();
+  if (beeToken) localStorage.setItem('beeToken', beeToken);
+  return beeToken;
+}
+function authHeaders() { return beeToken ? { 'Authorization': 'Bearer ' + beeToken } : {}; }
+async function authedFetch(url, opts = {}) {
+  opts.headers = Object.assign({}, authHeaders(), opts.headers || {});
+  const r = await fetch(url, opts);
+  if (r.status === 401 && !beeToken) {
+    if (promptToken()) return authedFetch(url, opts);   // retry once
+  } else if (r.status === 401) {
+    statusEl.textContent = '✗ auth: token rejected — press 🔑 token to re-enter it';
+  }
+  return r;
+}
+$("key").onclick = () => promptToken();
 
 async function loadStatus() {
   try {
@@ -79,7 +101,7 @@ $("join").onclick = async () => {
   $("join").disabled = true;
   statusEl.textContent = "minting token…";
   try {
-    const t = await (await fetch("/livekit/token", {method:"POST",
+    const t = await (await authedFetch("/livekit/token", {method:"POST",
       headers:{"Content-Type":"application/json"},
       body: JSON.stringify({room: $("room").value.trim()})})).json();
     if (t.error) throw new Error(t.error);
@@ -126,9 +148,17 @@ function setBadge(txt, color) {
   const b = $("badge"); b.textContent = txt; b.style.color = color;
 }
 
+let statePolls = 0;
 async function pollState() {
   try {
-    const s = await (await fetch("/face/state")).json();
+    const r = await authedFetch("/face/state");
+    if (r.status === 401) {
+      if (statePolls++ < 2) setTimeout(pollState, 900);  // one grace cycle after join
+      else statusEl.textContent = '✗ auth lost — press 🔑 token (state updates paused)';
+      return;
+    }
+    statePolls = 0;
+    const s = await r.json();
     const map = { idle:"idle", listening:"listening…", thinking:"thinking…",
                   speaking:"speaking", error:"error" };
     let line = `BEE · <b>${map[s.state] || s.state}</b>`;

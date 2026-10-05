@@ -11,17 +11,8 @@ import csv
 import json
 import re
 from collections import Counter
-from dataclasses import dataclass
 from pathlib import Path
-
-
-@dataclass
-class T:
-    name: str
-    description: str
-    parameters: dict
-    handler: object
-
+from .base import T
 
 def _resolve(ctx, path: str) -> Path:
     """Confine a path to the workspace (reject escapes like ../../etc)."""
@@ -33,7 +24,6 @@ def _resolve(ctx, path: str) -> Path:
     if p != base and base not in p.parents:
         raise ValueError(f"path escapes workspace: {path}")
     return p
-
 
 def _inventory(ctx, path):
     root = _resolve(ctx, path)
@@ -48,7 +38,6 @@ def _inventory(ctx, path):
     return {"path": str(root), "file_count": len(files), "total_bytes": total,
             "total_mb": round(total / 1048576, 3), "by_extension": dict(by_ext.most_common()),
             "largest": [{"bytes": b, "rel": r} for b, r in largest]}
-
 
 def _rename(ctx, path, pattern, replacement, use_regex=False, dry_run=True):
     root = _resolve(ctx, path)
@@ -75,7 +64,6 @@ def _rename(ctx, path, pattern, replacement, use_regex=False, dry_run=True):
             f.rename(f.with_name(new_name))
             changed.append({"did": f"{f.name} -> {new_name}"})
     return {"dry_run": bool(dry_run), "changed": len(changed), "detail": changed}
-
 
 def _convert(ctx, path, from_format, to_format):
     p = _resolve(ctx, path)
@@ -106,7 +94,6 @@ def _convert(ctx, path, from_format, to_format):
         return {"error": f"unsupported to_format: {to_format}"}
     return {"rows": len(data), "from": from_format, "to": to_format, "out": str(out)}
 
-
 def _dedupe(ctx, path, in_place=False):
     p = _resolve(ctx, path)
     if not p.is_file():
@@ -120,7 +107,6 @@ def _dedupe(ctx, path, in_place=False):
     target = p if in_place else p.with_name(p.stem + ".deduped" + p.suffix)
     target.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
     return {"lines_in": len(lines), "lines_out": len(out), "removed": removed, "out": str(target)}
-
 
 def _lines(ctx, path, head=None, tail=None, sort=False, unique=False, contains=None):
     p = _resolve(ctx, path)
@@ -139,7 +125,6 @@ def _lines(ctx, path, head=None, tail=None, sort=False, unique=False, contains=N
         lines = lines[:int(head)]
     return {"count": len(lines), "lines": lines[:200], "truncated": len(lines) > 200}
 
-
 def _fill(ctx, path, mapping, dry_run=True):
     p = _resolve(ctx, path)
     if not p.is_file():
@@ -151,7 +136,6 @@ def _fill(ctx, path, mapping, dry_run=True):
         return {"dry_run": True, "preview": text[:2000]}
     p.write_text(text, encoding="utf-8")
     return {"filled": True, "out": str(p)}
-
 
 def _jsonq(ctx, path, jq):
     """Extract from a .json/.jsonl file by a jq-lite path: a.b[0].c  (* = all)."""
@@ -195,7 +179,6 @@ def _jsonq(ctx, path, jq):
         results += walk(r, tokens)
     return {"matches": len(results), "values": results[:200], "truncated": len(results) > 200}
 
-
 def _count(ctx, path, pattern=None, mode="lines"):
     p = _resolve(ctx, path)
     if not p.is_file():
@@ -215,7 +198,6 @@ def _count(ctx, path, pattern=None, mode="lines"):
             out["lines_matching"] = sum(1 for ln in text.splitlines() if pattern in ln)
     return out
 
-
 def _find(ctx, path, glob, contains=None, max_results=100):
     root = _resolve(ctx, path)
     if not root.is_dir():
@@ -234,7 +216,6 @@ def _find(ctx, path, glob, contains=None, max_results=100):
         if len(hits) >= max_results:
             break
     return {"count": len(hits), "truncated": len(hits) >= max_results, "files": hits}
-
 
 def _zip(ctx, path, mode, archive=None):
     import zipfile
@@ -264,7 +245,6 @@ def _zip(ctx, path, mode, archive=None):
             z.extractall(dest)
         return {"extracted_to": str(dest)}
     return {"error": f"unknown zip mode: {mode}", "valid": ["create", "extract"]}
-
 
 def _run(ctx, action, path=None, **kw):
     try:
@@ -298,7 +278,6 @@ def _run(ctx, action, path=None, **kw):
         return {"error": str(e)}
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
-
 
 def automate_tools():
     props = {

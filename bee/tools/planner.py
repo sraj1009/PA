@@ -1,16 +1,7 @@
 """planner — lightweight LLM step planner (uses local model, no tools)."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-
-@dataclass
-class T:
-    name: str
-    description: str
-    parameters: dict
-    handler: object
-
+from .base import T
 
 def planner_tools():
     def h_plan(ctx, task: str, constraints: str = ""):

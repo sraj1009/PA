@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -65,27 +66,71 @@ class LLMError(Exception):
         return LLMError(msg, "server", True)
 
 
+@dataclass
+class LLMRequest:
+    """Typed request envelope (preferred API). `request()` wraps `chat()`;
+    all legacy callers may keep using `chat()` directly — same semantics."""
+    name: str = "local"                     # "local" | "cloud" | raw model ref
+    messages: list = field(default_factory=list)
+    tools: list | None = None
+    max_tokens: int | None = None           # override the model's configured value
+    temperature: float | None = None        # override (ignored for Gemini 3+)
+    timeout: float | None = None            # override (seconds)
+    max_retries: int = 2
+
+
+@dataclass
+class LLMResponse:
+    """Typed response envelope mirroring the `chat()` dict contract."""
+    content: str | None
+    tool_calls: list = field(default_factory=list)
+    usage: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {"content": self.content, "tool_calls": self.tool_calls,
+                "usage": self.usage}
+
+
 class LLMClient:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         if not HAS_LITELLM:
             log.warning("litellm not installed — using native Ollama HTTP (local models only). `pip install litellm` for cloud.")
 
+    # ------------------------------------------------------- typed interface
+    def request(self, req: LLMRequest, on_tool_call=None) -> LLMResponse:
+        d = self.chat(req.name, req.messages, tools=req.tools,
+                      max_retries=req.max_retries, on_tool_call=on_tool_call,
+                      max_tokens=req.max_tokens, temperature=req.temperature,
+                      timeout=req.timeout)
+        return LLMResponse(content=d.get("content"), tool_calls=d.get("tool_calls") or [],
+                           usage=d.get("usage") or {})
+
     # ------------------------------------------------------------------ chat
     def chat(self, name: str, messages: list[dict], tools: list | None = None,
-             max_retries: int = 2, on_tool_call=None) -> dict:
+             max_retries: int = 2, on_tool_call=None, *,
+             max_tokens: int | None = None, temperature: float | None = None,
+             timeout: float | None = None) -> dict:
+        """One LLM completion. Returns the normalized dict:
+        {content: str|None, tool_calls: [{name, arguments(dict)}], usage: {prompt, completion}}
+
+        Per-call overrides (max_tokens / temperature / timeout) take precedence
+        over the model's configured values — commands like /plan and /draft use
+        them for short, focused calls. Gemini 3+ always omits sampling params
+        (Google deprecates them; temp<1.0 degrades reasoning there).
+        """
         info = self.cfg.get_llm(name)
         model = self._model_ref(info)
         kwargs = dict(
             model=model,
             messages=self._norm_messages(messages),
-            max_tokens=info["max_tokens"],
-            timeout=info.get("timeout", 120),
+            max_tokens=int(max_tokens) if max_tokens else info["max_tokens"],
+            timeout=float(timeout) if timeout else info.get("timeout", 120),
         )
         # Gemini 3+ deprecates sampling params (and temp<1.0 degrades reasoning) —
         # omit them so Google's default 1.0 + the system prompt govern the style.
         if not _is_gemini3plus(model):
-            kwargs["temperature"] = info["temperature"]
+            kwargs["temperature"] = float(temperature) if temperature is not None else info["temperature"]
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
@@ -105,7 +150,8 @@ class LLMClient:
                     return self._norm_litellm(resp, on_tool_call)
                 if info["cloud"]:
                     raise LLMError("cloud requested but litellm not installed", "server", False)
-                return self._native_ollama(info, messages, tools, on_tool_call)
+                return self._native_ollama(info, messages, tools, on_tool_call,
+                                           max_tokens, temperature, timeout)
             except LLMError as e:
                 last_err = e
                 if not e.retryable or attempt >= max_retries:
@@ -189,7 +235,9 @@ class LLMClient:
             "usage": {"prompt": getattr(usage, "prompt_tokens", 0), "completion": getattr(usage, "completion_tokens", 0)},
         }
 
-    def _native_ollama(self, info: dict, messages: list[dict], tools: list | None, on_tool_call) -> dict:
+    def _native_ollama(self, info: dict, messages: list[dict], tools: list | None, on_tool_call,
+                       max_tokens: int | None = None, temperature: float | None = None,
+                       timeout: float | None = None) -> dict:
         payload = {
             "model": info["name"],
             "messages": self._norm_messages(messages),
@@ -197,14 +245,16 @@ class LLMClient:
             # num_ctx is configurable (cfg.ollama.num_ctx, default 8192). A big
             # ctx builds a large KV cache; on a 4 GB card a 4B model wants ~4096
             # to stay fully on-GPU (no CPU offload) and give a fast first token.
-            "options": {"num_ctx": int(info.get("num_ctx", 8192)), "num_predict": info["max_tokens"],
-                        "temperature": info["temperature"]},
+            "options": {"num_ctx": int(info.get("num_ctx", 8192)),
+                        "num_predict": int(max_tokens) if max_tokens else info["max_tokens"],
+                        "temperature": float(temperature) if temperature is not None else info["temperature"]},
         }
         if self.cfg.ollama.keep_alive:
             payload["keep_alive"] = self.cfg.ollama.keep_alive  # unload after last use
         if tools:
             payload["tools"] = tools
-        r = httpx.post(f"{info['base_url']}/api/chat", json=payload, timeout=info.get("timeout", 300))
+        r = httpx.post(f"{info['base_url']}/api/chat", json=payload,
+                       timeout=float(timeout) if timeout else info.get("timeout", 300))
         r.raise_for_status()
         data = r.json()
         m = data.get("message", {})

@@ -24,10 +24,39 @@ class Context:
     privacy_on: bool = True        # redact PII on cloud-bound payloads
     rag_on: bool = True            # auto memory-context on dangling references
     episodes_on: bool = True       # record episodes for the data pipeline
+    kernel: object = None          # Phase 2: AgentKernel instance (set at launch;
+                                   # commands use ctx.kernel.direct for LLM calls)
+    capability_gate: object = None # Phase 3: CapabilityGate — checked BEFORE tool
+                                   # execution (set by the kernel; legacy direct
+                                   # run_agent paths without a kernel skip it)
+    current_task_id: str = ""      # Phase 3: kernel task id for task-scoped grants
 
     def __post_init__(self):
         if self.workspace is None:
             self.workspace = self.cfg.workspace
+
+
+def create_context(cfg: Config, name: str = "BEE",
+                   model_override: str | None = None,
+                   guard_mode: str | None = None,
+                   client: object | None = None) -> "Context":
+    """Single application-context factory (Phase 1: replaces the 7+ duplicated
+    bootstrap sites in cli / webapp / livekit).
+
+    - attaches the LLM client (or an injected stand-in for tests)
+    - applies the persisted engine choice unless an explicit override is given
+    - applies the guard mode (config default, or e.g. 'unattended' for the
+      LiveKit worker — passed EXPLICITLY, never by mutating the shared config)
+    """
+    from .client import LLMClient
+    from . import engines
+    ctx = Context(cfg, workspace=cfg.workspace, name=name)
+    ctx.client = client if client is not None else LLMClient(cfg)
+    ctx.guard_mode = guard_mode if guard_mode is not None else cfg.guard.mode
+    if model_override is None:
+        model_override = engines.override_for(engines.load_engine())
+    ctx.model_override = model_override
+    return ctx
 
 
 def _read(p: Path, limit: int = 4000) -> str:

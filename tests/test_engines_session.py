@@ -91,23 +91,32 @@ def test_explicit_prefix_beats_session_override(ctx):
 def test_engine_endpoints_persist_and_apply(tmp_path, monkeypatch):
     monkeypatch.setattr(engines, "settings_file", lambda: tmp_path / "settings.json")
     import bee.webapp as w
-    fake_ctx = types.SimpleNamespace(model_override=None)
-    monkeypatch.setattr(w, "CTX", fake_ctx)
+    # Phase 1: /engine POST requires the web bearer token — fix it via env.
+    monkeypatch.setenv("BEE_WEB_TOKEN", "test-token-engines")
+    w.reset_token_for_tests()
+    monkeypatch.setattr(w, "CTX", types.SimpleNamespace(model_override=None))
     from fastapi.testclient import TestClient
     client = TestClient(w.app)
+    H = {"Authorization": "Bearer test-token-engines"}
 
-    j = client.get("/engine").json()
+    j = client.get("/engine").json()  # read stays open
     assert j["current"] == "hybrid"
     assert {e["name"] for e in j["engines"]} == {"hybrid", "local", "ollama-cloud", "api-cloud"}
 
+    # unauthenticated stateful calls are rejected
     r = client.post("/engine", json={"engine": "local"})
+    assert r.status_code == 401
+    assert client.get("/face/state").status_code == 401
+
+    fake_ctx = w.CTX
+    r = client.post("/engine", json={"engine": "local"}, headers=H)
     assert r.status_code == 200 and r.json()["ok"]
     assert fake_ctx.model_override == "local"
     assert engines.load_engine() == "local"
 
-    r = client.post("/engine", json={"engine": "does-not-exist"})
+    r = client.post("/engine", json={"engine": "does-not-exist"}, headers=H)
     assert r.status_code == 400
 
-    r = client.post("/engine", json={"engine": "hybrid"})
+    r = client.post("/engine", json={"engine": "hybrid"}, headers=H)
     assert r.json()["override"] is None
     assert fake_ctx.model_override is None

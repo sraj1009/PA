@@ -53,12 +53,23 @@ def consolidate(ctx, keep_days: int = KEEP_DAYS) -> dict:
         lt = paths.LONGTERM_MD
         cur = lt.read_text(encoding="utf-8") if lt.exists() else "# Long-term memory\n"
         lt.write_text(cur.rstrip() + "\n\n" + "\n".join(f"- {b}" for b in bullets) + "\n", encoding="utf-8")
+    # Archive (NOT delete): a bad summary must never destroy the originals.
+    # Archived diaries stay under memory/diary/archive/ for inspection/restore.
+    arch = paths.DIARY_DIR / "archive"
+    moved = 0
     for f in old:
         try:
-            f.unlink()
+            arch.mkdir(parents=True, exist_ok=True)
+            dest = arch / f.name
+            n = 1
+            while dest.exists():
+                dest = arch / f"{f.stem}-{n}.md"
+                n += 1
+            f.replace(dest)  # atomic move
+            moved += 1
         except Exception as e:
-            log.warning("could not prune %s: %s", f, e)
-    return {"pruned": len(old), "added": len(bullets)}
+            log.warning("could not archive %s: %s", f, e)
+    return {"pruned": moved, "added": len(bullets), "archived_to": str(arch)}
 
 
 def rebuild_vectors(ctx) -> dict:
@@ -93,16 +104,10 @@ def maybe_train_router(ctx) -> dict:
             return {"skipped": f"episodes {len(rows)} < min {cfg.router.ml_min_episodes}"}
         import contextlib
         import io
-        import sys as _sys
         from .pipeline import train_router
         buf = io.StringIO()
-        _old_argv = _sys.argv
-        _sys.argv = _sys.argv[:1] + ["--min", "10"]
-        try:
-            with contextlib.redirect_stdout(buf):
-                train_router.main()
-        finally:
-            _sys.argv = _old_argv
+        with contextlib.redirect_stdout(buf):
+            train_router.main(min_samples=10)  # explicit arg — no sys.argv mutation
         s2 = mlrouter.summarize()
         if s2.get("trained"):
             return {"trained": True, "n_train": s2["n_train"], "cv_acc": s2.get("cv_acc")}

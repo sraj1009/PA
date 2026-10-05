@@ -85,14 +85,34 @@ def make_approver(mode: str = "cli"):
     return cli_approver
 
 
-def check(tool: str, args: dict, enabled: bool = True, mode: str = "cli") -> tuple[bool, str, str]:
-    """Full gate. Returns (proceed, action, reason). ask → consults the approver."""
+def check(tool: str, args: dict, enabled: bool = True, mode: str = "cli",
+          approver=None) -> tuple[bool, str, str]:
+    """Full gate. Returns (proceed, action, reason). ask → consults the approver.
+
+    Layers: (1) the shell regex table above (classify), (2) for execution
+    tools the AST-based risk classifier (bee.security.risk) which catches
+    Python payloads the shell regexes cannot see (shutil.rmtree, os.remove,
+    Path.unlink, subprocess, ...). The strictest layer wins. `classify`
+    itself stays pure-regex — it is pinned by the verify suite.
+
+    Phase 2: `approver` — optional (tool, args, reason) -> bool injected by
+    the kernel (so WAITING_FOR_PERMISSION is a real, observable state). When
+    None, the mode's built-in approver is used (back-compat).
+    """
     if not enabled:
         return True, "allow", ""
     action, reason = classify(tool, args)
+    if action == "allow" and tool in EXEC_TOOLS:
+        from .security import risk as _risk
+        d = _risk.classify_risk(tool, args)
+        if d.action == "deny":
+            action, reason = "deny", d.reason
+        elif d.action == "ask":
+            action, reason = "ask", d.reason
     if action == "allow":
         return True, "allow", ""
     if action == "deny":
         return False, "deny", reason
-    ok = make_approver(mode)(tool, args, reason)
+    ask = approver if approver is not None else make_approver(mode)
+    ok = ask(tool, args, reason)
     return bool(ok), "ask" if ok else "deny", reason

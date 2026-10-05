@@ -7,21 +7,12 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import dataclass
+from .base import T
 
 from .. import paths
 
-
-@dataclass
-class T:
-    name: str
-    description: str
-    parameters: dict
-    handler: object
-
 _sched = None
 _lock = threading.Lock()
-
 
 def _ensure():
     global _sched
@@ -46,7 +37,6 @@ def _ensure():
             _sched = s
         return _sched
 
-
 def _noop(note=None):
     """Placeholder for restored jobs; live jobs get real callables when added this process."""
     try:
@@ -56,7 +46,6 @@ def _noop(note=None):
     except Exception:
         pass
 
-
 def _persist():
     if _sched is None:
         return
@@ -64,7 +53,6 @@ def _persist():
     for j in _sched.get_jobs():
         jobs.append({"id": j.id, "cron": getattr(j.trigger, "str", lambda: str(j.trigger))(), "note": j.name})
     paths.JOBS_JSON.write_text(json.dumps(jobs, indent=1), encoding="utf-8")
-
 
 def scheduler_tools():
     def h_sched(ctx, action: str, cron: str = "", note: str = ""):

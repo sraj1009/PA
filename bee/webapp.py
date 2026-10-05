@@ -1,19 +1,28 @@
-"""BEE web UI — FastAPI: chat (SSE), voice (upload -> STT -> answer -> TTS mp3), skills list.
+"""BEE web UI — FastAPI: chat (SSE), voice (upload -> STT -> answer -> JSON), skills list.
+
+Security (Phase 1): every stateful endpoint (chat, voice, engine set, livekit
+token mint, face state) requires a bearer token. The token is env-fixed
+(BEE_WEB_TOKEN) or auto-generated once per server start (printed in the
+console + saved to temp/web_token.txt, which is git-ignored). Static pages
+and read-only status endpoints stay open.
 
 Run:  python -m bee.cli web          (or: uvicorn bee.webapp:app --port 8787)
 """
 from __future__ import annotations
 
+import hmac
 import json
 import logging
+import os
+import secrets
 import tempfile
+import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, WebSocket
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from . import paths
-from .agent.client import LLMClient
 from .agent.context import Context
 from .agent.loop import run_agent
 
@@ -23,14 +32,65 @@ app = FastAPI(title="BEE", version="1.0")
 
 CTX: Context | None = None
 
+# ------------------------------------------------------------------- auth
+_TOKEN: str | None = None
+_TOKEN_FILE = paths.PROJECT_ROOT / "temp" / "web_token.txt"
+
+
+def _resolve_token() -> str:
+    """Bearer token for the web UI. Precedence:
+    1. BEE_WEB_TOKEN env (operator-fixed, e.g. in .env)
+    2. previous start's token file (temp/web_token.txt)
+    3. freshly generated (saved to that file, printed once by the CLI)
+    This is a LOCAL session credential for a loopback server — not a cloud
+    secret — but it still gates the full agent, so it is never logged."""
+    global _TOKEN
+    if _TOKEN:
+        return _TOKEN
+    env = (os.environ.get("BEE_WEB_TOKEN") or "").strip()
+    if env:
+        _TOKEN = env
+        return _TOKEN
+    if _TOKEN_FILE.exists():
+        t = _TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if t:
+            _TOKEN = t
+            return _TOKEN
+    _TOKEN = secrets.token_hex(16)
+    try:
+        _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _TOKEN_FILE.write_text(_TOKEN + "\n", encoding="utf-8")
+    except Exception:
+        pass
+    return _TOKEN
+
+
+def reset_token_for_tests() -> None:
+    global _TOKEN
+    _TOKEN = None
+
+
+def require_auth(request: Request) -> None:
+    """401 unless Authorization: Bearer <token> (or ?token=) matches."""
+    tok = _resolve_token()
+    auth = request.headers.get("authorization", "")
+    provided = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not provided:
+        provided = request.query_params.get("token", "")
+    if not provided or not hmac.compare_digest(provided, tok):
+        raise HTTPException(
+            status_code=401,
+            detail="unauthorized — send Authorization: Bearer <token> "
+                   "(token: server console / temp/web_token.txt / BEE_WEB_TOKEN)")
+
 
 def get_ctx() -> Context:
     global CTX
     if CTX is None:
         from .config import load_config
+        from .agent.context import create_context
         cfg = load_config()
-        CTX = Context(cfg, workspace=cfg.workspace, name="BEE")
-        CTX.client = LLMClient(cfg)
+        CTX = create_context(cfg)
         try:
             from . import scheduler
             scheduler.start_scheduler(CTX, cfg)
@@ -66,7 +126,8 @@ def _default_engine_override() -> str | None:
 
 
 @app.post("/chat")
-async def chat(body: dict):
+async def chat(body: dict, request: Request):
+    require_auth(request)
     task = str(body.get("task", "")).strip()
     if not task:
         return JSONResponse({"error": "empty task"}, status_code=400)
@@ -78,15 +139,23 @@ async def chat(body: dict):
 
     def gen():
         ctx = get_ctx()
+        # Phase 2: web tasks run through the kernel too (state, verification,
+        # receipts, session continuity). The web UI is unattended: 'ask'
+        # decisions AUTO-DENY (fail closed) instead of blocking on input().
+        if ctx.kernel is None:
+            from .kernel import AgentKernel
+            ctx.kernel = AgentKernel(ctx, approver=lambda tool, args, reason: False)
         yield "data: " + json.dumps({"type": "start"}) + "\n\n"
         try:
-            result = run_agent(ctx, task, on_event=on_event, model=model)
+            result = ctx.kernel.run(task, session_id=str(body.get("session") or "web"),
+                                    on_event=on_event, model=model)
             for chunk in buf:
                 yield chunk
             yield "data: " + json.dumps({"type": "result", "ok": result.ok,
                                          "model": result.model, "escalated": result.escalated,
                                          "iterations": result.iterations,
                                          "tool_calls": result.tool_calls,
+                                         "verified": result.verification.verdict,
                                          "output": result.output, "error": result.error},
                                         ensure_ascii=False) + "\n\n"
         except Exception as e:
@@ -97,15 +166,16 @@ async def chat(body: dict):
 
 
 @app.post("/voice")
-async def voice(file: UploadFile = File(...)):
-    """Upload audio (webm/wav/mp3) -> transcribe -> run agent -> return text (+tts mp3)."""
+async def voice(request: Request, file: UploadFile = File(...)):
+    """Upload audio (webm/wav/mp3) -> transcribe -> run agent -> return JSON (transcript + answer text)."""
+    require_auth(request)
     if not _voice_available():
         return JSONResponse({"error": "voice STT not installed (pip install -r requirements-voice.txt)"},
                             status_code=501)
     from .voice import mic, transcribe
     ctx = get_ctx()
     suffix = Path(file.filename or "audio.webm").suffix or ".webm"
-    tmp = Path(tempfile.gettempdir()) / f"bee_upload{suffix}"
+    tmp = Path(tempfile.gettempdir()) / f"bee_upload_{uuid.uuid4().hex}{suffix}"
     tmp.write_bytes(await file.read())
     try:
         if suffix in (".wav",):
@@ -147,7 +217,8 @@ def engine_get():
 
 
 @app.post("/engine")
-async def engine_set(body: dict):
+async def engine_set(body: dict, request: Request):
+    require_auth(request)
     from .agent import engines
     name = str(body.get("engine", "")).strip()
     if name not in engines.ENGINES:
@@ -188,8 +259,9 @@ def livekit_status():
 
 
 @app.post("/livekit/token")
-def livekit_token(body: dict):
+def livekit_token(body: dict, request: Request):
     """Mint a 2h participant JWT for the given room (Web UI join)."""
+    require_auth(request)
     ctx = get_ctx()
     room = str(body.get("room", "")).strip()
     if not room:
@@ -217,7 +289,8 @@ def face_page():
 
 
 @app.get("/face/state")
-def face_state():
+def face_state(request: Request):
+    require_auth(request)
     from .livekit.state import get_state
     return get_state()
 

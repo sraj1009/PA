@@ -83,17 +83,14 @@ def _cmd_help(p: _Print):
 
 
 def _repl(cfg):
-    from .agent.client import LLMClient
-    from .agent.context import Context
+    from .agent.context import create_context
     from .agent.loop import run_agent
     from .agent import reflection
     from .voice import loop as voice_loop
     p = _Print()
-    ctx = Context(cfg, workspace=cfg.workspace, name="BEE")
-    ctx.client = LLMClient(cfg)
-    model_override = None
+    ctx = create_context(cfg)
+    model_override = ctx.model_override
     last_task = None
-    ctx.guard_mode = cfg.guard.mode
 
     # Ctrl-C: cancels a running task; at the prompt it exits (as before)
     import signal
@@ -101,6 +98,13 @@ def _repl(cfg):
     cancel = threading.Event()
     ctx.cancel_event = cancel
     running = {"flag": False}
+
+    # Phase 2: one agent kernel owns task state, permissions, verification,
+    # receipts and session continuity for this launch (repl/voice/web share
+    # the same runtime).
+    from .kernel import AgentKernel
+    kernel = AgentKernel(ctx)
+    ctx.kernel = kernel
 
     def _sigint(signum, frame):
         if running["flag"]:
@@ -160,6 +164,20 @@ def _repl(cfg):
             break
         if not line:
             continue
+        # Phase 2: first-class cancellation — 'stop' cancels the active task
+        if line.lower().strip(" .!?") in {"stop", "cancel", "abort", "stop it",
+                                          "never mind", "nevermind", "forget it",
+                                          "drop it", "halt"}:
+            if running["flag"]:
+                kernel.cancel()
+                p.info("  stopping — the task will finish its current step safely")
+            elif kernel.last_task is not None:
+                lt = kernel.last_task
+                p.info(f"  nothing running — last task {lt.id} ended {lt.state.value}"
+                       + (f": {(lt.output or lt.error)[:120]}" if (lt.output or lt.error) else ""))
+            else:
+                p.info("  nothing running.")
+            continue
         if line.startswith("/"):
             parts = line.split(maxsplit=1)
             cmd = parts[0].lower()
@@ -190,9 +208,10 @@ def _repl(cfg):
             elif cmd == "/engine":
                 from .agent import engines
                 if not arg:
+                    labels = engines.engine_labels(cfg)
                     for e, meta in engines.ENGINES.items():
                         mark = "←" if e == engines.load_engine() else " "
-                        p.info(f"  {mark} [{meta['n']}] {meta['label']}")
+                        p.info(f"  {mark} [{meta['n']}] {labels[e]}")
                     p.info("  set with: /engine hybrid | local | ollama-cloud | api-cloud  (persisted)")
                 elif arg in engines.ENGINES:
                     engines.save_engine(arg)
@@ -316,8 +335,10 @@ def _repl(cfg):
         cancel.clear()
         running["flag"] = True
         try:
-            result = run_agent(ctx, line, model=model_override,
-                               on_event=lambda ev: _on_event(p, ev))
+            # Phase 2: tasks run through the kernel (state machine,
+            # permissions, verification, receipts, session continuity).
+            result = kernel.run(line, session_id="repl", model=model_override,
+                                on_event=lambda ev: _on_event(p, ev))
         except KeyboardInterrupt:
             cancel.set()
             result = None
@@ -379,16 +400,18 @@ def _on_event(p: _Print, ev: dict):
 def _web(cfg, host: str, port: int):
     import uvicorn
     from .webapp import app
-    from .agent.client import LLMClient
-    from .agent.context import Context
+    from .agent.context import create_context
     from . import webapp
-    ctx = Context(cfg, workspace=cfg.workspace, name="BEE")
-    ctx.client = LLMClient(cfg)
+    ctx = create_context(cfg)
     from .agent import engines
     engine = engines.ask_engine()
     ctx.model_override = engines.override_for(engine)
     print(f"engine: {engine} (change live from the dropdown in the browser)")
     webapp.CTX = ctx
+    # Print the web auth token ONCE at startup (operator reads it from the
+    # console or temp/web_token.txt; it is never logged afterwards).
+    print(f"\n  web auth token: {webapp._resolve_token()}")
+    print(f"  (saved to temp/web_token.txt — git-ignored; override with BEE_WEB_TOKEN in .env)\n")
     try:
         from . import scheduler
         scheduler.start_scheduler(ctx, cfg)
@@ -566,12 +589,10 @@ def main(argv=None):
     if args.mode == "repl":
         _repl(cfg)
     elif args.mode == "voice":
-        from .agent.client import LLMClient
-        from .agent.context import Context
+        from .agent.context import create_context
         from .agent import engines
         from .voice import loop as voice_loop
-        ctx = Context(cfg, workspace=cfg.workspace, name="BEE")
-        ctx.client = LLMClient(cfg)
+        ctx = create_context(cfg)
         engine = engines.ask_engine()
         ctx.model_override = engines.override_for(engine)
         print(f"engine: {engine} (asked once, persisted — change in REPL with /engine)")
@@ -581,19 +602,15 @@ def main(argv=None):
     elif args.mode == "full":
         _full(cfg, args.host, args.port, args.room or (args.rest[0] if args.rest else None))
     elif args.mode == "plan":
-        from .agent.client import LLMClient
-        from .agent.context import Context
+        from .agent.context import create_context
         from . import commands
         sub = " ".join(args.rest) or "daily"
-        ctx = Context(cfg, workspace=cfg.workspace, name="BEE")
-        ctx.client = LLMClient(cfg)
+        ctx = create_context(cfg)
         print(commands.run(ctx, f"plan {sub}"))
     elif args.mode == "clap":
-        from .agent.client import LLMClient
-        from .agent.context import Context
+        from .agent.context import create_context
         from .voice import clap as clap_mode
-        ctx = Context(cfg, workspace=cfg.workspace, name="BEE")
-        ctx.client = LLMClient(cfg)
+        ctx = create_context(cfg)
         # engine choice only matters when the clap records a spoken task
         if (cfg.clap.action or "welcome").lower() == "voice":
             from .agent import engines
@@ -609,18 +626,14 @@ def main(argv=None):
         from .voice import speak
         speak.speak(" ".join(args.rest) or "Hello, I am BEE.", cfg)
     elif args.mode == "consolidate":
-        from .agent.client import LLMClient
-        from .agent.context import Context
+        from .agent.context import create_context
         from . import scheduler
-        ctx = Context(cfg, workspace=cfg.workspace, name="BEE")
-        ctx.client = LLMClient(cfg)
+        ctx = create_context(cfg)
         print(json.dumps(scheduler.run_nightly(ctx), indent=1, ensure_ascii=False))
     elif args.mode == "eval":
-        from .agent.client import LLMClient
-        from .agent.context import Context
+        from .agent.context import create_context
         from .evals import runner
-        ctx = Context(cfg, workspace=cfg.workspace, name="BEE")
-        ctx.client = LLMClient(cfg)
+        ctx = create_context(cfg)
         runner.run_suite(ctx)
     return 0
 

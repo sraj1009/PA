@@ -63,3 +63,57 @@ def test_retry_without_gpus_on_runtime_nvidia_error(monkeypatch):
     assert len(calls) == 2
     assert "--gpus" in calls[0] and "--gpus" not in calls[1]
     assert "ok" in str(out)
+
+
+def test_hardening_flags_on_default_config(monkeypatch):
+    """Phase 1: untrusted code must run with the full container boundary."""
+    monkeypatch.setattr(sb, "_nvidia_runtime", lambda: False)
+    calls = []
+    _track_run_calls(monkeypatch, calls)
+    sb.sandbox_tools()[0].handler(_ctx(gpu=False), command="echo hi")
+    assert calls, "docker run was not invoked"
+    a = calls[0]
+
+    def after(flag):
+        return a.index(flag) + 1 if flag in a else -1
+
+    # network isolation
+    assert a[after("--network")] == "none"
+    # resource caps
+    assert a[after("--memory")] == "2g"
+    assert a[after("--memory-swap")] == "2g"
+    assert a[after("--cpus")] == "2"
+    assert a[after("--pids-limit")] == "128"
+    # capability reduction
+    assert a[after("--cap-drop")] == "ALL"
+    assert a[after("--security-opt")] == "no-new-privileges"
+    # read-only root FS + bounded /tmp
+    assert "--read-only" in a
+    tmpfs = a[after("--tmpfs")]
+    assert tmpfs.startswith("/tmp:") and "noexec" in tmpfs and "size=256m" in tmpfs
+    # non-root execution
+    assert a[after("--user")] == "1000:1000"
+    # the explicit workspace grant is still present
+    assert "-v" in a and "-w" in a and a[after("-w")] == "/workspace"
+    # host .env is masked (read-only empty file bound over it) so untrusted
+    # code cannot read credentials
+    env_masks = [a[i + 1] for i, x in enumerate(a)
+                 if x == "-v" and a[i + 1].endswith(":/workspace/.env:ro")]
+    assert env_masks, "host .env is not masked in the sandbox"
+
+
+def test_hardening_can_be_relaxed_per_config(monkeypatch):
+    """Operator knobs: disable read-only + run as image default user (old root
+    image fallback). Everything else stays hardened."""
+    monkeypatch.setattr(sb, "_nvidia_runtime", lambda: False)
+    cfg = load_config()
+    cfg.sandbox.read_only_root = False
+    cfg.sandbox.user = ""
+    calls = []
+    _track_run_calls(monkeypatch, calls)
+    sb.sandbox_tools()[0].handler(types.SimpleNamespace(cfg=cfg, workspace=Path("C:/tmp/bee-test-ws")),
+                                  command="echo hi")
+    a = calls[0]
+    assert "--read-only" not in a and "--user" not in a
+    assert a[a.index("--network") + 1] == "none"   # network stays off
+    assert "--cap-drop" in a                        # caps stay dropped

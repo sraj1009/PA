@@ -449,7 +449,188 @@ Offline-first holds: the assistant remains fully usable (chat + tools + memory
 | Agent end-to-end | `evals/tasks.yaml` (21 tasks) via `bee/evals/` | **10/21 PASS** (latest run 2026-10-05T22:07:30). PASS: math_basic, math_sieve, shell_echo, calculator, web_search_tool, route_det_math, route_det_pct, math_repeat_stable (×3), guard_blocked, cloud_redaction. FAIL (11): file_roundtrip, file_list_ws, dsa_lis, dsa_gcd_lcm, dsa_sort_check, dsa_graph, memory_write, memory_read, plan_complex, verify_calc_pass, rag_gpu_memory — all local-3B "missing substring" quality ceiling, not loop bugs |
 | Model bench | `evals/bench_model.json` | recorded per-model latency/quality snapshot |
 
-## 14. Known-stale artifacts (documented for the record)
+## 14. Agent Kernel (Phase 2 — implemented 2026-10-05)
+
+The feature collection is now one coherent runtime. **`bee/kernel/`** (12
+modules) owns task state, permissions, verification, receipts, cancellation,
+retry and conversation continuity. The LLM only *proposes* (intent, tool
+actions, answers); the kernel *decides* (allowed? executed? succeeded?
+persisted?). The existing `run_agent` loop is the kernel's EXECUTOR — it was
+NOT rewritten; two small backward-compatible hooks were added:
+`run_agent(..., on_ask=approver)` (kernel-injected permission approver) and
+`guard.check(..., approver=...)`.
+
+### 14.1 Object model (`bee/kernel/models.py`, `state.py`)
+
+| Object | Role |
+|---|---|
+| `AgentSession` | persistent conversation state: active task, turns, referenced entities, pending confirmation, recent tool results, last time hint (`memory/sessions/<id>.json`) |
+| `Task` | one user request; id, text, state, plan, observations, receipts, verification, retry_count |
+| `TaskState` | CREATED, UNDERSTANDING, PLANNING, WAITING_FOR_PERMISSION, EXECUTING, VERIFYING, COMPLETED, FAILED, CANCELLED, WAITING_FOR_USER, RETRYING |
+| `Plan` / `Action` | kernel-decided steps (description, tool, risk, capability, permission) |
+| `Observation` | what the kernel SAW per tool call (result text, ok, effect) — never the model's claim |
+| `VerificationResult` | pass / fail / unverified / not_run + checks |
+| `PermissionDecision` | tool, action (allow/ask/deny), granted, reason, risk_level, capabilities |
+| `ExecutionReceipt` | task_id, session_id, timestamp, tool, action, arguments, risk_level, permission, result, verification, duration, error, retry_count |
+| `AgentEvent` | typed event (14 kinds: user_message … memory_written) |
+| `EventBus` | in-process pub/sub; subscriber errors never break the kernel |
+
+**State machine** (`state.py`): explicit transition table; illegal moves
+raise `InvalidTransitionError` (fail closed — e.g. CREATED→COMPLETED,
+anything out of a terminal state). Permission waits are legal mid-execution
+(EXECUTING↔WAITING_FOR_PERMISSION), retries flow VERIFYING→RETRYING→EXECUTING.
+
+### 14.2 Task flow (the lifecycle)
+
+```
+user request
+  → AgentSession (load/persist)                    [session.py]
+  → UNDERSTANDING — follow-up resolution:
+      'stop.' → CANCELLED  ·  'Tomorrow.'/'Actually make it 10 AM.' →
+      merged against the ACTIVE task  ·  unrelated → new
+  → memory context (session context block + in-loop RAG)
+  → PLANNING — kernel builds Plan (execute-step + verify-step)
+  → EXECUTING — run_agent (routing, engines, guard, tools, episodes,
+      telemetry — all pre-existing); the kernel's approver is injected via
+      on_ask, so every 'ask' passes through WAITING_FOR_PERMISSION with a
+      permission event + permission receipt
+  → VERIFYING — deterministic effect checks (file_write→file exists,
+      file_edit→replacement present, mkdir/touch→path exists, calculator→
+      result present) + task-level target probe ("Create a folder called
+      invoices." → invoices/ must exist afterwards); a clean tool return
+      NEVER equals success — uncheckable work is 'unverified', never 'pass'
+  → RETRYING — only on transient/provider/tool/verification failures, never
+      on permission denials, never after a destructive action, bounded
+      (max_attempts=2) with a correction note injected into the retry
+  → receipt (agent-level + per-tool, redacted JSONL memory/receipts.jsonl)
+  → memory update (session save + memory_written event; episodes/diary via
+      the loop as before)
+  → COMPLETED / FAILED / CANCELLED + typed task_* event
+```
+
+### 14.3 What was unified (no second architecture)
+
+- **REPL** (`cli.py`): tasks run through `kernel.run()`; `stop`/`cancel`/
+  … are first-class (cancel the active task or report the last task's
+  terminal state); Ctrl-C still cancels mid-run via the same event.
+- **Web `/chat`**: runs through the kernel with a per-UI session
+  (`body["session"]`, default "web") — the web UI now gets follow-up
+  continuity; 'ask' decisions auto-deny (unattended, fail closed).
+- **Slash commands** (plan/draft/summarize/code/think): LLM work goes
+  through `kernel.direct()` — same client/provider routing, receipts,
+  events; deterministic fallbacks unchanged.
+- **Memory** behind 5 interfaces (`memory_if.py`): Working / Episodic /
+  Semantic / Procedural / Temporal — thin adapters over the EXISTING
+  episodes, RAG/LanceDB, memory.md, skills, diary/scheduler. No redesign.
+- **ToolBus** (`tools_bus.py`): every tool the LLM may use is a registered
+  `ToolDef` (name, description, schema, risk, capability, timeout,
+  cancellation level, untrusted flag) built from `bee.tools` + the security
+  risk profiles. Unknown names raise `UnknownToolError`; non-dict args raise
+  `MalformedArgsError`; arbitrary callables cannot be registered.
+
+### 14.4 What Phase 2 does NOT claim
+
+- LiveKit voice worker still calls `run_agent` directly (latency path;
+  kernel wiring is a small follow-up, not a blocker).
+- Cancellation granularity: between iterations / before each tool call
+  (honest `cancellation` levels per tool); mid-subprocess kill is not
+  implemented.
+- Realtime-voice event streaming and proactive automation consume the new
+  event model in later phases — the model exists, those consumers do not.
+- Verification is deterministic + heuristic (target-name probe); it is not
+  a general intent-understanding layer.
+
+## 15. Capability Security + Structured Memory (Phase 3 — implemented 2026-10-05)
+
+### 15.1 Capability-based authorization (`bee/security/capabilities.py`)
+
+Three layers, checked in this order, each before execution:
+
+```
+CapabilityGate  (is this KIND of action permitted?  — capability policy)
+      ↓ allowed
+guard.check     (is THIS specific command safe?     — regex + AST risk)
+      ↓ allowed
+tool executes   (loop.py dispatch)
+```
+
+- **19 capabilities** with full metadata: identifier, description, risk
+  level **R0…R5** (information-only → financial/security-critical), default
+  policy (`always_allow | ask | task | deny`), confirmation policy
+  (`none | on_ask | always`).
+- **Dangerous defaults are OFF**: `system.control`, `financial.action`,
+  `purchase`, `camera.access` default to **deny**.
+- Tool→capability mapping is central (`capabilities_for`): base caps per
+  tool + argument-based escalation for exec tools (shell `rm`/`del`/`rmtree`
+  → `files.delete`, `shutdown`/`reboot`/`taskkill` → `system.control`,
+  `curl`/`wget` → `network.read`, `python` → `python.execute`, buy/order →
+  `purchase`). Future tools (email_send, purchase, camera_snap, …) are
+  mapped now.
+- **Policies are user-configurable** in `config/capabilities.yaml`
+  (template: `config/capabilities.example.yaml`): per capability
+  `policy: always_allow|ask|task|deny` and `confirm: default|always|never`.
+- **Confirmation semantics** (Part B): reading files / writing drafts = no
+  confirmation; sending email/messages = ask (unless explicitly trusted via
+  `always_allow`+`confirm: never`); deleting files / purchasing / system
+  shutdown = **always confirm** even under `always_allow`, unless the user
+  explicitly sets `confirm: never`.
+- **Task-scoped grants**: a 'yes' grants the capability for the CURRENT
+  task only (`store.grant_for_task` / `end_task`). Grants never carry over
+  to another task, and a `files.write` grant never satisfies
+  `files.delete`/`purchase` — grants are keyed (task, capability).
+- **Enforcement point**: `loop.py` main dispatch — the gate runs BEFORE the
+  handler and BEFORE the guard; a denial produces the same blocked-result
+  flow (audit + episode + 'explain the refusal' behavior). Legacy direct
+  `run_agent` paths without a kernel (eval runner, LiveKit) skip the gate —
+  `ctx.capability_gate` is None there (documented).
+- Unattended kernels (web) get an auto-deny approver → any asking
+  capability fails closed.
+
+### 15.2 Structured memory (`bee/memory/store.py` + kernel integration)
+
+Six conceptual stores, one typed item model:
+
+| Store | Backed by |
+|---|---|
+| WorkingMemory | kernel in-process notes, task-scoped |
+| EpisodicMemory | episodes JSONL (unchanged) |
+| SemanticMemory | RAG/LanceDB + memory.md (unchanged) |
+| ProceduralMemory | skills (unchanged) |
+| TemporalMemory | diary + (scheduling not active yet) |
+| **EntityMemory** (new) | structured store, `type="entity"` (people/projects/devices/apps/locations) |
+| **StructuredMemory** (new, canonical) | `memory/store.json` (git-ignored) |
+
+Every item carries: `type, source, confidence, created_at, updated_at,
+importance, expiry, provenance, key, subject, tags, trusted_policy,
+superseded_by`. Interfaces: **remember / recall / update / forget /
+summarize / expire**.
+
+Governance (enforced in code):
+- `source ∈ {user, tool, web, model_inference}`; confidence floors/caps by
+  source (user ≥0.9, tool 0.8, web ≤0.5, model_inference ≤0.5).
+- A model inference can become a user fact ONLY via an explicit
+  re-statement (`update(..., source="user", asserted_by_user=True)`) —
+  silent promotion raises `PermissionError`.
+- Web-derived content has `trusted_policy=False` forever — and the
+  capability/policy layer **never reads memory**, so external content can
+  never become trusted policy.
+- Content is privacy-redacted on store (secrets cannot persist here).
+- Same-key re-remember **supersedes** the old value (tombstone kept for
+  audit, `superseded_by` linked).
+- Expiry: items with past `expiry` are invisible to recall; `expire()`
+  purges them (+ 14-day-old tombstones).
+- **Nothing is auto-saved** — items appear only via explicit remember.
+
+Kernel UX (deterministic, zero LLM calls, verified against the store):
+- "Remember that my project is called BEE." → `memory.remember` (key
+  `project.name`) + receipt + verification (item must be recallable).
+- "What do you remember about this project?" → source-labeled recall.
+- "Forget that." → forgets the last recalled/remembered item; forgetting
+  nothing is an honest answer, not a failure.
+- Memory commands are parsed BEFORE follow-up resolution so "Forget that."
+  is never merged into a previous task.
+
+## 16. Known-stale artifacts (documented for the record)
 
 - `docs/llm-component.md` — describes the pre-`bee4b` pipeline (stale).
 - `evals/REPORT.md` — regenerated by the verify run; its agent-eval section
