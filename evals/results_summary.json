@@ -1,0 +1,19 @@
+{
+ "ts": "2026-10-05T22:07:30",
+ "n": 21,
+ "ok": 10,
+ "score": "10/21",
+ "failures": [
+  "file_roundtrip",
+  "verify_calc_pass",
+  "file_list_ws",
+  "dsa_lis",
+  "dsa_gcd_lcm",
+  "dsa_sort_check",
+  "dsa_graph",
+  "memory_write",
+  "memory_read",
+  "plan_complex",
+  "rag_gpu_memory"
+ ]
+}

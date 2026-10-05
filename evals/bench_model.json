@@ -1,0 +1,20 @@
+{
+ "ts": 1791127534.5980349,
+ "machine": "RTX 3050 8GB / Windows",
+ "results": {
+  "generation": {
+   "n": 5,
+   "max_tokens": 256,
+   "mean_ms": 56112.8,
+   "p50_ms": 54956.0,
+   "min_ms": 53168.5,
+   "max_ms": 59783.6,
+   "mean_tokens_per_s": 4.6
+  },
+  "embedding": {
+   "n": 5,
+   "mean_ms": 757.9,
+   "p50_ms": 499.1
+  }
+ }
+}

@@ -1,0 +1,43 @@
+# ============================================================
+#  BEE — version control ignore list
+# ============================================================
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.hf/
+
+# --- Secrets — NEVER commit (Phase 1 security) ---
+.env
+.env.*
+!.env.example
+
+# --- User data (memory, personalization) ---
+memory/diary/
+memory/lessons/
+memory/vectors/
+memory/profile.md
+memory/longterm.md
+
+# --- Generated / training data (can contain redacted-but-sensitive traces) ---
+train/
+metrics/
+temp/
+audit.jsonl
+
+# --- Evals / jobs runtime artifacts ---
+evals/results.jsonl
+evals/dsa_bench.json
+evals/verify_results.json
+jobs.json
+jobs.log
+
+# --- Model weights (large; live on this machine, not in VCS) ---
+models/faster-whisper-base.en/
+
+# --- OS / logs ---
+.DS_Store
+*.log

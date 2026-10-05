@@ -1,0 +1,23 @@
+# BEE core
+pyyaml>=6.0
+httpx>=0.27
+pydantic>=2.0
+litellm>=1.40          # unified local+cloud LLM gateway
+lancedb>=0.5           # embedded vector DB (no server)
+apscheduler>=3.10      # nightly consolidation / cron jobs
+fastapi>=0.110
+uvicorn>=0.29
+rich>=13.7
+
+# DSA / evals (CPU-only, small)
+pytest>=8.0
+
+# Hybrid brain: learned router artifact
+scikit-learn>=1.3
+joblib>=1.3
+scipy>=1.10
+
+# NOTE: torch/sklearn/polars etc. live in the DOCKER sandbox image (sandbox/Dockerfile),
+# not in the host env — keeps the host light and the GPU isolated.
+# For host-side code_run ML (optional): pip install torch --index-url https://download.pytorch.org/whl/cu124
+python-multipart>=0.0.9

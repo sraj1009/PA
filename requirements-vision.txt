@@ -1,0 +1,3 @@
+# Optional vision extras (Super JARVIS port: "take a photo" + face detection).
+# Not required for core BEE — the fast path degrades gracefully when absent.
+opencv-python>=4.9

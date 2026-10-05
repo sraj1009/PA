@@ -1,0 +1,17 @@
+# BEE LLM training component (QLoRA) — install on the host or inside the sandbox
+#   pip install -r training/requirements.txt
+#
+# GPU (3050 8GB) — CUDA wheels:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# CPU-only (validation, tiny experiments):
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+torch>=2.4
+transformers>=4.47
+peft>=0.12
+bitsandbytes>=0.44.0
+datasets>=3.0
+accelerate>=1.0
+sentencepiece
+# optional experiment tracking:
+# mlflow

@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BEE — Face</title>
+<style>
+  :root { --bg:#05070a; --lime:#D7FF00; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); overflow:hidden;
+              font:14px/1.5 "Segoe UI",system-ui,sans-serif; }
+  canvas { position:fixed; inset:0; width:100vw; height:100vh; display:block; }
+  #hud { position:fixed; left:0; right:0; bottom:0; padding:18px 26px; color:#cfd8e3;
+         text-align:center; pointer-events:none; }
+  #state { font-size:13px; letter-spacing:3px; text-transform:uppercase; color:var(--lime);
+           margin-bottom:6px; }
+  #line { font-size:16px; color:#e8eef4; opacity:.9; }
+  #hint { position:fixed; top:14px; right:18px; color:#44506080; font-size:11px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><div id="state">idle</div><div id="line">BEE is standing by.</div></div>
+<div id="hint">F = fullscreen · Esc = exit</div>
+<script>
+const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+let W, H; const fit = () => { W = cv.width = innerWidth; H = cv.height = innerHeight; };
+addEventListener("resize", fit); fit();
+addEventListener("keydown", e => {
+  if (e.key === "f" || e.key === "F")
+    document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+});
+
+let state = "idle", user = "", reply = "", t = 0;
+const COLORS = { idle:"#3d4a55", listening:"#6ea8ff", thinking:"#ffb020",
+                 speaking:"#D7FF00", error:"#ff5566" };
+
+async function poll() {
+  try {
+    const s = await (await fetch("/face/state")).json();
+    state = s.state || "idle";
+    user = s.last_user || ""; reply = s.last_reply || "";
+    const stale = s.age_s != null && s.age_s > 45;
+    document.getElementById("state").textContent =
+      stale && state !== "idle" ? "idle (agent offline)" : state;
+    document.getElementById("line").textContent =
+      user ? "“" + user + "”" : (reply ? "“" + reply + "”" : "BEE is standing by.");
+  } catch(e) {}
+  setTimeout(poll, 900);
+}
+poll();
+
+// ---- render: a cinematic orb with orbital rings --------------------------
+function drawOrb(cx, cy, R) {
+  const col = COLORS[state] || COLORS.idle;
+  let pulse = 0;
+  if (state === "idle")            pulse = Math.sin(t * 0.8) * 0.05;
+  if (state === "listening")       pulse = Math.sin(t * 2.2) * 0.10;
+  if (state === "thinking")        pulse = Math.sin(t * 6.0) * 0.16;
+  if (state === "speaking")        pulse = (Math.sin(t * 9.0) + Math.sin(t * 13.7)) * 0.08;
+  if (state === "error")           pulse = Math.sin(t * 14) * 0.25;
+  const r = R * (1 + pulse);
+
+  // glow
+  const g = ctx.createRadialGradient(cx, cy, r * .2, cx, cy, r * 2.4);
+  g.addColorStop(0, col + "cc"); g.addColorStop(1, col + "00");
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, r * 2.4, 0, 7); ctx.fill();
+
+  // core
+  ctx.fillStyle = col; ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.fill();
+  ctx.fillStyle = "#05070a"; ctx.beginPath(); ctx.arc(cx, cy, r * .55, 0, 7); ctx.fill();
+  ctx.fillStyle = col; ctx.globalAlpha = .85;
+  ctx.beginPath(); ctx.arc(cx, cy, r * .34 * (1 + pulse * .6), 0, 7); ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+function ring(cx, cy, R, tilt, speed, n, col, rad) {
+  for (let i = 0; i < n; i++) {
+    const a = t * speed + i * Math.PI * 2 / n;
+    const x = cx + Math.cos(a) * R * 1.9;
+    const y = cy + Math.sin(a) * R * 1.9 * tilt;
+    const front = Math.sin(a) > 0;              // depth illusion
+    ctx.globalAlpha = front ? 1 : .25;
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(x, y, rad * (front ? 1 : .6), 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function bars(cx, cy, R) {                      // speaking waveform
+  const n = 44;
+  for (let i = 0; i < n; i++) {
+    const a = i * Math.PI * 2 / n;
+    const amp = (Math.sin(t * 10 + i * .7) * .5 + .5) * R * .45 + R * .12;
+    const x1 = cx + Math.cos(a) * R * 1.25, y1 = cy + Math.sin(a) * R * 1.25;
+    const x2 = cx + Math.cos(a) * (R * 1.25 + amp), y2 = cy + Math.sin(a) * (R * 1.25 + amp);
+    ctx.strokeStyle = "#D7FF00"; ctx.globalAlpha = .8; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function frame() {
+  t += 1 / 60;
+  // cinematic backdrop: soft vignette + drifting grid dots
+  ctx.fillStyle = "#05070a"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#11161c";
+  for (let x = (t * 12) % 90; x < W; x += 90)
+    for (let y = (t * 6) % 90; y < H; y += 90)
+      ctx.fillRect(x, y, 2, 2);
+
+  const cx = W / 2, cy = H / 2, R = Math.min(W, H) * .11;
+  if (state === "thinking") {
+    ring(cx, cy, R, .38, .9, 3, "#ffb020", 7);
+    ring(cx, cy, R, -.5, -.6, 2, "#ff7a20", 5);
+    ring(cx, cy, R, .8, 1.4, 2, "#ffd166", 4);
+  } else if (state === "listening") {
+    ring(cx, cy, R, .5, .5, 5, "#6ea8ff", 4);
+  }
+  drawOrb(cx, cy, R);
+  if (state === "speaking") bars(cx, cy, R);
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>

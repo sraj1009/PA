@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BEE — Live Voice</title>
+<style>
+  :root { --bg:#07090b; --panel:#0d1117; --line:#1c232c; --lime:#D7FF00; --txt:#e8eef4; --dim:#8b98a5; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:15px/1.5 "Segoe UI",system-ui,sans-serif;
+         display:flex; align-items:center; justify-content:center; min-height:100vh; }
+  .card { width:min(520px,92vw); background:var(--panel); border:1px solid var(--line); border-radius:14px;
+          padding:28px; box-shadow:0 30px 80px rgba(0,0,0,.6); }
+  h1 { margin:0 0 4px; font-size:22px; letter-spacing:.4px; }
+  h1 b { color:var(--lime); }
+  .sub { color:var(--dim); margin:0 0 22px; font-size:13px; }
+  label { display:block; font-size:12px; color:var(--dim); margin:14px 0 6px; text-transform:uppercase; letter-spacing:1px; }
+  input[type=text] { width:100%; background:#0a0e12; color:var(--txt); border:1px solid var(--line);
+                     border-radius:8px; padding:11px 12px; font-size:15px; }
+  input[type=text]:focus { outline:none; border-color:var(--lime); }
+  button { margin-top:20px; width:100%; background:var(--lime); color:#0a0c00; font-weight:700; font-size:16px;
+           border:0; border-radius:8px; padding:13px; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+  button:disabled { background:#2a3340; color:var(--dim); cursor:not-allowed; }
+  #status { margin-top:14px; font-size:13px; color:var(--dim); min-height:20px; }
+  .live { display:none; margin-top:18px; border-top:1px solid var(--line); padding-top:16px; }
+  .live.on { display:block; }
+  .badge { display:inline-block; font-size:12px; padding:3px 10px; border-radius:20px;
+           background:#10151b; border:1px solid var(--line); color:var(--lime); margin-bottom:10px; }
+  .say { font-size:14px; color:var(--txt); min-height:22px; }
+  .say b { color:var(--lime); }
+  .leave { margin-top:16px; background:transparent; border:1px solid var(--line); color:var(--dim);
+           font-weight:400; }
+  .leave:hover { border-color:#ff5566; color:#ff5566; filter:none; }
+  #agentAudio { display:none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1><b>BEE</b> · Live Voice</h1>
+  <p class="sub">Realtime voice over LiveKit — the BEE agent must be running:
+     <code style="color:var(--lime)">python -m bee.cli livekit</code></p>
+
+  <label>Room</label>
+  <input type="text" id="room" value="bee-pa" spellcheck="false">
+  <button id="join" disabled>Request join token…</button>
+  <div id="status">loading…</div>
+
+  <div class="live" id="live">
+    <span class="badge" id="badge">connecting</span>
+    <div class="say" id="stateLine">…</div>
+    <div class="say" id="transcript"></div>
+    <button class="leave" id="leave">Leave room</button>
+    <audio id="agentAudio" autoplay></audio>
+  </div>
+</div>
+
+<script src="https://cdn.livekit.client.livekit.cloud/latest/livekit-client.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let room = null;
+const statusEl = $("status");
+
+async function loadStatus() {
+  try {
+    const r = await (await fetch("/livekit/status")).json();
+    if (r.room) $("room").value = r.room;
+    if (!r.configured) {
+      statusEl.textContent = "⚠ LiveKit not configured — add LIVEKIT_URL / API_KEY / API_SECRET to .env";
+      return;
+    }
+    statusEl.textContent = "Ready. Allow the mic when you join.";
+    $("join").disabled = false;
+  } catch (e) { statusEl.textContent = "status failed: " + e; }
+}
+loadStatus();
+
+$("join").onclick = async () => {
+  $("join").disabled = true;
+  statusEl.textContent = "minting token…";
+  try {
+    const t = await (await fetch("/livekit/token", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({room: $("room").value.trim()})})).json();
+    if (t.error) throw new Error(t.error);
+    await connect(t.url, t.token);
+  } catch (e) { statusEl.textContent = "✗ " + e.message; $("join").disabled = false; }
+};
+
+$("leave").onclick = async () => { if (room) { try { await room.disconnect(); } catch(e){} } };
+
+async function connect(url, token) {
+  room = new LivekitRoom();
+  room.on("participantTracksSubscribed", onTrack);
+  room.on("activeSpeakersChanged", onSpeakers);
+  statusEl.textContent = "connecting to LiveKit…";
+  await room.connect(url, token, { adaptiveStream: false, dynacast: false });
+  await room.localParticipant.setMicrophoneEnabled(true);
+  $("live").classList.add("on");
+  setBadge("connected — speak now", "#D7FF00");
+  statusEl.textContent = "You are in the room.";
+  pollState();
+}
+
+function onTrack(pubs, participant) {
+  for (const pub of pubs) {
+    if (pub.kind !== LivekitTrackKind.Audio) continue;
+    const a = document.createElement("audio");
+    a.autoplay = true;
+    document.body.appendChild(a);
+    pub.track.attach(a);
+  }
+}
+
+let speaking = new Set();
+function onSpeakers(sps) {
+  speaking = sps;
+  if (sps.size && room) {
+    const who = [...sps].map(p => p.identity).join(", ");
+    setBadge(who.includes("bee") ? "BEE is speaking" : "you are speaking",
+             who.includes("bee") ? "#D7FF00" : "#6ea8ff");
+  }
+}
+
+function setBadge(txt, color) {
+  const b = $("badge"); b.textContent = txt; b.style.color = color;
+}
+
+async function pollState() {
+  try {
+    const s = await (await fetch("/face/state")).json();
+    const map = { idle:"idle", listening:"listening…", thinking:"thinking…",
+                  speaking:"speaking", error:"error" };
+    let line = `BEE · <b>${map[s.state] || s.state}</b>`;
+    if (s.last_user)  line += ` — you: "${esc(s.last_user)}"`;
+    if (s.last_reply) line += ` — BEE: "${esc(s.last_reply)}"`;
+    $("stateLine").innerHTML = line;
+    if (s.last_reply) $("transcript").innerHTML =
+      `<span style="color:var(--dim)">last reply:</span> ${esc(s.last_reply)}`;
+  } catch(e) {}
+  setTimeout(pollState, 900);
+}
+function esc(t) { const d = document.createElement("i"); d.textContent = t; return d.innerHTML; }
+</script>
+</body>
+</html>

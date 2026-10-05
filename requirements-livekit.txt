@@ -1,0 +1,6 @@
+# Live realtime voice ("backtalk") — LiveKit Cloud free tier + local audio models.
+# Pinned: 1.4.6 is the stable series with the well-documented agent API;
+# 1.8.x changed the STT/TTS plugin surface mid-stream.
+livekit-agents==1.4.6
+livekit-plugins-silero==1.4.6   # local VAD
+# STT reuses faster-whisper (requirements-voice.txt) and TTS reuses edge-tts/pyttsx3.

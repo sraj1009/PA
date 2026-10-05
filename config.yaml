@@ -1,0 +1,134 @@
+# ============================================================
+#  BEE configuration
+# ============================================================
+
+ollama:
+  base_url: http://localhost:11434
+  model: bee4b             # BEE's local model (Qwen2.5-3B base + BEE persona).
+                            # ~1.9 GB, fits FULLY in the 4 GB GPU VRAM -> fast (no CPU offload).
+                            # (qwen3:8b is ~5 GB and CPU-offloads on this card = slow;
+                            #  qwen3:4b narrates reasoning in-content = wrong for a fast PA;
+                            #  Qwen2.5 has no 4B size, so 3B is the best crisp+fast base.)
+  embed_model: nomic-embed-text   # pull: ollama pull nomic-embed-text
+  # 1024 per turn: agent-loop turns are short — long-form answers belong to the cloud tier.
+  max_tokens: 1024
+  temperature: 0.2
+  timeout: 300
+  num_ctx: 4096            # lean KV cache so bee4b stays fully on-GPU (fast first token)
+  keep_alive: "60s"        # unload the local model 60 s after last use ("" = Ollama's 5 min)
+
+# Hybrid cloud fallback. Provider prefix formats (LiteLLM):
+#   gemini/gemini-3.6-flash         (GOOGLE_API_KEY)  <- primary (verified live)
+#   xai/grok-2-latest             (XAI_API_KEY)    fallback
+#   openai/gpt-4o-mini            (OPENAI_API_KEY) key valid but account out of credits
+# Credentials live in USER-SCOPE ENV VARS, not in this OneDrive-synced file.
+cloud:
+  enabled: true
+  llm: "gemini/gemini-3.6-flash"
+  api_key: ""              # env-var driven (OPENAI_API_KEY / GOOGLE_API_KEY / XAI_API_KEY)
+  base_url: ""
+  max_tokens: 8192
+  temperature: 0.3     # non-Gemini-3 cloud models only; Gemini 3+ omits it (Google:
+                       # default 1.0 — temp<1.0 degrades reasoning + loops; see client.py)
+  timeout: 180
+  cloud_first: true        # hybrid engine: chat/QA goes to cloud first (fast, no
+                           # local RAM load); local stays the automatic fallback.
+                           # false = classic local-first hybrid.
+
+voice:
+  enabled: true
+  model: base.en           # faster-whisper size: tiny.en | base.en | small.en | medium
+  device: auto             # auto | cpu | cuda (8GB 3050 => int8 cuda works for base/small)
+  compute_type: int8
+  sample_rate: 16000
+  silence: 1.2             # seconds of quiet that ends a recording
+  max_seconds: 90
+  wake_word: bee
+  speak: true
+  speak_limit: 600         # max chars spoken aloud
+  tts_rate: 190            # words/minute (pyttsx3); edge-tts % derived automatically
+  tts_voice: ""            # "" = system default; else substring, e.g. "aria" (SAPI)
+                           # or "en-US-AndrewMultilingualNeural" (edge-tts). /tts voices lists options
+  edge_key: ""             # optional Azure key for edge-tts (higher quality voice)
+
+sandbox:
+  enabled: true
+  image: bee-sandbox:latest
+  gpu: true                # requires NVIDIA driver + `docker run --gpus all` support
+  workdir: /workspace      # host workspace is mounted here
+  timeout: 300
+  max_output: 12000
+
+scheduler:
+  enabled: true
+  consolidate_cron: "0 3 * * *"   # nightly memory consolidation at 03:00
+
+guard:
+  enabled: true
+  mode: cli          # cli (prompt to approve) | unattended (auto-deny) | always (auto-approve, unsafe)
+
+privacy:
+  redact_cloud: true # PII (email/phone/card/keys/Aadhaar/secrets) redacted before CLOUD calls; local never redacted
+
+router:
+  ml_enabled: true       # learned router (bee/brain/mlrouter.py) fuses with heuristics
+  ml_min_episodes: 150   # minimum labeled episodes before the ML tier may decide
+  ml_confidence: 0.70    # minimum predicted confidence for the ML tier to override heuristics
+
+rag:
+  auto_context: true     # inject grounded memory context when a task references past state
+  k: 4                   # chunks injected
+
+monitor:
+  enabled: true          # metrics.jsonl event stream + dashboard (/dashboard)
+
+# "Welcome Home" workspace protocol (Super JARVIS port) — /welcome, "welcome home",
+# or double-clap (clap.action: welcome). Retrigguard blocks rapid re-runs.
+welcome:
+  enabled: true
+  user: "Mshri"
+  retrigger_s: 60
+  song_uri: ""                        # Spotify/YouTube track URL ("" = skip song)
+  urls:                               # each opens in a FRESH Chrome window, snapped to a monitor
+    - { url: "https://aistudio.google.com/app/apps", monitor: 1, fullscreen: true }
+    - { url: "https://grok.com", monitor: 2, fullscreen: false }
+  focus_ide: true                     # foreground existing Accio Work window (launch if missing)
+  ide_fullscreen: false               # send F11 to the app after focus
+  ide_name: "Accio Work"              # label used in step messages
+  ide_exes: ["accio.exe"]             # process executable(s) to match for the main window
+  ide_path: 'C:\Users\mshri\AppData\Local\Programs\Accio\Accio.exe'   # launch target if no window is running
+
+# LiveKit Cloud — LIVE realtime voice ("backtalk": hold-to-talk, agent answers in ~1s).
+# Free tier (~1000 agent-minutes/month). Secrets come from .env:
+#   LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET
+# Agent:   python -m bee.cli livekit [--room bee-pa]     (run while you talk)
+# Join:    open the Web UI -> "Live Voice" tab -> Join  (mic + speakers)
+livekit:
+  enabled: true
+  room: "bee-pa"
+  stt_lang: "en"
+  # TTS voice for live voice is set under voice.tts_voice (edge-tts neural,
+  # e.g. "en-US-AndrewMultilingualNeural"); pyttsx3 offline WAV is the fallback.
+
+# Personalization — who BEE serves (drives the "Who I serve" prompt block)
+user:
+  name: "Mshri"
+  timezone: "Asia/Calcutta"  # IST
+  region: "IN"
+  interests:
+    - AI / ML & LLMs
+    - Full-stack web development
+    - Systems & automation
+
+# Double-clap acoustic trigger (Super JARVIS port) — python -m bee.cli clap
+clap:
+  action: welcome          # welcome | voice (record one utterance, run it as a task)
+  sample_rate: 44100
+  block_ms: 40
+  spike_ratio: 7.0         # clap = RMS > max(noise_floor*7, min_rms)
+  min_rms: 0.012
+  min_gap: 0.06            # two claps closer than this = one clap's reverb
+  max_gap: 0.40            # two claps farther apart = two singles
+  cooldown: 1.5
+  retrigger_ratio: 0.55    # hysteresis: audio must drop below 55% of threshold to re-arm
+  warmup_s: 1.5            # mic calibration window

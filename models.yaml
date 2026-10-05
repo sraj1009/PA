@@ -1,0 +1,33 @@
+# Model registry — what BEE can use, and where.
+# Local: served by Ollama (pull with `ollama pull <name>`).
+# Cloud: routed via LiteLLM (needs the matching API key in env or config.yaml).
+
+local:
+  - name: bee4b
+    role: primary-orchestrator
+    vram_gb: ~2
+    notes: Qwen2.5-3B + BEE persona (models/bee4b.Modelfile); fits fully in 4 GB VRAM; ~50-90 tok/s
+  - name: qwen2.5:3b
+    role: base
+    vram_gb: ~2
+    notes: base of bee4b; rebuild with `ollama create bee4b -f models/bee4b.Modelfile`
+  - name: nomic-embed-text
+    role: embeddings
+    vram_gb: ~0.3
+    notes: vector memory + semantic search (runs fine on CPU)
+  # qwen3:8b (~5 GB) works but CPU-offloads on this 4 GB card (~4.6 tok/s) - slow by design
+  # qwen3:4b: thinking model - narrates reasoning in-content, unusable for a fast direct-answer PA
+
+cloud:
+  - name: openrouter/deepseek/deepseek-chat
+    role: escalation
+    notes: strong reasoning + long context; cheap. key: OPENROUTER_API_KEY
+  - name: openai/gpt-4o-mini
+    role: escalation
+    notes: fast, cheap fallback. key: OPENAI_API_KEY
+
+# Future (Phase 4): your own QLoRA fine-tunes, tracked here.
+fine_tunes: []
+#  - name: qwen3-8b-bee-v1
+#    trained_on: evals/golden_traces.jsonl
+#    date: 2026-10-04
