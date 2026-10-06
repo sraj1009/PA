@@ -85,6 +85,16 @@ def _fn_build_sft(ctx) -> dict:
     return scheduler.maybe_build_sft(ctx)
 
 
+def _redact(text: str) -> str:
+    """PII/secret redaction for anything persisted as job telemetry."""
+    try:
+        from .. import privacy
+        s, _n = privacy.redact(str(text or ""))
+        return s
+    except Exception:
+        return str(text or "")
+
+
 FUNCTIONS: dict[str, Callable] = {
     "bee.scheduler.consolidate": _fn_consolidate,
     "bee.scheduler.rebuild_vectors": _fn_rebuild_vectors,
@@ -364,8 +374,10 @@ class JobWorker:
         ex.finished_at = iso(self.now())
         ex.status = status
         ex.task_id = task_id
-        ex.error = err
-        ex.output_preview = preview
+        # retention contract: execution history is telemetry, not a content
+        # store — redact before persisting (audit 2026-10-06)
+        ex.error = _redact(err)
+        ex.output_preview = _redact(preview)
         self.store.append_execution(ex)
         job.last_run = ex.finished_at
         job.attempts = ex.attempt
@@ -540,7 +552,7 @@ class JobWorker:
     # ------------------------------------------------------------- notify
     def _notify(self, kind: str, job: Optional[Job], message: str,
                 extra: str = "") -> None:
-        n = Notification(kind=kind, message=(message + extra)[:500],
+        n = Notification(kind=kind, message=_redact(message + extra)[:500],
                          job_id=job.id if job else "")
         self.store.add_notification(n)
         if self.on_notify:

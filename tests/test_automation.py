@@ -691,7 +691,7 @@ def test_calendar_job_picks_up_new_ics_event(tmp_path):
 
 
 # ============================================================ the SAME kernel
-def _real_kernel(tmp_path, script, approver=None):
+def _real_kernel(tmp_path, script, approver=None, client=None):
     from bee.agent.context import Context
     from bee.config import load_config
     from bee.kernel import AgentKernel
@@ -699,7 +699,7 @@ def _real_kernel(tmp_path, script, approver=None):
     cfg = load_config()
     cfg.cloud.enabled = False
     cfg.workspace = tmp_path
-    client = ScriptedClient(script)
+    client = client or ScriptedClient(script)
     ctx = Context(cfg, workspace=tmp_path, client=client,
                   guard_on=True, guard_mode="unattended",
                   episodes_on=False, rag_on=False,

@@ -435,14 +435,30 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                 emit({"type": "redact", "n": n})
         else:
             msgs = messages
-        if on_token is not None:
-            try:
-                return ctx.client.chat_stream(cur_name, msgs,
-                                              on_token=lambda t: emit({"type": "token", "text": t}),
-                                              tools=tools)
-            except LLMError:
-                return ctx.client.chat(cur_name, msgs, tools=tools)  # one fallback
-        return ctx.client.chat(cur_name, msgs, tools=tools)
+        # structured LLM telemetry: per-call latency + provider failures
+        # (kind: auth/quota/network/timeout/server) — observability, audit 2026-10-06
+        t0 = time.time()
+        streaming = on_token is not None
+        try:
+            if streaming:
+                try:
+                    out = ctx.client.chat_stream(cur_name, msgs,
+                                                 on_token=lambda t: emit({"type": "token", "text": t}),
+                                                 tools=tools)
+                except LLMError:
+                    out = ctx.client.chat(cur_name, msgs, tools=tools)  # one fallback
+            else:
+                out = ctx.client.chat(cur_name, msgs, tools=tools)
+            usage = (out or {}).get("usage") or {}
+            metrics.record("llm", model=cur_name, seconds=round(time.time() - t0, 2),
+                           ok=True, stream=streaming,
+                           tokens=int(usage.get("prompt", 0)) + int(usage.get("completion", 0)))
+            return out
+        except LLMError as e:
+            metrics.record("llm", model=cur_name, seconds=round(time.time() - t0, 2),
+                           ok=False, stream=streaming,
+                           error_kind=getattr(e, "kind", "server"))
+            raise
 
     iters = 0
     n_tool_calls = 0

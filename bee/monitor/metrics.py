@@ -15,9 +15,26 @@ from .. import paths
 _lock = threading.Lock()
 
 
+def _scrub(value):
+    """Privacy chokepoint (audit 2026-10-06): every string that reaches the
+    metrics stream is redacted — passwords, API keys, auth tokens, card
+    numbers, phones etc. are replaced BEFORE the row is written. Short
+    strings (tool names, enums, numbers-as-strings) are skipped for speed;
+    anything a user could have written is not.
+    """
+    if isinstance(value, str) and len(value) > 12:
+        try:
+            from .. import privacy
+            value, _n = privacy.redact(value)
+        except Exception:
+            pass
+    return value
+
+
 def record(event: str, **data) -> None:
     try:
-        row = {"ts": round(time.time(), 3), "event": event, **data}
+        row = {"ts": round(time.time(), 3), "event": event,
+               **{k: _scrub(v) for k, v in data.items()}}
         line = json.dumps(row, ensure_ascii=False, default=str)
         with _lock:
             paths.METRICS_DIR.mkdir(parents=True, exist_ok=True)
@@ -53,6 +70,15 @@ def stats(window_hours: float = 24 * 7) -> dict:
     ok = sum(1 for t in tasks if t.get("ok"))
     tool_by_name = Counter(t.get("tool") for t in tools)
     tool_fail = Counter(t.get("tool") for t in tools if not t.get("ok"))
+    # structured telemetry (audit 2026-10-06)
+    llms = [r for r in rows if r.get("event") == "llm"]
+    llm_ok = [r for r in llms if r.get("ok")]
+    perm = [r for r in rows if r.get("event") == "permission"]
+    agent = [r for r in rows if r.get("event") == "agent_task"]
+    agent_ok = [r for r in agent if r.get("ok")]
+    retried = [r for r in agent if r.get("retried")]
+    verify_bad = [r for r in agent if r.get("verification") == "fail"]
+    prov_fail = Counter(r.get("error_kind") for r in llms if not r.get("ok"))
     return {
         "window_hours": window_hours,
         "total_tasks": len(tasks),
@@ -70,4 +96,17 @@ def stats(window_hours: float = 24 * 7) -> dict:
         "guard_denied": sum(1 for r in rows if r.get("event") == "guard" and r.get("action") == "deny"),
         "guard_asks": sum(1 for r in rows if r.get("event") == "guard" and r.get("action") == "ask"),
         "verify_fail": sum(1 for r in rows if r.get("event") == "verify" and r.get("verdict") == "fail"),
+        # structured telemetry (audit 2026-10-06)
+        "agent_tasks": len(agent),
+        "agent_success_rate": round(len(agent_ok) / len(agent), 4) if agent else None,
+        "agent_avg_seconds": round(sum(r.get("seconds") or 0 for r in agent) / len(agent), 1)
+        if agent else None,
+        "agent_retried": len(retried),
+        "agent_verify_fail": len(verify_bad),
+        "permission_denied": sum(1 for p in perm if p.get("decision") == "denied"),
+        "permission_asks": sum(1 for p in perm if p.get("decision") == "requested"),
+        "llm_calls": len(llms),
+        "llm_avg_seconds": round(sum(r.get("seconds") or 0 for r in llm_ok) / len(llm_ok), 2)
+        if llm_ok else None,
+        "provider_failures": dict(prov_fail),
     }

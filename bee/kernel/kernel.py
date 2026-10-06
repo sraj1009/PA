@@ -58,6 +58,15 @@ class AgentKernel:
         self.policy = policy or RetryPolicy(max_attempts=max_attempts)
         self.bus = bus or ToolBus().from_default()
         self.events = events or EventBus()
+        # Structured telemetry (audit 2026-10-06): agent_task terminal rows
+        # (latency/retries/verification) + permission decisions, into the
+        # metrics stream. Best-effort — a monitor failure never breaks the
+        # kernel; tests can inject their own events bus / sink.
+        try:
+            from ..monitor.telemetry import KernelTelemetry
+            KernelTelemetry().attach(self.events)
+        except Exception:
+            pass
         self.memory = memory or MemoryStack(structured_path=memory_store_path)
         self._tasks: dict[str, Task] = {}
         self.last_task: Task | None = None

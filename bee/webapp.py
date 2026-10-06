@@ -92,7 +92,12 @@ def get_ctx() -> Context:
         from .config import load_config
         from .agent.context import create_context
         cfg = load_config()
-        CTX = create_context(cfg)
+        # The web process is UNATTENDED by definition: no human is at the
+        # stdin. guard mode "cli" would make a guard 'ask' call input() from
+        # a worker thread (hangs the web worker, or worse, steals a keypress
+        # typed into the console) — fail closed instead (audit 2026-10-06).
+        # /chat is unaffected: its kernel already auto-denies 'ask'.
+        CTX = create_context(cfg, guard_mode="unattended")
         try:
             from . import scheduler
             scheduler.start_automation(CTX, cfg)

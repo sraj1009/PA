@@ -28,16 +28,23 @@ class _VecStore:
     def _table(self):
         if TABLE in self.conn.table_names():
             return self.conn.open_table(TABLE)
+        return self.conn.create_table(TABLE, schema=self._schema(), mode="overwrite")
+
+    def _schema(self):
         import pyarrow as pa
-        schema = pa.schema([
+        return pa.schema([
             pa.field("id", pa.string()),
             pa.field("text", pa.string()),
             pa.field("source", pa.string()),
             pa.field("vector", pa.list_(pa.float32(), 768)),
         ])
-        return self.conn.create_table(TABLE, schema=schema, mode="overwrite")
 
     def rebuild(self):
+        """Clear-before-add (B2/M12 fix, audit 2026-10-06): the old
+        implementation did `t.add(rows)` on top of the EXISTING table, so
+        every 12 h rebuild APPENDED a full copy — duplicate rows grew
+        without bound and search quality degraded over time. Rebuilding now
+        replaces the table atomically; row count is stable across rebuilds."""
         chunks = md.all_chunks()
         if not chunks:
             return 0
@@ -47,11 +54,12 @@ class _VecStore:
         for i in range(0, len(texts), 8):
             batch = texts[i:i + 8]
             embs.extend(self.client.embed(batch))
-        import pyarrow as pa
         rows = []
         for (src, ch), e in zip(chunks, embs):
             rows.append({"id": f"{src}#{ch[:60]}", "text": ch[:1000], "source": src, "vector": list(map(float, e))})
-        t = self._table()
+        if TABLE in self.conn.table_names():
+            self.conn.drop_table(TABLE)
+        t = self.conn.create_table(TABLE, schema=self._schema(), mode="overwrite")
         t.add(rows)
         return len(rows)
 
