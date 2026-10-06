@@ -197,25 +197,105 @@ def run_nightly(ctx) -> dict:
     return out
 
 
-def start_scheduler(ctx, cfg) -> None:
-    """Register nightly jobs with APScheduler (in-process). No-op if missing/disabled."""
-    if not cfg.scheduler.enabled:
-        return
+# ======================================================================
+# Phase 6 — durable automation (replaces the APScheduler callback model)
+# ======================================================================
+def _cron_time(cron: str) -> str:
+    """'0 3 * * *' -> '03:00' (minute hour; fallback '03:00')."""
     try:
-        from apscheduler.schedulers.background import BackgroundScheduler
-        from apscheduler.triggers.cron import CronTrigger
-        from apscheduler.triggers.interval import IntervalTrigger
-    except ImportError:
-        log.warning("apscheduler not installed — nightly jobs disabled (pip install apscheduler)")
-        return
-    import threading
-    s = BackgroundScheduler(timezone="Asia/Kolkata")
+        parts = (cron or "").split()
+        mi, hh = int(parts[0]), int(parts[1])
+        return f"{hh:02d}:{mi:02d}"
+    except Exception:
+        return "03:00"
+
+
+def _register_nightly_jobs(worker, cfg) -> None:
+    """Register maintenance work as DURABLE FUNCTION JOBS (idempotent by
+    stable id). This is real, persisted work — never a no-op: each job runs
+    through JobWorker -> the registered function -> execution history +
+    failure notification. Schedules derive from the existing scheduler
+    config, so an existing setup keeps its behavior."""
+    from .automation.models import PENDING, Job, JobTrigger
+    tz = cfg.automation.default_timezone or "Asia/Kolkata"
+    nightly = _cron_time(cfg.scheduler.consolidate_cron)
+
+    def _plus(mins: int) -> str:
+        total = int(nightly[:2]) * 60 + int(nightly[3:5]) + mins
+        return f"{(total // 60) % 24:02d}:{total % 60:02d}"
+
+    specs = [
+        ("nightly_consolidate", "memory consolidation (diary -> longterm)",
+         JobTrigger(kind="daily", time=nightly),
+         {"type": "function", "fn": "bee.scheduler.consolidate"}),
+        ("vector_rebuild", "vector index rebuild (12h)",
+         JobTrigger(kind="interval", every_seconds=12 * 3600),
+         {"type": "function", "fn": "bee.scheduler.rebuild_vectors"}),
+        ("router_retrain", "ML router retrain (only if new episodes)",
+         JobTrigger(kind="daily", time=_plus(30)),
+         {"type": "function", "fn": "bee.scheduler.maybe_train_router"}),
+        ("teach_back", "cloud teach-back (golden -> skills)",
+         JobTrigger(kind="daily", time=_plus(60)),
+         {"type": "function", "fn": "bee.scheduler.maybe_teach_back"}),
+        ("sft_build", "SFT dataset rebuild",
+         JobTrigger(kind="daily", time=_plus(75)),
+         {"type": "function", "fn": "bee.scheduler.maybe_build_sft"}),
+    ]
+    for jid, desc, trigger, action in specs:
+        if worker.store.load_job(jid) is not None:
+            continue
+        job = Job(id=jid, owner="system", description=desc, action=action,
+                  trigger=trigger, timezone=tz, enabled=True,
+                  permissions={"guard_mode": "unattended",
+                               "preapproved_capabilities": []},
+                  retry_policy={"max_attempts": 2, "backoff_seconds": 300},
+                  max_runtime=1800.0, state=PENDING)
+        worker.create_job(job)
+        log.info("registered durable job %s (%s)", jid, trigger.describe())
+
+
+def start_automation(ctx, cfg, kernel=None):
+    """Phase 6 entry point: durable JobWorker over <workspace>/automation.
+
+    * jobs persist across restarts (JobStore) and are restored + re-scheduled
+      at startup (worker.restore);
+    * nightly maintenance becomes durable function jobs (never no-op);
+    * agent_task jobs run through the SAME AgentKernel as interactive
+      requests — created here if absent and stored on ctx.kernel, which the
+      web /chat path then reuses (auto-deny approver: unattended);
+    * proactive rules load from the store (user-authorized only).
+    Returns the JobWorker, or None when automation is disabled/unavailable.
+    """
+    auto = cfg.automation
+    if not auto.enabled:
+        log.info("automation disabled by config")
+        return None
     try:
-        s.add_job(lambda: run_nightly(ctx), CronTrigger.from_crontab(cfg.scheduler.consolidate_cron),
-                  id="nightly_consolidation", replace_existing=True)
-        s.add_job(lambda: rebuild_vectors(ctx), IntervalTrigger(hours=12),
-                  id="vector_rebuild", replace_existing=True, max_instances=1)
-        s.start()
-        threading.Thread(target=lambda: log.info("scheduler started"), daemon=True).start()
+        from .automation import EventBus, JobStore, JobWorker
     except Exception as e:
-        log.warning("scheduler failed to start: %s", e)
+        log.warning("automation unavailable: %s", e)
+        return None
+    store = JobStore(Path(cfg.workspace) / "automation")
+    if kernel is None:
+        if getattr(ctx, "kernel", None) is not None:
+            kernel = ctx.kernel
+        else:
+            from .kernel import AgentKernel
+            kernel = AgentKernel(ctx, approver=lambda tool, args, reason: False)
+            ctx.kernel = kernel
+    worker = JobWorker(ctx, kernel, store, bus=EventBus(),
+                       max_parallel=auto.max_parallel,
+                       miss_grace_seconds=auto.miss_grace_seconds,
+                       tick_seconds=auto.tick_seconds,
+                       default_timezone=auto.default_timezone or "Asia/Kolkata")
+    _register_nightly_jobs(worker, cfg)
+    ctx.automation_worker = worker
+    worker.start()
+    log.info("automation started (store=%s, %d jobs)", store.dir, len(worker.jobs()))
+    return worker
+
+
+def start_scheduler(ctx, cfg) -> None:
+    """Deprecated shim (pre-Phase-6 APScheduler callbacks). Kept so existing
+    call sites keep working; delegates to the durable worker."""
+    start_automation(ctx, cfg)

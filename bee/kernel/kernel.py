@@ -62,6 +62,11 @@ class AgentKernel:
         self._tasks: dict[str, Task] = {}
         self.last_task: Task | None = None
         self._active_task: Task | None = None
+        # Phase 6: serializes kernel EXECUTIONS. Interactive (REPL/web/voice)
+        # and scheduled jobs share ONE kernel; concurrent runs would race on
+        # task-scoped capability grants (ctx.current_task_id) and last_task.
+        # RLock: a run never invokes another run on the same thread.
+        self._run_lock = threading.RLock()
         # Phase 3: capability gate — checked BEFORE every tool execution in
         # the loop (ctx.capability_gate). Unattended kernels (web) get the
         # auto-deny approver, so any 'ask' capability fails closed.
@@ -89,6 +94,14 @@ class AgentKernel:
     # ----------------------------------------------------------- main entry
     def run(self, text: str, session_id: str = "repl", on_event=None,
             model: str | None = None, on_token=None) -> TaskResult:
+        self._run_lock.acquire()
+        try:
+            return self._run_impl(text, session_id, on_event, model, on_token)
+        finally:
+            self._run_lock.release()
+
+    def _run_impl(self, text: str, session_id: str = "repl", on_event=None,
+                  model: str | None = None, on_token=None) -> TaskResult:
         session = self.get_session(session_id)
         start = time.time()
         session.add_turn("user", text)

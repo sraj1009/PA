@@ -43,6 +43,7 @@ CAP_NETWORK = "network"
 CAP_SYSTEM = "system"
 CAP_SCHEDULE = "schedule"
 CAP_DESKTOP = "desktop"
+CAP_AUTOMATION = "automation"
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,10 @@ _TOOL_PROFILES: dict[str, tuple[RiskLevel, frozenset]] = {
     "computer_input":     (RiskLevel.MEDIUM, frozenset({CAP_DESKTOP})),
     "computer_clipboard": (RiskLevel.LOW, frozenset({CAP_DESKTOP})),
     "computer_stop":      (RiskLevel.LOW, frozenset()),
+    # Phase 6 — durable automation: managing scheduled/proactive behavior is
+    # a state change with future side effects (MEDIUM); the capability gate
+    # (automation.manage, ASK) is the authorization layer on top.
+    "automation_job":   (RiskLevel.MEDIUM, frozenset({CAP_AUTOMATION})),
 }
 _DEFAULT_PROFILE = (RiskLevel.LOW, frozenset())
 

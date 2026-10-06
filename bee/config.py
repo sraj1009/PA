@@ -209,6 +209,22 @@ class ComputerUseCfg:
 
 
 @dataclass
+class AutomationCfg:
+    """Phase 6 — durable automation + proactive agent.
+
+    Jobs persist under <workspace>/automation/ and survive restarts; the
+    worker executes them through the same AgentKernel as interactive
+    requests. Proactive behavior is default-deny: only explicitly
+    user-authorized rules (rate-limited) may act on internal events.
+    """
+    enabled: bool = True
+    tick_seconds: float = 5.0            # scheduler pass interval
+    max_parallel: int = 2                # global job concurrency cap
+    miss_grace_seconds: int = 900        # one-time jobs catch up if missed by <= 15 min
+    default_timezone: str = "Asia/Kolkata"
+
+
+@dataclass
 class Config:
     ollama: OllamaCfg = field(default_factory=OllamaCfg)
     cloud: CloudCfg = field(default_factory=CloudCfg)
@@ -225,6 +241,7 @@ class Config:
     livekit: LivekitCfg = field(default_factory=LivekitCfg)
     user: UserCfg = field(default_factory=UserCfg)
     computeruse: ComputerUseCfg = field(default_factory=ComputerUseCfg)
+    automation: AutomationCfg = field(default_factory=AutomationCfg)
     workspace: Path = paths.WORKSPACE
 
     def get_llm(self, name: str) -> dict:
@@ -377,6 +394,7 @@ def load_config(path: str | Path | None = None) -> Config:
     c.clap = _section(ClapCfg, c.clap, data.get("clap"))
     c.livekit = _section(LivekitCfg, c.livekit, data.get("livekit"))
     c.user = _section(UserCfg, c.user, data.get("user"))
+    c.automation = _section(AutomationCfg, c.automation, data.get("automation"))
     ws = os_environ_get("BEE_WORKSPACE")
     if ws:
         c.workspace = Path(ws).expanduser().resolve()

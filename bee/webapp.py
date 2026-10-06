@@ -95,9 +95,9 @@ def get_ctx() -> Context:
         CTX = create_context(cfg)
         try:
             from . import scheduler
-            scheduler.start_scheduler(CTX, cfg)
+            scheduler.start_automation(CTX, cfg)
         except Exception as e:
-            log.warning("scheduler not started: %s", e)
+            log.warning("automation not started: %s", e)
     return CTX
 
 

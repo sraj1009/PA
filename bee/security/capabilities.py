@@ -112,6 +112,14 @@ CAPABILITIES: dict[str, Capability] = {c.id: c for c in [
     Capability("desktop.clipboard", "Use the clipboard",
                "Copy / paste on the clipboard (content never logged).",
                Risk.R2, ALLOW, CONF_NONE),
+    # Phase 6 — durable automation. Creating/changing scheduled or proactive
+    # behavior is an EXPLICIT user decision: BEE cannot automate anything
+    # without this grant (which asks), and every job/rule is persisted with
+    # its own unattended permission set.
+    Capability("automation.manage", "Manage automations",
+               "Create/disable/cancel durable jobs and proactive rules "
+               "(every job runs unattended with its own preapproved capabilities).",
+               Risk.R3, ASK, CONF_ON_ASK),
 ]}
 
 # ------------------------------------------------------------- tool mapping
@@ -146,6 +154,8 @@ _TOOL_CAPS: dict[str, list[str]] = {
     "computer_input":     ["desktop.control"],
     "computer_clipboard": ["desktop.clipboard"],
     "computer_stop":      ["desktop.control"],
+    # Phase 6 — durable automation (explicit user authorization)
+    "automation_job":     ["automation.manage"],
 }
 # escalations applied to exec tools based on argument content
 _ESCALATE = [

@@ -7,19 +7,20 @@ No code was changed while producing this roadmap.
 
 ---
 
-## 0. Phase status (updated 2026-10-06, end of Phase 5)
+## 0. Phase status (updated 2026-10-06, end of Phase 6)
 
 | Phase | Status | Evidence |
 |---|---|---|
 | 0 — Safety net (git, .gitignore, baseline) | **DONE** | git baseline commit 3548dbc (202 pytest / 71,914 verify / 10-21 eval recorded) |
 | 1 — Security (web auth, AST risk layer, eval_safe limits, episode redaction, archive-not-delete, sandbox hardening) | **DONE** | see `docs/SECURITY.md`; netguard 19 SSRF cases; risk/audit suites |
 | 2 — Kernel | **DONE** | `bee/kernel/` (13 modules): TaskState machine, Plan/Action/Observation, PermissionDecision, ExecutionReceipts, AgentEvent+EventBus, AgentSession (persistent follow-ups), RetryPolicy, effect verification, ToolBus; REPL+web+slash-commands unified. 45 kernel tests; 308 pytest / verify ALL PASS 71,914 |
-| 3 — Permissions + structured memory (capability policy, confirmations, memory architecture) | **DONE** | `bee/security/capabilities.py` (19 capabilities, R0–R5, task-scoped grants, pre-execution gate in loop.py); `bee/memory/store.py` (remember/recall/update/forget/summarize/expire + entity memory + provenance governance); kernel memory commands. tests/test_capabilities.py + tests/test_structured_memory.py. Remaining from original roadmap Phase 3: **real user-job scheduling (B1/M8)** — still open |
+| 3 — Permissions + structured memory (capability policy, confirmations, memory architecture) | **DONE** | `bee/security/capabilities.py` (20 capabilities, R0–R5, task-scoped grants, pre-execution gate in loop.py); `bee/memory/store.py` (remember/recall/update/forget/summarize/expire + entity memory + provenance governance); kernel memory commands. tests/test_capabilities.py + tests/test_structured_memory.py. Original roadmap Phase 3 remainder **real user-job scheduling (B1/M8) — CLOSED in user Phase 6** (durable JobWorker through the kernel) |
 | 4 — TRUE REALTIME VOICE (user Phase 4) | **DONE** | `bee/voice/realtime/` (7 modules): 7-state voice machine (IDLE/LISTENING/PROCESSING/THINKING/SPEAKING/INTERRUPTED/ERROR), VAD + endpointing + rate-limited partials, barge-in (TTS stop + kernel.cancel same frame), echo gating, wake word (STT-confirmed), reconnect w/ capped backoff; genuine LLM token streaming → sentence-pipelined edge-tts; LiveKit behind `VoiceTransport` (kernel never imports LiveKit); web `/chat` now real SSE (B3 closed). 12 voice tests incl. all 9 required scenarios; 361 pytest / verify ALL PASS 71,914. **Not claimed:** human-level naturalness; LiveKitTransport unverified against a live room (no credentials in test path) |
 | 5 — Memory & config (roadmap §5 Phase 4) | PARTIAL | Session store (Phase 2) + structured store (Phase 3); vector rebuild dup (B2/M12), config precedence doc (M14), metrics caps (M13) still open |
 | 6 — Provider abstraction | **DONE early (user Phase 1, item 6)** | `bee/agent/providers.py` — ProviderRegistry/ProviderConfig/ProviderHealth, env-key centralization, provider-matched cloud availability |
 | 7 — Observability & UX (roadmap §5 Phase 6) | PARTIAL | real SSE (B3) done in user Phase 4; /voice contract (B4) half-fixed (uuid temp names now; mp3 docstring mismatch remains); dashboard live data, eval expansion still open |
 | 8 — SAFE COMPUTER USE (user Phase 5) | **DONE** | `bee/computeruse/` (7 modules): 12-verb safe set behind 4 tools; per-action ComputerAction (target, coords+provenance, description, expected result, timeout, risk, verification strategy); closed loop (one call = act→observe→verify, no open-loop sequences); per-task action budget (15); coordinates never trusted (unproven refused, model_raw requires explicit confirm — risk layer HIGH/ask); 4 new capabilities (desktop.observe/launch/control/clipboard; launch & control ASK); 3 independent emergency stops (kernel.cancel / global / Ctrl+Alt+Q hotkey); privacy in code (typed text length-only, clipboard compare-only, no pixels/titles in logs, screenshot hash ring + bounded retention). 12 tests, ALL on MockDesktop (no real automation in CI). Unsafe set deliberately absent: no deletion/financial/credential/downloads/destructive verbs. **Not claimed:** WindowsDesktop untested-in-field by CI (no display); structural UI understanding, not vision-model pixel reading; Windows only. See docs/COMPUTER_USE.md |
+| 9 — DURABLE AUTOMATION + PROACTIVE AGENT (user Phase 6) | **DONE** | `bee/automation/` (8 modules): Job/JobTrigger/JobExecution/JobQueue/JobWorker/Notification/ExecutionHistory; every field persists (id, owner/session, task, structured action, trigger, tz, enabled, permissions, retry, max_runtime, timestamps, next/last_run, state) under `<workspace>/automation/`. Triggers: one_time/daily/weekly/interval/calendar (ICS, `reminder_offset_minutes`). Restart: restore + recompute next_run + crash repair honoring retry budget + NO duplicate execution (execution row before start + cross-process file claims w/ TTL) + missed-job handling (one-time catch-up once within 15 min grace / MISSED beyond; recurring skip+notify, never backfill). Nightly maintenance (consolidate/vector-rebuild/router-retrain/teach-back/SFT) = durable function jobs with stable ids — B1/M8 closed, APScheduler callback model removed (start_scheduler now a shim). Jobs run through the SAME AgentKernel: kernel run-lock (executions serialized), job-scoped cancel event (max_runtime watchdog cancels the job, never user work), unattended fail-closed approver (only job.preapproved_capabilities). Proactive: EventBus (timer/calendar/file_change built-in; email/app/battery/network/device_state schema-supported, honestly 'unavailable'), default-deny ProactivePolicy, user-authorized rate-limited rules persisted (rules.json, created_by='user'). Control: history/retry/failure-notify/disable/enable/cancel/delete; concurrency: JobQueue single-flight + max_parallel cap. `automation.manage` capability (R3 ASK, #20) gates the automation_job tool. 27 tests incl. restart recovery (tests/test_automation.py); 400 pytest / verify ALL PASS 71,914 / eval 9-21 (quality ceiling). **Not claimed:** ICS-only calendar triggers; no live exchange/email/app/battery/network sources; at-least-once replay per retry budget (no transactional outbox); function-job timeout abandons the thread (no kill path). See JARVIS_ARCHITECTURE.md §18 |
 
 ## 1. Completed capabilities (working, tested)
 
@@ -37,7 +38,8 @@ No code was changed while producing this roadmap.
 | Voice: faster-whisper STT (CPU-first Windows), clap wake (double-clap 60–400 ms, adaptive floor), pyttsx3 SAPI + edge-tts fallback | voice/* |
 | True realtime voice: 7-state voice machine, VAD + endpointing + interim partials, barge-in (immediate TTS stop + task cancel), echo gating, STT-confirmed wake word, reconnect w/ capped backoff, genuine token streaming → sentence-pipelined TTS; LiveKit behind VoiceTransport | bee/voice/realtime/*, livekit/transport.py; tests/test_voice_engine.py (12, incl. all 9 required scenarios) |
 | LiveKit realtime worker (free tier): BeeSTT/BeeTTS, 2 h JWT mint, unattended guard | livekit/* |
-| Nightly scheduler (consolidation, vector rebuild, retrain, teach-back, SFT) | scheduler.py |
+| Nightly maintenance as durable function jobs (consolidation, vector rebuild, retrain, teach-back, SFT) — survive restarts, never no-op | bee/automation/ (Phase 6; scheduler.py start_automation) |
+| Durable automation: jobs (one_time/daily/weekly/interval/calendar-ICS) through the kernel, restart recovery, missed-job handling, cross-process claims, proactive EventBus with default-deny user-authorized rules | bee/automation/ (8 modules); 27 tests; ARCHITECTURE §18 |
 | Web UI: chat, engine switch, skills, LiveKit page, face state | webapp.py; setup.ps1 "All core checks passed" |
 | Full-stack launcher `bee-runfull` (`python -m bee.cli full` / bee-runfull.ps1): web + livekit children (unbuffered logs), browser open, foreground REPL, teardown | cli.py `_full` (467+) |
 | Monitoring: metrics, health, dashboard, Go native telemetry daemon (127.0.0.1:8790, WMI fallback) | monitor/*, native/ |
@@ -48,7 +50,7 @@ No code was changed while producing this roadmap.
 
 | # | Capability | Defect | Location |
 |---|---|---|---|
-| B1 | User cron scheduling | Every job (restored and newly added) is a `_noop` that logs one line; jobs never execute | tools/scheduler_tool.py:39-40, 50-57, 82 |
+| ~~B1~~ | ~~User cron scheduling~~ | **CLOSED in Phase 6 (2026-10-06):** the no-op scheduler tool is superseded by `bee/automation/` — durable JobWorker executes jobs through the AgentKernel; execution row before start + cross-process claims prevent duplicates; nightly jobs are durable function jobs | `bee/automation/worker.py` (tools/scheduler_tool.py remains as a legacy read-only tool, superseded) |
 | B2 | Vector store rebuild | `rebuild()` appends (`t.add`) to the existing table each 12 h → duplicate rows accumulate, search quality degrades over time | memory/search.py:55 |
 | B4 | Web `/voice` contract | Docstring promises "+tts mp3"; endpoint returns JSON text only (temp-name race fixed in Phase 4: uploads now use uuid names) | webapp.py `/voice` |
 | B5 | 11/21 agent-eval tasks fail | Local 3B "missing substring" quality ceiling (file/DSA/memory/plan tasks) — model quality, not loop bugs | evals/tasks.yaml run 2026-10-05 |
@@ -77,7 +79,7 @@ No code was changed while producing this roadmap.
 | M5 | Conversation Manager / single Context factory | 3 bootstrap sites (cli `_repl`, webapp.get_ctx:27-39, livekit._build_brain:65-96) duplicate ~20 lines each |
 | M6 | Web authentication (token, even a single local secret) | Closes R3 |
 | M7 | Policy AST pass for Python payloads | Closes R2 |
-| M8 | Real user-job execution + job payload serialization | Closes B1 |
+| ~~M8~~ | ~~Real user-job execution + job payload serialization~~ | **CLOSED in Phase 6:** Job.to_dict() is the payload; the JobWorker executes it through the kernel |
 | M9 | Provider ABC + registry | Decouple ~4 files from provider specifics; make adding a provider a 1-file change |
 | M10 | Episode redaction at write time | Closes R5 |
 | M11 | Consolidation archive-not-delete | Closes R1 |
@@ -154,12 +156,13 @@ No code was changed while producing this roadmap.
 
 ## 7. Explicit non-claims
 
-- The system is **not** production-ready: 8-11/21 end-to-end eval tasks fail
+- The system is **not** production-ready: 8-13/21 end-to-end eval tasks fail
   (model quality ceiling, not loop bugs — structural tasks stable across
-  runs), user scheduling is still a no-op (B1), the LiveKit worker and the
-  `/eval` runner still call `run_agent` directly instead of the kernel —
-  and therefore **do not pass through the Phase 3 capability gate**
+  runs; Phase 6 run 2026-10-06: 9/21), the LiveKit worker and the `/eval`
+  runner still call `run_agent` directly instead of the kernel — and
+  therefore **do not pass through the Phase 3 capability gate**
   (kernel-only by construction; `ctx.capability_gate` is None there).
+  (User scheduling B1/M8 is no longer a no-op — closed in Phase 6.)
 - The capability gate is a policy layer OVER the guard; it maps tools to
   capabilities by name + argument heuristics, which a creative command
   phrasing can under-map (e.g. an aliased delete). The guard/AST layers and
@@ -175,9 +178,10 @@ No code was changed while producing this roadmap.
   system: energy VAD (not a neural VAD), STT-confirmed wake word (not
   always-on DSP wake), windowed re-transcription partials (faster-whisper is
   a batch model — genuine interim results, not token-level streaming ASR).
-  `LiveKitTransport` is unverified against a live room (no credentials in
-   the test path); the exercised transport is the local mic. Proactive
-    automation remains NOT implemented.
+   `LiveKitTransport` is unverified against a live room (no credentials in
+    the test path); the exercised transport is the local mic. (Proactive
+    automation WAS implemented in Phase 6 — default-deny, user-authorized,
+    rate-limited rules; see ARCHITECTURE §18.)
 - **Computer use (user Phase 5) is SAFE-SET-ONLY by construction.** The
   unsafe verbs (unattended deletion, financial transactions, credential
   entry, arbitrary downloads/execution, destructive system actions) do not

@@ -75,6 +75,9 @@ def _cmd_help(p: _Print):
         "  /guard [on|off]  permission gates for destructive commands\n"
         "  /privacy [on|off]  PII redaction on cloud payloads\n"
         "  /rag [on|off]    auto memory-context for reference tasks\n"
+        "  /jobs            list durable jobs (survive restarts; /job <id> for detail)\n"
+        "  /job <id> <op>   op: detail | disable | enable | cancel | delete | history\n"
+        "  /auto            unread notifications + proactive rules (user-authorized only)\n"
         "  /clear           clear screen\n"
         "  /exit | /quit    leave\n"
         "  Ctrl-C mid-task  cancels the running task\n"
@@ -105,6 +108,14 @@ def _repl(cfg):
     from .kernel import AgentKernel
     kernel = AgentKernel(ctx)
     ctx.kernel = kernel
+
+    # Phase 6: durable automation (jobs + proactive rules) — restored from
+    # <workspace>/automation, runs through THIS kernel, never a no-op.
+    try:
+        from . import scheduler as _sched_auto
+        _sched_auto.start_automation(ctx, cfg, kernel)
+    except Exception as e:
+        p.info(f"automation not started: {e}")
 
     def _sigint(signum, frame):
         if running["flag"]:
@@ -275,6 +286,74 @@ def _repl(cfg):
                 from . import scheduler
                 out = scheduler.run_nightly(ctx)
                 p.bee(json.dumps(out, indent=1, ensure_ascii=False))
+            elif cmd == "/jobs":
+                w = getattr(ctx, "automation_worker", None)
+                if w is None:
+                    p.error("automation is not running (config automation.enabled)")
+                elif not arg:
+                    jobs = w.jobs()
+                    if not jobs:
+                        p.info("  (no jobs yet — ask me: 'Every weekday at 8AM, tell me my schedule')")
+                    for j in jobs:
+                        mark = "on " if j.enabled else "off"
+                        p.info(f"  [{mark}] {j.id:22s} {j.state:10s} next={j.next_run or '-':21s} {j.description[:58]}")
+                    p.info("  /job <id> [detail|disable|enable|cancel|delete|history]")
+                else:
+                    p.error("usage: /jobs (list) · /job <id> <op>")
+            elif cmd == "/job":
+                w = getattr(ctx, "automation_worker", None)
+                if w is None:
+                    p.error("automation is not running")
+                    continue
+                parts2 = arg.split()
+                if not parts2:
+                    p.error("usage: /job <id> [detail|disable|enable|cancel|delete|history]")
+                    continue
+                jid = parts2[0]
+                op = parts2[1].lower() if len(parts2) > 1 else "detail"
+                if op == "history":
+                    rows = w.history(jid)
+                    if not rows:
+                        p.info("  (no executions recorded)")
+                    for e in rows:
+                        p.info(f"  {e['started_at']}  a{e['attempt']}  {e['status']:12s} {e['error'][:90]}")
+                elif op in ("disable", "enable", "cancel", "delete"):
+                    fn = getattr(w, f"{op}_job")
+                    p.info(f"  {op}: {'ok' if fn(jid) else 'job not found'}")
+                else:
+                    j = w.store.load_job(w._resolve(jid))
+                    if j is None:
+                        p.error(f"job not found: {jid}")
+                        continue
+                    s = j.summary()
+                    p.info(f"  {s['id']}  state={s['state']}  enabled={s['enabled']}")
+                    p.info(f"  trigger: {s['trigger']}  next: {s['next_run'] or '-'}  last: {s['last_run'] or '-'}")
+                    p.info(f"  owner={s['owner']}  attempts={s['attempts']}  tz={j.timezone}")
+                    p.info(f"  permissions: {j.permissions}")
+                    p.info(f"  retry: {j.retry_policy}  max_runtime: {j.max_runtime:.0f}s")
+                    for e in w.history(j.id, 3):
+                        p.info(f"  · {e['started_at']}  a{e['attempt']}  {e['status']}  {e['error'][:80]}")
+            elif cmd == "/auto":
+                w = getattr(ctx, "automation_worker", None)
+                if w is None:
+                    p.error("automation is not running")
+                    continue
+                if not arg:
+                    notifs = w.notifications(unread_only=True)[-10:]
+                    if not notifs:
+                        p.info("  (no unread notifications)")
+                    for n in notifs:
+                        p.info(f"  [{n['kind']}] {n['message'][:110]}")
+                    rules = w.policy.rules if w.policy else []
+                    if not rules:
+                        p.info("  (no proactive rules — ask me to add one; each requires your authorization)")
+                    for r in rules:
+                        p.info(f"  rule {r.id} ({r.kind}) {'on' if r.enabled else 'off'}: {r.description or r.action.get('message') or r.action.get('task')}")
+                    p.info("  /auto read = mark notifications read · /jobs manages jobs")
+                elif arg == "read":
+                    p.info(f"  marked {w.mark_notifications_read()} notification(s) read")
+                else:
+                    p.error("usage: /auto | /auto read")
             elif cmd == "/eval":
                 from .evals import runner
                 try:
@@ -414,7 +493,7 @@ def _web(cfg, host: str, port: int):
     print(f"  (saved to temp/web_token.txt — git-ignored; override with BEE_WEB_TOKEN in .env)\n")
     try:
         from . import scheduler
-        scheduler.start_scheduler(ctx, cfg)
+        scheduler.start_automation(ctx, cfg)
     except Exception:
         pass
     # pre-warm the STT model in the background so the first voice upload

@@ -34,6 +34,8 @@ evals/dsa_bench.json
 evals/verify_results.json
 jobs.json
 jobs.log
+# Phase 6 durable job store (runtime state: jobs/executions/notifications)
+automation/
 
 # --- Model weights (large; live on this machine, not in VCS) ---
 models/faster-whisper-base.en/

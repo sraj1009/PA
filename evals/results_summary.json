@@ -1,10 +1,9 @@
 {
- "ts": "2026-10-06T17:25:10",
+ "ts": "2026-10-06T18:06:25",
  "n": 21,
- "ok": 8,
- "score": "8/21",
+ "ok": 9,
+ "score": "9/21",
  "failures": [
-  "math_sieve",
   "file_roundtrip",
   "calculator",
   "verify_calc_pass",

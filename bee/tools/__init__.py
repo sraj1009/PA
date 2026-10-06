@@ -32,7 +32,17 @@ def _computeruse_builder():
         return []
 
 
+def _automation_builder():
+    # Phase 6: durable automation (user-authorized, capability-gated)
+    try:
+        from ..automation import automation_tools
+        return automation_tools()
+    except Exception:
+        return []
+
+
 _BUILDERS.append(_computeruse_builder)
+_BUILDERS.append(_automation_builder)
 
 _CACHE = None
 

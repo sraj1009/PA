@@ -433,6 +433,15 @@ Consolidation (scheduler.py nightly): LLM-summarizes old diary entries, then
 - **No job serialization** — a real user job has no payload representation it
   could execute later.
 
+**Audit note — SUPERSEDED (Phase 6, 2026-10-06):** the APScheduler callback
+model above is gone. `start_automation` (scheduler.py) builds a durable
+JobWorker over `<workspace>/automation/` — jobs are serialized JSON
+(Job.to_dict), restored + re-scheduled on restart, executed through the
+AgentKernel, and guarded against duplicate execution (execution-row-before-
+start + cross-process file claims). The five nightly steps are durable
+function jobs with stable ids; `start_scheduler` is a compatibility shim.
+Per-job timezone is now a first-class field (default from config). See §18.
+
 ## 12. Failure / Recovery Model (current)
 
 | Failure | Detection | Recovery |
@@ -547,8 +556,10 @@ user request
 - Cancellation granularity: between iterations / before each tool call
   (honest `cancellation` levels per tool); mid-subprocess kill is not
   implemented.
-- Realtime-voice event streaming and proactive automation consume the new
-  event model in later phases — the model exists, those consumers do not.
+- ~~Realtime-voice event streaming and proactive automation consume the new
+  event model in later phases~~ — SUPERSEDED: realtime voice landed in
+  Phase 4 (SSE + streamed tokens) and durable automation + the proactive
+  EventBus landed in Phase 6 (§18).
 - Verification is deterministic + heuristic (target-name probe); it is not
   a general intent-understanding layer.
 
@@ -818,7 +829,141 @@ vision-model pixel reading; `screen_changed` proves change, not correctness
 Full limitation list (multi-monitor, DPI, typewrite latency, alt-tab
 fallback) in `docs/COMPUTER_USE.md`.
 
-## 18. Known-stale artifacts (documented for the record)
+## 18. Durable Automation + Proactive Agent (Phase 6 — implemented 2026-10-06)
+
+`bee/automation/` (8 modules) replaces the old APScheduler callback model
+(in-memory jobs that vanished on restart, silently no-op'd when the library
+was missing, and — for user cron — executed nothing at all: B1/M8) with a
+persistent task system. The old `start_scheduler` now delegates to
+`start_automation`; the five nightly maintenance steps became DURABLE
+FUNCTION JOBS with stable ids (`nightly_consolidate`, `vector_rebuild`,
+`router_retrain`, `teach_back`, `sft_build`) — real, persisted work that
+survives restarts instead of callback registrations.
+
+### 18.1 Objects
+
+| Object | File | Role |
+|---|---|---|
+| `Job` | models.py | everything needed to survive a restart: id, owner/session, description, STRUCTURED action, trigger, timezone, enabled, permissions, retry policy, max runtime, created_at, next_run, last_run, state, attempts |
+| `JobTrigger` | models.py | one_time / daily / weekly / interval / calendar (`ics:<path>`, "where supported" = ICS files) + `reminder_offset_minutes` |
+| `JobExecution` / `ExecutionHistory` | models.py | per-attempt rows (attempt, started/finished, status, task_id, REDACTED ≤160-char preview) — append-only JSONL, deduped by id (last wins, for crash-repair terminal rows) |
+| `Notification` | models.py | success / failure / missed / proactive / job_event |
+| `JobQueue` | queue.py | concurrency control: single-flight per job id + global `max_parallel` cap (in-memory) |
+| `JobStore` | store.py | `<workspace>/automation/`: one atomic JSON file per job, executions.jsonl, notifications.json, rules.json, plus cross-process file-claim tokens with TTL |
+| `JobWorker` | worker.py | the ONLY executor: restore → tick → claim → run → history → notify; control ops (create/disable/enable/cancel/delete/history) |
+| `EventBus` / `BusEvent` / `ProactiveRule` / `ProactivePolicy` | events.py | internal events (timer, calendar, email, file_change, app_event, battery, network, device_state) + default-deny proactive gate with per-rule rate limits |
+| `automation_job` tool | tools.py | user-facing management (create/list/disable/enable/cancel/delete/history/rules) — gated by `automation.manage` (R3, ASK: capability #20) |
+
+**Structured actions** (no free code): `agent_task` → the kernel; `notify`
+→ notification only; `function` → a REGISTERED real-work function
+(`FUNCTIONS` registry — unknown names fail the job, so a no-op is
+structurally impossible).
+
+### 18.2 Restart recovery (the guarantees)
+
+1. **Restore**: `worker.start()` → `restore()` loads every job file.
+2. **Crash repair**: a job persisted `RUNNING` (killed mid-execution) gets a
+   terminal `interrupted` row appended to its open execution row and is
+   re-queued **only if its retry budget allows** — otherwise FAILED +
+   failure notification. Never a blind replay.
+3. **Recompute**: daily/weekly/calendar get the next FUTURE occurrence;
+   one_time jobs keep their fixed instant.
+4. **No duplicate execution**, on two levels:
+   - the execution row is written BEFORE work starts (history + budget);
+   - a file-claim token (TTL = max_runtime + 5 min) stops two PROCESSES
+     (bee-runfull = web + REPL) from running the same job; stale claims
+     from crashed processes are swept.
+5. **Missed jobs**: one-time jobs catch up EXACTLY once inside the grace
+   window (default 15 min, `automation.miss_grace_seconds`), are marked
+   MISSED + notified beyond it. Recurring jobs skip missed occurrences
+   (counted and notified, never backfilled).
+6. Finished jobs (COMPLETED/CANCELLED) are never re-run — verified by
+   `test_one_time_lifecycle_and_restart_never_reruns`.
+
+### 18.3 The worker executes through the SAME kernel
+
+```
+due job  →  JobQueue claim (+ cross-process file claim)
+         →  execution row persisted (status=running)
+         →  AgentKernel.run(task, session_id=job.owner)      ← same instance
+              → AgentSession (job-owned session persists) → Task → PLANNING
+              → EXECUTING (guard + capability gate + tools)
+              → VERIFYING → Receipt (same ReceiptLog)
+         →  execution row finalized (succeeded/failed/timeout)
+         →  notification (success | failure | missed) + retry per policy
+```
+
+Safety of running jobs while the user talks to BEE:
+- **Kernel run-lock** (Phase 6 addition to `AgentKernel`): executions are
+  serialized — a job and a chat turn never interleave mid-task (protects
+  task-scoped capability grants and last_task state).
+- **Job-scoped cancel event**: `max_runtime` is enforced by a watchdog that
+  sets a NEW cancel event swapped onto `ctx` for the duration of the job
+  run and restored after — a job timeout cancels the JOB, never the
+  user's interactive task (verified by `test_max_runtime_cancels_job_not_user_work`).
+- **Unattended, fail-closed permissions**: for the run, the kernel's
+  approver is swapped to a policy that allows ONLY the job's
+  `permissions.preapproved_capabilities`; everything that asks is DENIED.
+  Scheduled jobs never block on an input prompt. (Verified by
+  `test_job_run_fails_closed_on_capability_asks`: a job whose model tries
+  to create another job is denied `automation.manage` in-job.)
+
+### 18.4 Proactive events — default deny, explicit authorization
+
+`EventBus` is an in-process pub/sub (handler exceptions contained, bounded
+published log). Sources are adapters that PUBLISH, never act:
+`timer` (built-in), `file_change` (polling, dependency-free),
+`calendar` (ICS via JobTrigger); `email` / `app_event` / `battery` /
+`network` / `device_state` are schema-supported and report
+`unavailable` in `available_sources()` (honest capability report).
+
+**Proactive behavior is default-deny**: the policy gate (subscribed to `*`)
+only fires when a `ProactiveRule` matches the event kind + payload. Rules
+are created ONLY by explicit user authorization (the `automation_job`
+tool through the ASK capability, or `/auto`), are persisted in
+rules.json with `created_by: "user"`, and are RATE-LIMITED
+(`max_per_hour`, default 6) so a flapping source cannot spam. Unknown
+action types are denied.
+
+Supported request shapes: "Every weekday at 8 AM, tell me my schedule"
+(weekly job, agent_task) · "Remind me 30 min before my meetings"
+(calendar trigger + `reminder_offset_minutes`) · "When the download
+finishes, open the folder" (rule: app_event → agent_task — the
+folder-opening itself still needs the user-authorized computer-use
+grants) · "Every evening, summarize what I accomplished" (daily job).
+
+### 18.5 User surface
+
+- **REPL**: `/jobs` (list), `/job <id> [detail|disable|enable|cancel|delete|history]`,
+  `/auto` (unread notifications + authorized rules), `/auto read`.
+- **Talking to BEE**: "create a job …" → the LLM calls `automation_job`,
+  which ASKS `automation.manage` first (explicit authorization, task-scoped
+  grant) — see `test_automation_tool_gates_on_explicit_authorization`.
+- **Config** (`automation:` section): `enabled`, `tick_seconds` (5),
+  `max_parallel` (2), `miss_grace_seconds` (900), `default_timezone`.
+
+### 18.6 What Phase 6 does NOT claim
+
+- Calendar-derived triggers support **ICS files only** ("where supported");
+  Exchange/Google/Outlook live feeds are not wired (documented unavailable).
+- Event SOURCES for email/app/battery/network/device_state are not
+  implemented (schema + policy exist; `available_sources()` says so).
+- A job that crashes mid-execution is replayed ONCE per its retry budget
+  (at-least-once semantics for idempotent work); the execution history is
+  the audit trail — there is no transactional outbox.
+- `function`-action jobs have no kill path on timeout: the daemon thread is
+  abandoned (documented in worker.py); `agent_task` jobs cancel cleanly via
+  the job-scoped cancel event.
+- Proactive `agent_task` rules run unattended through the kernel with the
+  standard unattended approver (ASKs denied) — a proactive rule can never
+  escalate its own permissions.
+- Tests: 27 in `tests/test_automation.py` (trigger math incl. ICS,
+  persistence, cross-process claims, restart recovery ×4, missed jobs ×3,
+  retry/backoff, concurrency incl. single-flight, max_runtime, default-deny
+  + rate limiting + rule restart, 3 real-kernel e2e incl. the capability
+  gate). All use fake clocks/injectable time — no sleeping scheduler.
+
+## 19. Known-stale artifacts (documented for the record)
 
 - `docs/llm-component.md` — describes the pre-`bee4b` pipeline (stale).
 - `evals/REPORT.md` — regenerated by the verify run; its agent-eval section
