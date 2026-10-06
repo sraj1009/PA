@@ -67,6 +67,18 @@ class VoiceCfg:
     tts_rate: int = 190
     tts_voice: str = ""        # "" = system default; SAPI substring (e.g. "aria") or edge name
     edge_key: str = ""
+    # --- Phase 4 realtime voice ---
+    rt_barge_in: bool = True       # user can interrupt BEE while it speaks
+    rt_silence_ms: int = 700       # endpointing: silence that closes an utterance
+    rt_max_utterance_ms: int = 15000
+    rt_partial_stt: bool = True    # interim transcripts while the user speaks
+    rt_partial_every_ms: int = 900 # min interval between partials
+    rt_partial_min_growth: int = 32000  # min new audio (bytes) before a new partial
+    rt_conversation: bool = True   # stay LISTENING after a response (vs back to IDLE)
+    rt_wake_ack: bool = True       # speak a short ack after the wake word
+    rt_stt_timeout: float = 30.0  # STT final timeout (provider-failure handling)
+    rt_tts_timeout: float = 20.0  # per-sentence TTS timeout
+    rt_reconnect_max: int = 30.0  # max reconnect backoff delay (seconds)
 
 
 @dataclass
@@ -180,6 +192,23 @@ class UserCfg:
 
 
 @dataclass
+class ComputerUseCfg:
+    """Phase 5 — safe computer use (desktop control).
+
+    Safe set only (observe / windows / click-type-keys-scroll / clipboard).
+    Every action is post-verified and bounded by a per-task budget; typed
+    text, clipboard content, pixels and window titles never enter logs.
+    """
+    enabled: bool = True
+    max_actions: int = 15                # hard cap per task (closed-loop budget)
+    action_timeout: float = 10.0         # per-action execution timeout (s)
+    screenshot_retention_minutes: float = 5.0
+    screenshot_save: bool = False        # False = in-memory hash ring only
+    hotkey: str = "ctrl+alt+q"           # global emergency-stop combo
+    hotkey_enabled: bool = True
+
+
+@dataclass
 class Config:
     ollama: OllamaCfg = field(default_factory=OllamaCfg)
     cloud: CloudCfg = field(default_factory=CloudCfg)
@@ -195,6 +224,7 @@ class Config:
     clap: ClapCfg = field(default_factory=ClapCfg)
     livekit: LivekitCfg = field(default_factory=LivekitCfg)
     user: UserCfg = field(default_factory=UserCfg)
+    computeruse: ComputerUseCfg = field(default_factory=ComputerUseCfg)
     workspace: Path = paths.WORKSPACE
 
     def get_llm(self, name: str) -> dict:

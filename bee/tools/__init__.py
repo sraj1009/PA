@@ -21,6 +21,19 @@ _BUILDERS = [
     systemctl.systemctl_tools,
 ]
 
+
+def _computeruse_builder():
+    # Phase 5: registered from bee.computeruse (kept out of the static list
+    # so a missing optional desktop dependency never breaks tool import)
+    try:
+        from ..computeruse import computeruse_tools
+        return computeruse_tools()
+    except Exception:
+        return []
+
+
+_BUILDERS.append(_computeruse_builder)
+
 _CACHE = None
 
 

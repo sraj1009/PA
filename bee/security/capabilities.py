@@ -97,6 +97,21 @@ CAPABILITIES: dict[str, Capability] = {c.id: c for c in [
                Risk.R3, DENY, CONF_ON_ASK),
     Capability("microphone.access", "Use the microphone", "Capture audio from the mic.",
                Risk.R2, ALLOW, CONF_NONE),
+    # Phase 5 — safe computer use (verified actions, budget-bounded, no
+    # deletion/financial/credential/destructive verbs exist to grant)
+    Capability("desktop.observe", "Observe the desktop",
+               "Screenshot + inspect visible windows (read-only; pixels/titles never logged).",
+               Risk.R1, ALLOW, CONF_NONE),
+    Capability("desktop.launch", "Open / focus windows",
+               "Launch applications, focus or switch windows.",
+               Risk.R3, ASK, CONF_ON_ASK),
+    Capability("desktop.control", "Control the desktop",
+               "Click / type / keys / scroll on the user's desktop "
+               "(each action verified; unproven coordinates require explicit confirm).",
+               Risk.R3, ASK, CONF_ON_ASK),
+    Capability("desktop.clipboard", "Use the clipboard",
+               "Copy / paste on the clipboard (content never logged).",
+               Risk.R2, ALLOW, CONF_NONE),
 ]}
 
 # ------------------------------------------------------------- tool mapping
@@ -125,6 +140,12 @@ _TOOL_CAPS: dict[str, list[str]] = {
     "pay": ["financial.action"],           # future tool
     "camera_snap": ["camera.access"],      # future tool
     "mic_record": ["microphone.access"],   # future tool
+    # Phase 5 — computer use (safe set)
+    "computer_observe":   ["desktop.observe"],
+    "computer_window":    ["desktop.launch"],
+    "computer_input":     ["desktop.control"],
+    "computer_clipboard": ["desktop.clipboard"],
+    "computer_stop":      ["desktop.control"],
 }
 # escalations applied to exec tools based on argument content
 _ESCALATE = [

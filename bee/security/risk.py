@@ -42,6 +42,7 @@ CAP_EXEC = "exec"
 CAP_NETWORK = "network"
 CAP_SYSTEM = "system"
 CAP_SCHEDULE = "schedule"
+CAP_DESKTOP = "desktop"
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,13 @@ _TOOL_PROFILES: dict[str, tuple[RiskLevel, frozenset]] = {
     "scheduler":    (RiskLevel.MEDIUM, frozenset({CAP_SCHEDULE})),
     "system_health": (RiskLevel.LOW, frozenset({CAP_SYSTEM})),
     "calculator":   (RiskLevel.LOW, frozenset()),
+    # computer use (Phase 5 — safe set only; the session adds budget,
+    # provenance and post-action verification on top of this layer)
+    "computer_observe":   (RiskLevel.LOW, frozenset({CAP_DESKTOP})),
+    "computer_window":    (RiskLevel.MEDIUM, frozenset({CAP_DESKTOP})),
+    "computer_input":     (RiskLevel.MEDIUM, frozenset({CAP_DESKTOP})),
+    "computer_clipboard": (RiskLevel.LOW, frozenset({CAP_DESKTOP})),
+    "computer_stop":      (RiskLevel.LOW, frozenset()),
 }
 _DEFAULT_PROFILE = (RiskLevel.LOW, frozenset())
 
@@ -255,6 +263,18 @@ def classify_risk(tool: str, args: dict) -> RiskDecision:
                             break
                         if a == "ask" and action == "allow":
                             level, action, reason = RiskLevel.HIGH, "ask", f"python -c: {d}"
+
+    if tool == "computer_input":
+        # Phase 5: never trust coordinates blindly + keyboard input is a
+        # user-visible side effect -> explicit confirmation, not just grant
+        a = str(args.get("action") or "").lower().strip()
+        if a == "type_text":
+            level, action, reason = RiskLevel.HIGH, "ask", \
+                "type_text (keyboard input into the user's session)"
+        if a in ("click", "double_click") \
+                and str(args.get("coordinate_source") or "") == "model_raw":
+            level, action, reason = RiskLevel.HIGH, "ask", \
+                "click with unproven coordinates (model_raw)"
 
     require_approval = action in ("ask", "deny")
     return RiskDecision(level=level, action=action, reason=reason,

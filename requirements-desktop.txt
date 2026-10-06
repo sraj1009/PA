@@ -1,0 +1,6 @@
+# BEE desktop (optional, Phase 5 computer use) — Windows-first.
+# The agent works WITHOUT these (computer-use tools report a clean
+# DesktopError); MockDesktop tests never touch the real desktop.
+pywin32>=306        # win32gui / win32clipboard (window enumeration, focus, clipboard)
+mss>=9.0            # fast screenshots
+pyautogui>=0.9.54   # mouse / keyboard input

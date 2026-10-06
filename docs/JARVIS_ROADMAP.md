@@ -7,7 +7,7 @@ No code was changed while producing this roadmap.
 
 ---
 
-## 0. Phase status (updated 2026-10-06, end of Phase 4)
+## 0. Phase status (updated 2026-10-06, end of Phase 5)
 
 | Phase | Status | Evidence |
 |---|---|---|
@@ -19,6 +19,7 @@ No code was changed while producing this roadmap.
 | 5 — Memory & config (roadmap §5 Phase 4) | PARTIAL | Session store (Phase 2) + structured store (Phase 3); vector rebuild dup (B2/M12), config precedence doc (M14), metrics caps (M13) still open |
 | 6 — Provider abstraction | **DONE early (user Phase 1, item 6)** | `bee/agent/providers.py` — ProviderRegistry/ProviderConfig/ProviderHealth, env-key centralization, provider-matched cloud availability |
 | 7 — Observability & UX (roadmap §5 Phase 6) | PARTIAL | real SSE (B3) done in user Phase 4; /voice contract (B4) half-fixed (uuid temp names now; mp3 docstring mismatch remains); dashboard live data, eval expansion still open |
+| 8 — SAFE COMPUTER USE (user Phase 5) | **DONE** | `bee/computeruse/` (7 modules): 12-verb safe set behind 4 tools; per-action ComputerAction (target, coords+provenance, description, expected result, timeout, risk, verification strategy); closed loop (one call = act→observe→verify, no open-loop sequences); per-task action budget (15); coordinates never trusted (unproven refused, model_raw requires explicit confirm — risk layer HIGH/ask); 4 new capabilities (desktop.observe/launch/control/clipboard; launch & control ASK); 3 independent emergency stops (kernel.cancel / global / Ctrl+Alt+Q hotkey); privacy in code (typed text length-only, clipboard compare-only, no pixels/titles in logs, screenshot hash ring + bounded retention). 12 tests, ALL on MockDesktop (no real automation in CI). Unsafe set deliberately absent: no deletion/financial/credential/downloads/destructive verbs. **Not claimed:** WindowsDesktop untested-in-field by CI (no display); structural UI understanding, not vision-model pixel reading; Windows only. See docs/COMPUTER_USE.md |
 
 ## 1. Completed capabilities (working, tested)
 
@@ -175,8 +176,18 @@ No code was changed while producing this roadmap.
   always-on DSP wake), windowed re-transcription partials (faster-whisper is
   a batch model — genuine interim results, not token-level streaming ASR).
   `LiveKitTransport` is unverified against a live room (no credentials in
-  the test path); the exercised transport is the local mic. Proactive
-   automation remains NOT implemented.
+   the test path); the exercised transport is the local mic. Proactive
+    automation remains NOT implemented.
+- **Computer use (user Phase 5) is SAFE-SET-ONLY by construction.** The
+  unsafe verbs (unattended deletion, financial transactions, credential
+  entry, arbitrary downloads/execution, destructive system actions) do not
+  exist, so no grant, prompt, or mistake can produce them. `WindowsDesktop`
+  is untested-in-field by CI (no display in the test path — the verified
+  path is `MockDesktop`); UI understanding is structural (window
+  titles/classes/rects), NOT vision-model pixel reading; `screen_changed`
+  verification proves the screen changed, not that it changed *correctly*
+  (stronger `expected` specs or the model's next observation catch the
+  rest). Windows 10/11 only — Linux/macOS return a clean `DesktopError`.
 - Roadmap §5 Phase 4 (memory & config: B2/M12, M13, M14) and the remainder
   of §5 Phase 6 (dashboard live data, eval expansion, B4 docstring) are
   still the plan.
