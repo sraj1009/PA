@@ -88,7 +88,7 @@ class AgentKernel:
 
     # ----------------------------------------------------------- main entry
     def run(self, text: str, session_id: str = "repl", on_event=None,
-            model: str | None = None) -> TaskResult:
+            model: str | None = None, on_token=None) -> TaskResult:
         session = self.get_session(session_id)
         start = time.time()
         session.add_turn("user", text)
@@ -221,14 +221,14 @@ class AgentKernel:
         self.ctx.current_task_id = task.id
         try:
             return self._execute_loop(task, session_id, exec_text, model, bridge, _approver,
-                                       start, session)
+                                       start, session, on_token)
         finally:
             self.gate.store.end_task(task.id)   # task-scoped grants die with the task
             self.ctx.current_task_id = ""
             self._active_task = None
 
     def _execute_loop(self, task, session_id, exec_text, model, bridge, _approver,
-                      start, session) -> "TaskResult":
+                      start, session, on_token=None) -> "TaskResult":
         result = None
         attempts = 0
         while True:
@@ -239,7 +239,7 @@ class AgentKernel:
             transition(task, TaskState.EXECUTING)
             attempt_start = len(task.observations)
             result = run_agent(self.ctx, exec_text, on_event=bridge, model=model,
-                               on_ask=_approver)
+                               on_ask=_approver, on_token=on_token)
             attempt_obs = task.observations[attempt_start:]
             if result.error == "cancelled":
                 transition(task, TaskState.CANCELLED)

@@ -432,6 +432,93 @@ def _web(cfg, host: str, port: int):
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
+# ------------------------------------------------------------------ realtime
+def _realtime(cfg, livekit: bool = False, always_on: bool = False) -> int:
+    """Phase 4: true realtime conversational voice.
+
+    Transport (mic or LiveKit room) -> VAD -> streaming STT (interim partials)
+    -> VoiceEngine (wake / endpointing / barge-in / state machine) -> AGENT
+    KERNEL (same AgentSession/Task system as text) -> streamed LLM tokens ->
+    sentence-pipelined streaming TTS -> speaker.
+    """
+    from .agent import engines
+    from .agent.context import create_context
+    from .kernel import AgentKernel
+    from .voice.realtime import (MicTransport, StreamingSTT, StreamingTTS,
+                                 VoiceEngine, VoiceEngineCfg)
+
+    if not StreamingSTT.available():
+        print("voice STT not installed — pip install -r requirements-voice.txt")
+        return 1
+
+    ctx = create_context(cfg)
+    engine = engines.ask_engine()
+    ctx.model_override = engines.override_for(engine)
+    kernel = AgentKernel(ctx)
+    ctx.kernel = kernel
+
+    vc = cfg.voice
+    eng_cfg = VoiceEngineCfg(
+        wake_word=vc.wake_word or "bee",
+        always_on=always_on,
+        silence_ms=vc.rt_silence_ms,
+        max_utterance_ms=vc.rt_max_utterance_ms,
+        partial_stt=vc.rt_partial_stt,
+        partial_every_ms=vc.rt_partial_every_ms,
+        conversation=vc.rt_conversation,
+        wake_ack=vc.rt_wake_ack,
+        stt_timeout=vc.rt_stt_timeout,
+        tts_timeout=vc.rt_tts_timeout,
+        reconnect_max=vc.rt_reconnect_max,
+        sample_rate=vc.sample_rate,
+    )
+
+    if livekit:
+        from .livekit.transport import LiveKitTransport
+        transport = LiveKitTransport(cfg)
+        sink_note = "LiveKit room"
+    else:
+        transport = MicTransport(sample_rate=vc.sample_rate)
+        sink_note = "speakers"
+
+    def on_event(ev):
+        t = ev.get("type")
+        if t == "state":
+            print(f"  [voice] {ev.get('from')} -> {ev.get('to')}")
+        elif t == "partial":
+            print(f"  · {ev.get('text')}")
+        elif t == "transcript":
+            print(f"  you> {ev.get('text')}")
+        elif t == "reply":
+            print(f"  BEE> (spoken) {str(ev.get('text'))[:200]}")
+        elif t == "barge_in":
+            print("  [voice] barge-in: TTS stopped, task cancelled")
+        elif t == "wake":
+            print("  [voice] wake word heard" + (" (repeat)" if ev.get("repeat") else ""))
+        elif t == "error":
+            print(f"  [voice] ERROR: {ev.get('error')}")
+        elif t == "recovered":
+            print("  [voice] recovered")
+
+    stt = StreamingSTT(sample_rate=vc.sample_rate, model=vc.model,
+                       device=vc.device, compute_type=vc.compute_type,
+                       timeout=vc.rt_stt_timeout)
+    tts = StreamingTTS(sink=transport.play,
+                       voice=vc.tts_voice or "en-US-AndrewMultilingualNeural",
+                       rate=vc.tts_rate, edge_key=vc.edge_key,
+                       timeout=vc.rt_tts_timeout)
+    eng = VoiceEngine(transport, stt, tts, kernel, cfg=eng_cfg, on_event=on_event)
+    print(f"\n  REALTIME VOICE — engine {engine} · STT faster-whisper {vc.model}"
+          f" · TTS streaming -> {sink_note}")
+    print(f"  wake word: {eng_cfg.wake_word!r} · always-on: {always_on}"
+          f" · barge-in: ON · Ctrl-C to stop\n")
+    try:
+        eng.run()
+    finally:
+        eng.close()
+    return 0
+
+
 # ------------------------------------------------------------------ setup
 def _setup():
     import importlib.util
@@ -562,12 +649,14 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="bee", description="BEE - local-first self-improving PA")
     ap.add_argument("mode", nargs="?", default="repl",
                     choices=["repl", "voice", "clap", "web", "plan", "speak", "eval", "setup",
-                              "consolidate", "livekit", "full"])
+                              "consolidate", "livekit", "realtime", "full"])
     ap.add_argument("rest", nargs="*")
     ap.add_argument("--config", default=None, help="path to config.yaml")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8787)
     ap.add_argument("--room", default=None, help="LiveKit room name (livekit mode)")
+    ap.add_argument("--always-on", action="store_true",
+                    help="realtime: skip the wake word (always listening)")
     args = ap.parse_args(argv)
 
     if args.mode == "setup":
@@ -622,6 +711,9 @@ def main(argv=None):
         from .livekit import agent as lk
         room = args.room or (args.rest[0] if args.rest else None)
         sys.exit(lk.run(cfg, room=room))
+    elif args.mode == "realtime":
+        sys.exit(_realtime(cfg, livekit="livekit" in args.rest,
+                           always_on=args.always_on))
     elif args.mode == "speak":
         from .voice import speak
         speak.speak(" ".join(args.rest) or "Hello, I am BEE.", cfg)

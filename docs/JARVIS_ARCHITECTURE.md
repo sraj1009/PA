@@ -258,6 +258,11 @@ noise floor, double-clap 60–400 ms, 1.5 s cooldown) → faster-whisper STT
 (`voice/transcribe.py`, CPU-first on Windows, models under `models/`) → same
 `run_agent` path → TTS via pyttsx3 SAPI (edge-tts fallback, `voice/speak.py`).
 
+**Phase 4 (2026-10-06) added the true-realtime path** — `python -m bee.cli
+realtime` (mic or `realtime livekit`): VoiceEngine over the VoiceTransport
+abstraction (state machine, VAD, endpointing, interim partials, barge-in,
+reconnect) → SAME kernel as text → streamed tokens → streaming TTS. See §16.
+
 ### 3.3 Web turn
 
 `POST /chat` (webapp.py:68-96) → `run_agent` with `on_event` buffering into a
@@ -266,6 +271,13 @@ list; the "SSE" response streams **only after the whole turn completes**
 filename** `bee_upload{suffix}` (108 — concurrent-upload race), ffmpeg→STT→
 run_agent→JSON text (docstring claims "+tts mp3" — incorrect API contract).
 **No route is authenticated** (default bind 127.0.0.1 is the only mitigation).
+
+**Audit note — superseded where marked (Phase 1 + Phase 4):** web routes are
+now token-authenticated (Phase 1); `/voice` temp names are now uuid-based
+(race closed); and `/chat` is now **genuine SSE** — the kernel runs in a
+worker thread and every event (including live LLM tokens) is pushed through a
+queue the instant it happens (verified: tokens precede `result` in the byte
+stream; B3 closed). The audit text above is kept for the record.
 
 ### 3.4 Offline turn
 
@@ -630,7 +642,111 @@ Kernel UX (deterministic, zero LLM calls, verified against the store):
 - Memory commands are parsed BEFORE follow-up resolution so "Forget that."
   is never merged into a previous task.
 
-## 16. Known-stale artifacts (documented for the record)
+## 16. True Realtime Voice (Phase 4 — implemented 2026-10-06)
+
+Natural conversational voice, not push-to-talk. The pipeline:
+
+```
+transport frame (100 ms)
+  -> EnergyVAD              adaptive noise floor + 200 ms hangover
+  -> wake capture (IDLE)    energy buffers, STT confirms the wake word —
+                            energy alone NEVER wakes
+  -> utterance capture      feed StreamingSTT; interim partials rate-limited
+                            (partial_every_ms + partial_min_growth)
+  -> endpointing            REAL quiet (rms below threshold) for silence_ms,
+                            or force-finalize at max_utterance_ms
+  -> classification         wake / stop / ack / repeated-wake / task
+  -> kernel.run()           worker thread — SAME AgentSession/Task system as
+                            text; cancellation is kernel.cancel()
+  -> streamed tokens        genuine LLM chat_stream -> SentenceSplitter
+  -> StreamingTTS           edge-tts chunk streaming (or per-sentence
+                            pyttsx3 fallback) -> transport.play()
+```
+
+**Files**: `bee/voice/realtime/{state,vad,transport,stt_stream,tts_stream,engine,__init__}.py`,
+`bee/livekit/transport.py`, `bee/cli.py` (`realtime` mode), `bee/webapp.py`
+(`/chat` is now genuine SSE: kernel in a worker thread, every event —
+including LLM tokens — pushed through a queue the instant it happens),
+`tests/test_voice_engine.py` (12 tests).
+
+### 16.1 Voice state machine (`state.py`)
+
+`IDLE / LISTENING / PROCESSING / THINKING / SPEAKING / INTERRUPTED / ERROR`
+with an explicit transition table; illegal transitions raise
+(`InvalidVoiceTransition`) — fail closed. The voice layer owns ONLY this
+machine plus timing. All task logic (planning, permissions, memory,
+verification, receipts, session continuity) stays in the kernel; voice
+utterances enter as tasks on session `voice` and exit as streamed speech.
+
+### 16.2 The ten required behaviors
+
+1. **Speech-start detection** — VAD with adaptive floor (speech never
+   inflates the baseline) + hangover against intra-word dips.
+2. **Interim transcripts** — windowed partials over faster-whisper at a
+   rate-limited cadence, surfaced as `{"type":"partial"}` events.
+3. **Early processing where safe** — partials stream out while the user is
+   still talking; the LLM answer streams tokens while it is still being
+   generated; sentence N+1 synthesizes while sentence N plays.
+4. **Streamed response** — `chat_stream` (Ollama NDJSON / litellm SSE),
+   sentence-pipelined into TTS; the first spoken sentence lands before the
+   task completes (verified by test).
+5. **Interruption** — barge-in: sustained speech (≥ barge_min_speech_ms)
+   while THINKING/SPEAKING interrupts (works even before any audio, so a
+   long tool call can be interrupted).
+6. **Immediate TTS stop** — `tts.stop()` drops the queue and flags the
+   in-flight synthesis on the same frame the barge-in is detected.
+7. **Cancel/pause the task** — `kernel.cancel()` on barge-in; "stop"-class
+   words as complete utterances also cancel (first-class, same as REPL).
+8. **New turn with correct context** — the barge-in utterance is captured
+   (backfilled from a 400 ms ring of recent frames) and processed on the
+   SAME session id; the kernel's session continuity carries the context.
+9. **Echo avoidance** — three layers: while TTS is playing the barge gate is
+   raised ×`echo_gate` (2.0) so BEE's own voice stays under it; capture does
+   not *start* while TTS is busy; the VAD floor only adapts on quiet frames.
+10. **Graceful failure** — any STT/transport/TTS/step error → ERROR (no
+    crash loop); transport reconnects with capped exponential backoff
+    (0.5 s → … → reconnect_max); a reconnect only "counts as good" once it
+    actually delivers audio (a mic that dies on every reconnect gives up
+    after `max_reconnect_attempts` instead of looping forever).
+
+**UX verified by tests**: "bee" → "Yes?" → "open chrome" → "Done." →
+(speaking) "stop" → barge-in → "Stopped."; repeated "bee" re-acks instead of
+firing a task; background chatter that lacks the wake word is rejected.
+
+### 16.3 Transport abstraction (LiveKit stays out of the kernel)
+
+`VoiceTransport` protocol: `connect / close / is_connected /
+read_frame(timeout) / play(audio)`. Concrete: `MicTransport` (local
+sounddevice capture + local playback — the exercised path),
+`NullTransport` (tests), `LiveKitTransport` (`bee/livekit/transport.py` —
+room as transport: remote audio → 16 kHz s16le frames in, TTS bytes decoded
+via PyAV → AudioSource out; asyncio in a background thread, sync surface to
+the engine). The engine and the kernel never import LiveKit. The legacy
+`bee/livekit/agent.py` worker path still works as before.
+
+**Honest status of LiveKitTransport**: NOT verified against a live room in
+this environment (no credentials in the test path). It is thin, lazy-imports
+livekit, and fails with `TransportError` cleanly; treat it as
+untested-in-field.
+
+### 16.4 What Phase 4 does NOT claim
+
+- **No human-level naturalness claim.** Wake word is a full word (STT-
+  confirmed), endpointing is energy-based, partials re-transcribe a window —
+  a local, offline, low-latency *conversational* system, not a
+  phone-call-quality duplex voice.
+- STT is windowed re-transcription (faster-whisper is a batch model) —
+  genuine *interim* results, but not token-level cloud streaming.
+- Echo gating is energy-threshold based; a very loud user talking exactly
+  while BEE speaks is the residual risk (handed to barge-in, which is
+  desired anyway).
+- The first ~250 ms of a barge-in utterance is only partially captured
+  (ring backfill is 400 ms — most of it is kept; the boundary is documented,
+  not hidden).
+- `MicTransport.play()` renders whole chunks via a temp file + system
+  player (latency-friendly, not sample-accurate).
+
+## 17. Known-stale artifacts (documented for the record)
 
 - `docs/llm-component.md` — describes the pre-`bee4b` pipeline (stale).
 - `evals/REPORT.md` — regenerated by the verify run; its agent-eval section

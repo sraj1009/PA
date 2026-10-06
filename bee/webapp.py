@@ -14,8 +14,10 @@ import hmac
 import json
 import logging
 import os
+import queue
 import secrets
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 
@@ -132,12 +134,15 @@ async def chat(body: dict, request: Request):
     if not task:
         return JSONResponse({"error": "empty task"}, status_code=400)
     model = body.get("model") or _default_engine_override()
-    buf: list[str] = []
 
-    def on_event(ev):
-        buf.append("data: " + json.dumps(ev, ensure_ascii=False) + "\n\n")
+    def sse(ev) -> str:
+        return "data: " + json.dumps(ev, ensure_ascii=False) + "\n\n"
 
     def gen():
+        # Phase 4: GENUINE streaming. The kernel runs in a worker thread and
+        # every event (tool_start, token, verify, ...) is pushed through a
+        # queue the moment it happens — the first LLM token reaches the
+        # browser before the task is finished (no buffering of the reply).
         ctx = get_ctx()
         # Phase 2: web tasks run through the kernel too (state, verification,
         # receipts, session continuity). The web UI is unattended: 'ask'
@@ -145,21 +150,42 @@ async def chat(body: dict, request: Request):
         if ctx.kernel is None:
             from .kernel import AgentKernel
             ctx.kernel = AgentKernel(ctx, approver=lambda tool, args, reason: False)
-        yield "data: " + json.dumps({"type": "start"}) + "\n\n"
-        try:
-            result = ctx.kernel.run(task, session_id=str(body.get("session") or "web"),
-                                    on_event=on_event, model=model)
-            for chunk in buf:
-                yield chunk
-            yield "data: " + json.dumps({"type": "result", "ok": result.ok,
-                                         "model": result.model, "escalated": result.escalated,
-                                         "iterations": result.iterations,
-                                         "tool_calls": result.tool_calls,
-                                         "verified": result.verification.verdict,
-                                         "output": result.output, "error": result.error},
-                                        ensure_ascii=False) + "\n\n"
-        except Exception as e:
-            yield "data: " + json.dumps({"type": "error", "error": str(e)}, ensure_ascii=False) + "\n\n"
+        q: "queue.Queue" = queue.Queue()
+
+        def on_event(ev):
+            q.put(ev)
+
+        def worker():
+            try:
+                result = ctx.kernel.run(task, session_id=str(body.get("session") or "web"),
+                                        on_event=on_event, model=model,
+                                        # truthy on_token switches the loop to
+                                        # genuine chat_stream; token events
+                                        # also arrive live through on_event
+                                        on_token=lambda _t: None)
+                q.put({"type": "result", "ok": result.ok,
+                       "model": result.model, "escalated": result.escalated,
+                       "iterations": result.iterations,
+                       "tool_calls": result.tool_calls,
+                       "verified": result.verification.verdict,
+                       "output": result.output, "error": result.error})
+            except Exception as e:
+                q.put({"type": "error", "error": f"{type(e).__name__}: {e}"})
+            finally:
+                q.put(None)
+
+        th = threading.Thread(target=worker, daemon=True, name="BeeWebChat")
+        yield sse({"type": "start"})
+        th.start()
+        while True:
+            try:
+                ev = q.get(timeout=120)
+            except queue.Empty:
+                yield sse({"type": "timeout", "error": "task stalled — no events for 120s"})
+                break
+            if ev is None:
+                break
+            yield sse(ev)
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")

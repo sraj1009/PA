@@ -1,6 +1,6 @@
 # BEE — Verification Report (Phase 4)
 
-- Generated: 2026-10-05 23:38 
+- Generated: 2026-10-06 00:21 
 - Machine: RTX 3050 8GB / Windows / Ollama `bee4b`
 - Cloud tier: configured (gemini/gemini-3.6-flash) — credentialed
 - Seed: 20261004
@@ -71,4 +71,4 @@ Notes per suite:
 3. **Not claimed:** no 99.9% on open-ended LLM behaviour — that target is only
    meaningful for deterministic components and is stated here with its interval.
 
-_Total checks: 71,914 · wall time: 5.2s · overall: ALL PASS_
+_Total checks: 71,914 · wall time: 4.9s · overall: ALL PASS_

@@ -308,9 +308,12 @@ def _run_fastpath(ctx, cfg, task: str, fp, m, episode, start: float, emit, sub: 
 # ----------------------------------------------------------------- main
 def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
               max_iters: int = 25, system: str | None = None, sub: bool = False,
-              on_ask=None) -> AgentResult:
+              on_ask=None, on_token=None) -> AgentResult:
     # on_ask (Phase 2): kernel-injected permission approver (tool, args, reason)->bool,
     # consulted when the guard says 'ask'. None = guard's built-in mode approver.
+    # on_token (Phase 4): when set, LLM completions use chat_stream and every
+    # content delta is emitted as {"type": "token", "text": ...} — genuine
+    # provider streaming (Ollama NDJSON / litellm chunks), not post-hoc splits.
     cfg: Config = ctx.cfg
     if ctx.client is None:
         ctx.client = LLMClient(cfg)
@@ -432,6 +435,13 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                 emit({"type": "redact", "n": n})
         else:
             msgs = messages
+        if on_token is not None:
+            try:
+                return ctx.client.chat_stream(cur_name, msgs,
+                                              on_token=lambda t: emit({"type": "token", "text": t}),
+                                              tools=tools)
+            except LLMError:
+                return ctx.client.chat(cur_name, msgs, tools=tools)  # one fallback
         return ctx.client.chat(cur_name, msgs, tools=tools)
 
     iters = 0

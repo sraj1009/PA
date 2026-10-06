@@ -160,8 +160,12 @@ def test_reflection_skips_trivial_tasks():
 
 # ------------------------------------------------------------------ /plan
 def test_plan_classify_eisenhower():
+    from datetime import date, timedelta
+
     from bee.commands.plan import classify
-    assert classify("fix the client outage", "2026-10-05") == "P1"   # urgent + important
+    # urgent = due today or tomorrow — compute it, don't hard-code a date
+    due_tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    assert classify("fix the client outage", due_tomorrow) == "P1"    # urgent + important
     assert classify("prepare Q1 strategy review") == "P2"             # important only
     assert classify("water the plants") == "P4"                       # neither
 

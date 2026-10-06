@@ -106,6 +106,157 @@ class LLMClient:
         return LLMResponse(content=d.get("content"), tool_calls=d.get("tool_calls") or [],
                            usage=d.get("usage") or {})
 
+    # ---------------------------------------------------------------- stream
+    def chat_stream(self, name: str, messages: list[dict], on_token,
+                    tools: list | None = None, max_retries: int = 1, *,
+                    max_tokens: int | None = None, temperature: float | None = None,
+                    timeout: float | None = None) -> dict:
+        """GENUINE streaming completion: `on_token(str)` is called for every
+        content delta as the provider emits it (Ollama NDJSON / litellm SSE
+        chunk stream). Returns the same normalized dict as chat().
+
+        Honest limitations: streaming is real for the Ollama and litellm
+        paths; if a provider errors AFTER tokens were already emitted the
+        partial result is returned (not retried — retrying would duplicate
+        text). Tool calls accumulate from deltas into the final shape.
+        """
+        info = self.cfg.get_llm(name)
+        model = self._model_ref(info)
+        kwargs = dict(
+            model=model,
+            messages=self._norm_messages(messages),
+            max_tokens=int(max_tokens) if max_tokens else info["max_tokens"],
+            timeout=float(timeout) if timeout else info.get("timeout", 120),
+        )
+        if not _is_gemini3plus(model):
+            kwargs["temperature"] = float(temperature) if temperature is not None else info["temperature"]
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        if info["cloud"] and info.get("base_url"):
+            kwargs["api_base"] = info["base_url"]
+        if info["cloud"] and info.get("api_key"):
+            kwargs["api_key"] = info["api_key"]
+
+        emitted = {"n": 0}
+
+        def tok(s: str):
+            if s:
+                emitted["n"] += 1
+                try:
+                    on_token(s)
+                except Exception:
+                    pass
+
+        last_err: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                if HAS_LITELLM:
+                    return self._litellm_stream(kwargs, tools, on_token, tok, emitted)
+                if info["cloud"]:
+                    raise LLMError("cloud streaming requested but litellm not installed",
+                                   "server", False)
+                return self._ollama_stream(info, kwargs, on_token, tok, emitted)
+            except LLMError as e:
+                last_err = e
+                if e.retryable and attempt < max_retries and emitted["n"] == 0:
+                    time.sleep(1.0 * (2 ** attempt))
+                    continue
+                if emitted["n"] > 0:
+                    # partial stream already reached the user — surface it
+                    return {"content": getattr(e, "_partial", None),
+                            "tool_calls": [], "usage": {}}
+                raise
+            except Exception as e:
+                err = LLMError.classify(str(e))
+                last_err = err
+                if err.retryable and attempt < max_retries and emitted["n"] == 0:
+                    time.sleep(1.0 * (2 ** attempt))
+                    continue
+                if emitted["n"] > 0:
+                    return {"content": None, "tool_calls": [], "usage": {},
+                            "error": str(e)}
+                raise LLMError(str(e), err.kind, err.retryable) from e
+        raise LLMError(str(last_err), "server")  # pragma: no cover
+
+    def _ollama_stream(self, info: dict, kwargs: dict, tools: list | None,
+                       on_token, tok, emitted) -> dict:
+        """Native Ollama: POST /api/chat with stream:true (NDJSON deltas)."""
+        payload = {
+            "model": info["name"],
+            "messages": kwargs["messages"],
+            "stream": True,
+            "options": {"num_ctx": int(info.get("num_ctx", 8192)),
+                        "num_predict": int(kwargs["max_tokens"]),
+                        "temperature": kwargs["temperature"]},
+        }
+        if self.cfg.ollama.keep_alive:
+            payload["keep_alive"] = self.cfg.ollama.keep_alive
+        if tools:
+            payload["tools"] = tools
+        content_parts: list[str] = []
+        tcs: list[dict] = []
+        usage = {"prompt": 0, "completion": 0}
+        timeout = kwargs.get("timeout", 300)
+        with httpx.Client() as hc:
+            with hc.stream("POST", f"{info['base_url']}/api/chat", json=payload,
+                           timeout=httpx.Timeout(connect=6.0, read=float(timeout))) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    d = json.loads(line)
+                    m = d.get("message", {})
+                    if m.get("content"):
+                        content_parts.append(m["content"])
+                        tok(m["content"])
+                    for tc in m.get("tool_calls") or []:
+                        fn = tc.get("function", {})
+                        tcs.append({"id": f"call_{len(tcs)}", "name": fn.get("name", ""),
+                                    "arguments": fn.get("arguments", {})})
+                    if d.get("done"):
+                        usage = {"prompt": d.get("prompt_eval_count", 0),
+                                 "completion": d.get("eval_count", 0)}
+        return {"content": "".join(content_parts) or None, "tool_calls": tcs, "usage": usage}
+
+    @staticmethod
+    def _litellm_stream(kwargs: dict, tools: list | None, on_token, tok, emitted) -> dict:
+        """litellm stream=True — per-chunk deltas (works for Ollama + Gemini)."""
+        content_parts: list[str] = []
+        tc_acc: dict[int, dict] = {}
+        usage = {"prompt": 0, "completion": 0}
+        stream = litellm.completion(stream=True, **kwargs)
+        for chunk in stream:
+            ch = chunk.choices[0].delta if chunk.choices else None
+            if ch is not None:
+                if ch.content:
+                    content_parts.append(ch.content)
+                    tok(ch.content)
+                for tc in (ch.tool_calls or []):
+                    slot = tc_acc.setdefault(getattr(tc, "index", 0),
+                                             {"id": "", "name": "", "arguments": ""})
+                    if tc.id:
+                        slot["id"] = tc.id
+                    fn = tc.function
+                    if fn is not None:
+                        if fn.name:
+                            slot["name"] += fn.name
+                        if fn.arguments:
+                            slot["arguments"] += fn.arguments
+            u = getattr(chunk, "usage", None)
+            if u is not None:
+                usage = {"prompt": getattr(u, "prompt_tokens", 0) or 0,
+                         "completion": getattr(u, "completion_tokens", 0) or 0}
+        tcs = []
+        for i in sorted(tc_acc):
+            s = tc_acc[i]
+            try:
+                args = json.loads(s["arguments"]) if s["arguments"] else {}
+            except Exception:
+                args = {"_raw": s["arguments"]}
+            tcs.append({"id": s["id"] or f"call_{i}", "name": s["name"], "arguments": args})
+        return {"content": "".join(content_parts) or None, "tool_calls": tcs, "usage": usage}
+
     # ------------------------------------------------------------------ chat
     def chat(self, name: str, messages: list[dict], tools: list | None = None,
              max_retries: int = 2, on_tool_call=None, *,

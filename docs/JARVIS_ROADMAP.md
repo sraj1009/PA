@@ -7,7 +7,7 @@ No code was changed while producing this roadmap.
 
 ---
 
-## 0. Phase status (updated 2026-10-05, end of Phase 3)
+## 0. Phase status (updated 2026-10-06, end of Phase 4)
 
 | Phase | Status | Evidence |
 |---|---|---|
@@ -15,9 +15,10 @@ No code was changed while producing this roadmap.
 | 1 — Security (web auth, AST risk layer, eval_safe limits, episode redaction, archive-not-delete, sandbox hardening) | **DONE** | see `docs/SECURITY.md`; netguard 19 SSRF cases; risk/audit suites |
 | 2 — Kernel | **DONE** | `bee/kernel/` (13 modules): TaskState machine, Plan/Action/Observation, PermissionDecision, ExecutionReceipts, AgentEvent+EventBus, AgentSession (persistent follow-ups), RetryPolicy, effect verification, ToolBus; REPL+web+slash-commands unified. 45 kernel tests; 308 pytest / verify ALL PASS 71,914 |
 | 3 — Permissions + structured memory (capability policy, confirmations, memory architecture) | **DONE** | `bee/security/capabilities.py` (19 capabilities, R0–R5, task-scoped grants, pre-execution gate in loop.py); `bee/memory/store.py` (remember/recall/update/forget/summarize/expire + entity memory + provenance governance); kernel memory commands. tests/test_capabilities.py + tests/test_structured_memory.py. Remaining from original roadmap Phase 3: **real user-job scheduling (B1/M8)** — still open |
-| 4 — Memory & config | PARTIAL | Session store (Phase 2) + structured store (Phase 3); vector rebuild dup (B2/M12), config precedence doc (M14), metrics caps (M13) still open |
-| 5 — Provider abstraction | **DONE early (Phase 1, item 6)** | `bee/agent/providers.py` — ProviderRegistry/ProviderConfig/ProviderHealth, env-key centralization, provider-matched cloud availability |
-| 6 — Observability & UX | OPEN | real SSE (B3), /voice contract (B4 — docstring half-fixed), dashboard live data, eval expansion |
+| 4 — TRUE REALTIME VOICE (user Phase 4) | **DONE** | `bee/voice/realtime/` (7 modules): 7-state voice machine (IDLE/LISTENING/PROCESSING/THINKING/SPEAKING/INTERRUPTED/ERROR), VAD + endpointing + rate-limited partials, barge-in (TTS stop + kernel.cancel same frame), echo gating, wake word (STT-confirmed), reconnect w/ capped backoff; genuine LLM token streaming → sentence-pipelined edge-tts; LiveKit behind `VoiceTransport` (kernel never imports LiveKit); web `/chat` now real SSE (B3 closed). 12 voice tests incl. all 9 required scenarios; 361 pytest / verify ALL PASS 71,914. **Not claimed:** human-level naturalness; LiveKitTransport unverified against a live room (no credentials in test path) |
+| 5 — Memory & config (roadmap §5 Phase 4) | PARTIAL | Session store (Phase 2) + structured store (Phase 3); vector rebuild dup (B2/M12), config precedence doc (M14), metrics caps (M13) still open |
+| 6 — Provider abstraction | **DONE early (user Phase 1, item 6)** | `bee/agent/providers.py` — ProviderRegistry/ProviderConfig/ProviderHealth, env-key centralization, provider-matched cloud availability |
+| 7 — Observability & UX (roadmap §5 Phase 6) | PARTIAL | real SSE (B3) done in user Phase 4; /voice contract (B4) half-fixed (uuid temp names now; mp3 docstring mismatch remains); dashboard live data, eval expansion still open |
 
 ## 1. Completed capabilities (working, tested)
 
@@ -33,6 +34,7 @@ No code was changed while producing this roadmap.
 | 14 tool modules incl. files (workspace jail), shell, code (eval-free), web multi-engine, calculator (AST `eval_safe`), sandbox (Docker), planner, skills, systemctl, spawn | tools/*; zero eval/exec confirmed by grep |
 | Memory flywheel: episodes JSONL → router retrain → SFT build → QLoRA; golden teach-back → skills | pipeline/, train/, training/ |
 | Voice: faster-whisper STT (CPU-first Windows), clap wake (double-clap 60–400 ms, adaptive floor), pyttsx3 SAPI + edge-tts fallback | voice/* |
+| True realtime voice: 7-state voice machine, VAD + endpointing + interim partials, barge-in (immediate TTS stop + task cancel), echo gating, STT-confirmed wake word, reconnect w/ capped backoff, genuine token streaming → sentence-pipelined TTS; LiveKit behind VoiceTransport | bee/voice/realtime/*, livekit/transport.py; tests/test_voice_engine.py (12, incl. all 9 required scenarios) |
 | LiveKit realtime worker (free tier): BeeSTT/BeeTTS, 2 h JWT mint, unattended guard | livekit/* |
 | Nightly scheduler (consolidation, vector rebuild, retrain, teach-back, SFT) | scheduler.py |
 | Web UI: chat, engine switch, skills, LiveKit page, face state | webapp.py; setup.ps1 "All core checks passed" |
@@ -47,8 +49,7 @@ No code was changed while producing this roadmap.
 |---|---|---|---|
 | B1 | User cron scheduling | Every job (restored and newly added) is a `_noop` that logs one line; jobs never execute | tools/scheduler_tool.py:39-40, 50-57, 82 |
 | B2 | Vector store rebuild | `rebuild()` appends (`t.add`) to the existing table each 12 h → duplicate rows accumulate, search quality degrades over time | memory/search.py:55 |
-| B3 | Web "SSE" chat streaming | Events buffered and flushed only after the turn completes — not streaming | webapp.py:74-96 |
-| B4 | Web `/voice` contract | Docstring promises "+tts mp3"; endpoint returns JSON text only; fixed temp filename `bee_upload{suffix}` races on concurrent uploads | webapp.py:101, 108 |
+| B4 | Web `/voice` contract | Docstring promises "+tts mp3"; endpoint returns JSON text only (temp-name race fixed in Phase 4: uploads now use uuid names) | webapp.py `/voice` |
 | B5 | 11/21 agent-eval tasks fail | Local 3B "missing substring" quality ceiling (file/DSA/memory/plan tasks) — model quality, not loop bugs | evals/tasks.yaml run 2026-10-05 |
 
 ## 3. Risky capabilities (work, but can harm user data/system)
@@ -168,6 +169,14 @@ No code was changed while producing this roadmap.
 - Structured memory is a flat JSON store with keyword scoring — not a
   vector DB, not graph memory; conflict resolution is key-based upsert,
   not semantic dedup.
-- Realtime-voice event streaming and proactive automation are NOT
-  implemented; the typed event model that would carry them is.
-- Phases 4 (remainder) and 6 above are still the plan.
+- **Realtime voice is implemented (user Phase 4) but is NOT claimed to be
+  human-level natural.** It is a local, offline, low-latency conversational
+  system: energy VAD (not a neural VAD), STT-confirmed wake word (not
+  always-on DSP wake), windowed re-transcription partials (faster-whisper is
+  a batch model — genuine interim results, not token-level streaming ASR).
+  `LiveKitTransport` is unverified against a live room (no credentials in
+  the test path); the exercised transport is the local mic. Proactive
+   automation remains NOT implemented.
+- Roadmap §5 Phase 4 (memory & config: B2/M12, M13, M14) and the remainder
+  of §5 Phase 6 (dashboard live data, eval expansion, B4 docstring) are
+  still the plan.
