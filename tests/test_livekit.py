@@ -33,6 +33,8 @@ def test_validate_room():
 
 
 def test_make_token_grants():
+    pytest.importorskip("livekit", reason="MISSING OPTIONAL DEPENDENCY: livekit "
+                              "SDK (pip install -r requirements-livekit.txt)")
     from bee.livekit.agent import make_token
     cfg = load_config()
     tok = make_token(cfg, "bee-pa")
@@ -62,6 +64,8 @@ def test_state_roundtrip():
 
 
 def test_web_livekit_and_face_endpoints(monkeypatch):
+    pytest.importorskip("livekit", reason="MISSING OPTIONAL DEPENDENCY: livekit "
+                              "SDK (pip install -r requirements-livekit.txt)")
     from fastapi.testclient import TestClient
     from bee import webapp
     # Phase 1: stateful endpoints (token mint, face state) require the web
@@ -90,6 +94,8 @@ def test_web_livekit_and_face_endpoints(monkeypatch):
 
 
 def test_stt_tts_adapters_construct():
+    pytest.importorskip("livekit", reason="MISSING OPTIONAL DEPENDENCY: livekit "
+                              "SDK (pip install -r requirements-livekit.txt)")
     cfg = load_config()
     from bee.livekit.agent import make_stt, make_tts
     stt = make_stt(cfg)

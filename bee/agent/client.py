@@ -342,6 +342,47 @@ class LLMClient:
         except Exception:
             return []
 
+    # --------------------------------------------- provider-layer public API
+    # Phase 6 (2026-10-08): the caller-facing view of the provider registry.
+    # NO caller inspects provider env vars or hard-codes a provider — they
+    # ask here (or via agent.providers), which is the single source of truth.
+    def health(self) -> dict:
+        """Per-provider availability, from the ProviderRegistry (never a
+        hard-coded key list). {kind: {model, available, reason}}."""
+        from . import providers
+        out = {}
+        for h in providers.ProviderRegistry.from_config(self.cfg).health():
+            out[h.kind.value] = {"model": h.model, "available": h.available,
+                                 "reason": h.reason}
+        return out
+
+    def ollama_up(self) -> bool:
+        """Public availability probe for the local (Ollama) provider."""
+        try:
+            r = httpx.get(f"{self.cfg.ollama.base_url}/api/tags", timeout=3)
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    def _has_ollama(self) -> bool:
+        """Deprecated private alias — use ollama_up() (kept for old callers)."""
+        return self.ollama_up()
+
+    def capabilities(self) -> dict:
+        """What THIS deployment can do (embeddings ride on Ollama)."""
+        return {"chat": True, "streaming_chat": True, "tool_calling": True,
+                "embeddings": self.ollama_up(), "health": True,
+                "model_info": True}
+
+    def models_info(self) -> dict:
+        """Provider registry + live model inventory in one view."""
+        from . import providers
+        reg = providers.ProviderRegistry.from_config(self.cfg)
+        return {"providers": {h.kind.value: {"model": h.model, "available": h.available}
+                              for h in reg.health()},
+                "ollama_models": self.models_list(),
+                "cloud_configured": self.cfg.cloud.llm or None}
+
     # ------------------------------------------------------------- internals
     def _model_ref(self, info: dict) -> str:
         if info["cloud"]:
@@ -417,10 +458,3 @@ class LLMClient:
                 on_tool_call(fn.get("name", ""), fn.get("arguments", {}))
         return {"content": m.get("content") or None, "tool_calls": tcs,
                 "usage": {"prompt": data.get("prompt_eval_count", 0), "completion": data.get("eval_count", 0)}}
-
-    def _has_ollama(self) -> bool:
-        try:
-            r = httpx.get(f"{self.cfg.ollama.base_url}/api/tags", timeout=3)
-            return r.status_code == 200
-        except Exception:
-            return False

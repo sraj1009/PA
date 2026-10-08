@@ -36,6 +36,9 @@ class StubClient:
         self.calls: list[str] = []
         self.fail_cloud = fail_cloud
 
+    def ollama_up(self):
+        return True
+
     def _has_ollama(self):
         return True
 

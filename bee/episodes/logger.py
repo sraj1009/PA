@@ -83,6 +83,8 @@ class Episode:
         try:
             paths.EPISODES_DIR.mkdir(parents=True, exist_ok=True)
             p = paths.EPISODES_DIR / f"{row['date']}.jsonl"
+            from ..monitor.rotate import rotate_if_needed
+            rotate_if_needed(p, 5_000_000, 1)               # M13: bounded
             with p.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         except Exception:

@@ -55,6 +55,22 @@ DEFAULT_MISS_GRACE = 15 * 60      # one-time jobs catch up if missed by <= 15 mi
 CLAIM_GRACE = 300                 # claim TTL beyond max_runtime (crash takeover)
 
 
+def effective_max_attempts(job: Job) -> int:
+    """Retry budget for a job (scheduling unification, 2026-10-08).
+
+    Destructive/side-effecting work must not be retried BLINDLY: an
+    `agent_task` re-runs an LLM task that may already have partially acted
+    (sent a message, moved a file), so it gets **max 1 attempt by default**.
+    Explicit opt-in via `retry_policy.retry_agent_task: true` (e.g. a job the
+    user declared idempotent) restores the configured budget. `function` and
+    `notify` jobs are maintenance/idempotent and keep their retry budget.
+    """
+    rp = job.retry_policy or {}
+    if (job.action or {}).get("type") == "agent_task" and not rp.get("retry_agent_task"):
+        return 1
+    return max(1, int(rp.get("max_attempts", 2)))
+
+
 # ------------------------------------------------------------ real-work registry
 # Dotted names -> functions (ctx) -> dict. Nightly jobs use these so REAL
 # work survives restarts instead of callback registrations that vanish
@@ -85,6 +101,30 @@ def _fn_build_sft(ctx) -> dict:
     return scheduler.maybe_build_sft(ctx)
 
 
+def _fn_rotate_logs(ctx) -> dict:
+    from ..monitor.rotate import rotate_all
+    return rotate_all(str(ctx.workspace))
+
+
+def _fn_alert_scan(ctx) -> dict:
+    """Daily threshold alerting (audit item 6): evaluate metrics stats
+    against configured thresholds, toast + notify on breach."""
+    from ..monitor import alerts
+    return alerts.check_thresholds(ctx)
+
+
+def _fn_skill_gate(ctx) -> dict:
+    """J2: gate candidate skills (structural check + bounded eval probe)."""
+    from ..evals import skillgate
+    return skillgate.gate_candidates(ctx)
+
+
+def _fn_model_gate(ctx) -> dict:
+    """J3: model-upgrade quality gate (candidate vs recorded baseline)."""
+    from ..evals import gate
+    return gate.model_quality_gate(ctx)
+
+
 def _redact(text: str) -> str:
     """PII/secret redaction for anything persisted as job telemetry."""
     try:
@@ -101,6 +141,10 @@ FUNCTIONS: dict[str, Callable] = {
     "bee.scheduler.maybe_train_router": _fn_train_router,
     "bee.scheduler.maybe_teach_back": _fn_teach_back,
     "bee.scheduler.maybe_build_sft": _fn_build_sft,
+    "bee.monitor.rotate_all": _fn_rotate_logs,
+    "bee.monitor.alert_scan": _fn_alert_scan,
+    "bee.skills.gate_candidates": _fn_skill_gate,
+    "bee.evals.model_gate": _fn_model_gate,
 }
 
 
@@ -195,7 +239,7 @@ class JobWorker:
                     ex.status = "interrupted"
                     ex.finished_at = iso(now)
                     self.store.append_execution(ex)
-                max_attempts = max(1, int((job.retry_policy or {}).get("max_attempts", 2)))
+                max_attempts = effective_max_attempts(job)
                 if ex is not None and ex.attempt >= max_attempts:
                     job.state = FAILED
                     job.next_run = ""
@@ -488,7 +532,9 @@ class JobWorker:
     def _handle_failure(self, job: Job, ex: JobExecution, err: str,
                         status: str, dt: float) -> None:
         rp = job.retry_policy or {}
-        max_attempts = max(1, int(rp.get("max_attempts", 2)))
+        # agent_task jobs: no BLIND retry by default (side-effecting work) —
+        # see effective_max_attempts. function/notify jobs keep their budget.
+        max_attempts = effective_max_attempts(job)
         backoff = float(rp.get("backoff_seconds", 60))
         now = self.now()
         recurring = job.trigger.kind in ("daily", "weekly", "calendar")
@@ -555,6 +601,16 @@ class JobWorker:
         n = Notification(kind=kind, message=_redact(message + extra)[:500],
                          job_id=job.id if job else "")
         self.store.add_notification(n)
+        # OS-level toast on failure/missed (audit item 6) — best-effort,
+        # gated by cfg.alerts.enabled, never raises
+        if kind in ("failure", "missed"):
+            try:
+                from ..monitor import alerts
+                acfg = getattr(getattr(self.ctx, "cfg", None), "alerts", None)
+                if acfg is not None and getattr(acfg, "enabled", True):
+                    alerts.os_notify(f"BEE job {kind}", n.message)
+            except Exception:
+                pass
         if self.on_notify:
             try:
                 self.on_notify(n)
@@ -566,6 +622,23 @@ class JobWorker:
     # -------------------------------------------------------------- control
     def jobs(self) -> list[Job]:
         return self.store.load_all_jobs()
+
+    def reschedule(self, job: Job, trigger) -> Job:
+        """Move a PENDING job to a new trigger time (Phase 8 follow-up
+        resolution: 'Tomorrow.' -> 'Actually at 10 AM.' updates the SAME
+        durable job instead of creating a duplicate). next_run is computed
+        with the SAME rules as create_job (missed one-time -> catch up once)."""
+        job.trigger = trigger
+        now = self.now()
+        nr = self._next_after(job, now)
+        if nr is not None:
+            job.next_run = iso(nr)
+        elif job.trigger.kind == "one_time":
+            job.next_run = iso(now)
+        else:
+            job.next_run = ""
+        self.store.save_job(job)
+        return job
 
     def create_job(self, job: Job) -> Job:
         now = self.now()

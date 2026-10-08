@@ -25,6 +25,9 @@ class RecordingClient:
     def models_list(self):
         return ["stub"]
 
+    def ollama_up(self):
+        return True
+
     def _has_ollama(self):
         return True
 

@@ -7,7 +7,28 @@ No code was changed while producing this roadmap.
 
 ---
 
-## 0. Phase status (updated 2026-10-06, end of Phase 6)
+## 0. Phase status (updated 2026-10-08, Phase 0 re-audit)
+
+**Row 10 — FINAL 10-ITEM HARDENING BATCH (2026-10-06/08): DONE (uncommitted at re-audit time).**
+Kernel routing for all surfaces (gate gap closed); M13 rotation/caps for all
+JSONL streams; J1 tree-kill cancellation + crash-recovery checkpoints
+(`/resume`); J3 model-upgrade quality gate (`bee/evals/gate.py`, `models.yaml`
+promotion layer, nightly `model_gate`); untrusted-context isolation
+(sentinel wrap + grant revocation + R2+ escalation); OS toasts + threshold
+alerts (`bee/monitor/alerts.py`, nightly `alert_scan`); J2 skill versioning +
+eval gate (`bee/evals/skillgate.py`, nightly `skill_gate`); M14
+config-precedence matrix (`CONFIG_PRECEDENCE.md`, `Config.precedence`, 12
+tests); ONE shared EventBus (`bee/events.py` + 2 facades); LiveKit temp-JSON
+bridge replaced by bearer-auth HTTP push. **449 pytest / verify 71,914 ALL
+PASS / eval 10-21 (one structural anomaly: `guard_blocked` — finding N6,
+unrooted).** Re-audit (2026-10-08, `docs/JARVIS_BASELINE.md`) confirmed the
+batch and logged new findings **N1–N9**; N1 (`/guard off` disables the
+capability gate) is CRITICAL and blocks the program's Phase 2 security rule.
+Statuses below are re-verified against the 2026-10-08 tree.
+
+(Previous header, retained for history:)
+
+## 0a. Phase status (2026-10-06, end of Phase 6)
 
 | Phase | Status | Evidence |
 |---|---|---|
@@ -51,9 +72,11 @@ No code was changed while producing this roadmap.
 | # | Capability | Defect | Location |
 |---|---|---|---|
 | ~~B1~~ | ~~User cron scheduling~~ | **CLOSED in Phase 6 (2026-10-06):** the no-op scheduler tool is superseded by `bee/automation/` — durable JobWorker executes jobs through the AgentKernel; execution row before start + cross-process claims prevent duplicates; nightly jobs are durable function jobs | `bee/automation/worker.py` (tools/scheduler_tool.py remains as a legacy read-only tool, superseded) |
-| B2 | Vector store rebuild | `rebuild()` appends (`t.add`) to the existing table each 12 h → duplicate rows accumulate, search quality degrades over time | memory/search.py:55 |
-| B4 | Web `/voice` contract | Docstring promises "+tts mp3"; endpoint returns JSON text only (temp-name race fixed in Phase 4: uploads now use uuid names) | webapp.py `/voice` |
-| B5 | 11/21 agent-eval tasks fail | Local 3B "missing substring" quality ceiling (file/DSA/memory/plan tasks) — model quality, not loop bugs | evals/tasks.yaml run 2026-10-05 |
+| ~~B2~~ | ~~Vector store rebuild~~ | **CLOSED (audit 2026-10-06):** clear-before-add rebuild + stable-row-count regression test | memory/search.py |
+| ~~B4~~ | ~~Web `/voice` contract~~ | **CLOSED (10-item batch):** docstring now matches JSON-only behavior; the endpoint itself is kernel-routed (gate gap closed) | webapp.py `/voice` |
+| B5 | 10/21 agent-eval tasks fail (was 11/21) | Local 3B "missing substring" quality ceiling (file/DSA/memory/plan tasks) — model quality, not loop bugs; the J3 gate is the mechanism for closing it once a candidate model exists | evals/tasks.yaml run 2026-10-08: **10/21** |
+| **N1** | **`/guard off` disables the capability gate** | **CRITICAL (re-audit 2026-10-08):** the gate check is conjoined with `ctx.guard_on`; disabling the legacy regex guard must never bypass capability authorization — the gate must be mandatory, kernel-owned, not chat-toggleable. Blocks program Phase 2 security rule | cli.py:434-437, loop.py:593 |
+| **N6** | `guard_blocked` eval regression candidate | Re-audit 2026-10-08: the task failed (`expect_guard=blocked but no guard block occurred`) while unrelated eval tasks burned their tool budget on denied `automation.manage` asks (repeated `[y/N]` stdin prompts) — suspected kernel/approver reuse in the `/eval` REPL path; guard classifier itself intact (4,204 checks ALL PASS). Not root-caused; must not be normalized | eval run log 2026-10-08 |
 
 ## 3. Risky capabilities (work, but can harm user data/system)
 

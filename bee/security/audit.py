@@ -54,6 +54,8 @@ def record(*, tool: str, args: dict | None, decision, action: str,
         line = json.dumps(row, ensure_ascii=False)
         with _lock:
             p.parent.mkdir(parents=True, exist_ok=True)
+            from ..monitor.rotate import rotate_if_needed
+            rotate_if_needed(p, 2_000_000, 2)               # M13: bounded
             with p.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
     except Exception:

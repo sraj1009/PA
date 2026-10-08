@@ -196,7 +196,7 @@ dependency upgrade.
 
 ---
 
-## Summary counts
+## Summary counts (original 2026-10-05 audit)
 
 | Severity | Count | IDs |
 |---|---|---|
@@ -210,3 +210,54 @@ dependency upgrade.
 sandbox mount H-portion). All other items follow the roadmap order; each ends
 with the full test gates green (pytest 202+, verify_suite ALL PASS, eval
 10/21 baseline as the quality floor).
+
+---
+
+## Phase 0 re-audit (2026-10-08) — closures and new findings
+
+Full evidence: `docs/JARVIS_BASELINE.md`. Original IDs closed since 2026-10-06:
+
+| ID | Status | Closed by |
+|---|---|---|
+| C1, C2 | CLOSED | web bearer auth (Phase 1); git + .gitignore + `.env.example` (Phase 0); rotation note for OneDrive-synced credential history remains operator action |
+| H1 (guard regex bypass) | CLOSED | AST risk layer `security/risk.py:174` + `guard.check` (Phase 1); pinned 4,204-check suite |
+| H2 (unredacted episodes) | CLOSED | redaction at write (audit 2026-10-06) |
+| H3 (diary deletion) | CLOSED | archive-not-delete (audit) |
+| H4 (LanceDB dups) | CLOSED | clear-before-add rebuild (audit B2) |
+| H5 (no-op jobs) | CLOSED | Phase 6 durable JobWorker through the kernel |
+| H6 (sys.argv mutation) | **HALF** | scheduler fixed (`scheduler.py:110` explicit args); **`livekit/agent.py:307-314` still mutates/restores argv** |
+| H7 (temp JSON bridge) | CLOSED | 10-item #10: bearer-auth HTTP push → web UI in-memory state + `age_s` |
+| H8 (eval_safe unbounded) | OPEN | AST allowlist only; no depth/size/time budget (R7) |
+| M1 (implicit kernel) | CLOSED | explicit `bee/kernel/` (Phases 2–6) |
+| M2 (stringly events) | CLOSED | typed AgentEvent + ONE shared EventBus (10-item #9) + real SSE (Phase 4) |
+| M3 (global state) | PARTIAL | documented & bounded; per-kernel run-lock; web `CTX` + engines globals remain (single-user by design) |
+| M4 (dual routing) | PARTIAL | router v2 unified; regex fastpaths + ML router both remain (deliberate tiers) |
+| M5 (config precedence) | CLOSED | 10-item #8: `CONFIG_PRECEDENCE.md` + `Config.precedence` + 12 contract tests |
+| M6 (two training roots) | OPEN | `train/` and `training/` still coexist |
+| M7 (hardcoded tz) | PARTIAL | jobs use configured tz; residual literals may remain |
+| M8 (stale contracts) | PARTIAL | `/voice` docstring now matches JSON-only behavior; dashboard live data still open |
+| M9 (untested paths) | PARTIAL | 449-test suite incl. kernel/automation/voice/bridge; LiveKit room + WindowsDesktop still unverified in-field |
+| M10 (unbounded growth) | CLOSED | 10-item #2 (M13): rotation + caps at every JSONL chokepoint |
+| M11 (VRAM assumption) | OPEN | `num_ctx=8192` pinned for 8 GB; not auto-tuned |
+| M12 (lazy-import cycles) | PARTIAL | documented edges; not yet import-lint enforced |
+
+### New findings (2026-10-08)
+
+| ID | Sev | Finding | Location |
+|---|---|---|---|
+| **N1** | **CRITICAL** | **`/guard off` (`ctx.guard_on=False`) also disables the CAPABILITY GATE** — the gate check is conjoined with `ctx.guard_on`. Disabling the legacy regex guard must never bypass capability authorization; the gate must be mandatory (kernel-owned) and not chat-toggleable | `cli.py:434-437`, `loop.py:593` |
+| **N2** | HIGH | ToolBus is not the authoritative dispatcher — the LLM loop executes tools via the raw `tools_by_name()` dict (fastpath + main loop), duplicating validation/audit that the bus should own | `loop.py:268,427,627` vs `kernel/tools_bus.py` |
+| **N3** | HIGH | `ToolBus.call()` accepts `timeout` but enforces nothing (`timed_out` always False) — no timer/thread kill at the bus level | `tools_bus.py:105-135` |
+| **N4** | HIGH (latent) | Cancellation is context-scoped (`ctx.cancel_event`), never task-owned; safe today only because REPL/eval/automation each clear/use their own event; web has no cancel route and shares one kernel ctx → a future web cancel leaks into the next task | `kernel.py:96-102`, `webapp.py` |
+| **N5** | MEDIUM | `.gitignore` does not cover runtime memory artifacts `memory/receipts.jsonl`, `memory/sessions/`, `memory/store.json`, `memory/checkpoints/` → accidental personal-data commit possible | `.gitignore:18-23` |
+| **N6** | MEDIUM | Eval anomaly: `guard_blocked` failed 2026-10-08 while unrelated tasks burned their tool budget on denied `automation.manage` asks (repeated `[y/N]` prompts on stdin) — suspected kernel/approver reuse in the `/eval` REPL path; not root-caused; must not be normalized | eval run log 2026-10-08 |
+| **N7** | LOW | Load-dependent flake: one automation-worker test times out on `wait_idle(10)` under heavy system load (green otherwise) — fix the cause (worker join/shutdown determinism), do not loosen the test | `tests/test_automation.py` |
+| **N8** | LOW | `evals/results_summary.json` is a generated artifact but is git-tracked | `git ls-files` |
+| **N9** | LOW | `ToolBus.from_default()` records only the FIRST capability per tool (`caps[0]`) while the gate uses the full list — latent under-mapping once the bus is authoritative | `tools_bus.py:83` |
+
+**Updated counts (after re-audit):** CRITICAL 3 (C1✓, C2✓, **N1**) ·
+HIGH 8+3 (H1✓ H2✓ H4✓ H5✓ H7✓ closed; H3✓; H6, H8 open; **N2, N3, N4 new**) ·
+MEDIUM 12+3 (8 closed/partial as above; **N5, N6, N7**) · LOW 5+3
+(**N8, N9**). **N1 is the blocking item for the program's Phase 2 security
+rule; N2/N3 together define the ToolBus migration scope; N4 defines the
+Phase 4 cancellation scope.**

@@ -28,7 +28,7 @@ from pathlib import Path
 import yaml
 
 from .. import paths
-from ..agent.loop import AgentResult, run_agent
+from ..agent.loop import AgentResult
 
 # model output may contain emoji — redirected Windows consoles default to
 # cp1252 and would crash the run; force UTF-8 with replacement fallback
@@ -97,7 +97,17 @@ def _should_skip(t: dict, ctx) -> bool:
 
 
 def run_suite(ctx, model: str | None = None, only: "str | list[str] | None" = None) -> list[dict]:
-    """only: substring match (str) or explicit id list (list) — for batched runs."""
+    """only: substring match (str) or explicit id list (list) — for batched runs.
+
+    Audit item 1: tasks run through the SAME AgentKernel as interactive use
+    (capability gate, task state, receipts, verification, telemetry) — the
+    eval now measures what the user actually gets. A fresh session id per
+    task/rep keeps follow-up resolution from leaking across tasks."""
+    kernel = getattr(ctx, "kernel", None)
+    if kernel is None:
+        from ..kernel import AgentKernel
+        kernel = AgentKernel(ctx, approver=lambda t, a, r: False)
+        ctx.kernel = kernel
     tasks = load_tasks()
     results = []
     print(f"\n== BEE eval suite — {len(tasks)} tasks ==")
@@ -124,8 +134,9 @@ def run_suite(ctx, model: str | None = None, only: "str | list[str] | None" = No
                 ce = getattr(ctx, "cancel_event", None)
                 if hasattr(ce, "clear"):
                     ce.clear()
-                r = run_agent(ctx, t["task"], model=model, max_iters=15,
-                              on_event=events.append)
+                tr = kernel.run(t["task"], session_id=f"eval-{tid}-r{rep}",
+                                model=model, on_event=events.append, max_iters=15)
+                r = tr.agent_result
                 last_r = r
                 ok, err = check_task(t, r, events)
             except Exception as e:

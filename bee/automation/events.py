@@ -23,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from ..events import EventBus as _SharedBus
+
 EVENT_KINDS = {"timer", "calendar", "email", "file_change", "app_event",
                "battery", "network", "device_state"}
 
@@ -42,45 +44,32 @@ class BusEvent:
 
 
 class EventBus:
-    """Synchronous in-process bus. Handlers are called in subscription
-    order; a handler exception is contained (logged, never kills the bus
-    or other handlers)."""
+    """Synchronous in-process bus — a thin facade over the project's ONE
+    shared EventBus (bee/events.py, audit item 9). Handlers are called in
+    subscription order; a handler exception is contained. Public API
+    unchanged: subscribe(pattern, fn) / unsubscribe / publish -> int /
+    .published / clear."""
 
-    def __init__(self):
-        self._subs: list[tuple[str, Callable[[BusEvent], None]]] = []
-        self._lock = threading.RLock()
-        self.published: list[BusEvent] = []   # bounded, for inspection/tests
+    def __init__(self, max_log: int = 200):
+        self._bus = _SharedBus(max_log)
+
+    @property
+    def published(self) -> list[BusEvent]:
+        return self._bus.log
 
     def subscribe(self, kind: str, handler: Callable[[BusEvent], None]) -> None:
-        with self._lock:
-            self._subs.append((kind, handler))
+        self._bus.subscribe(kind, handler)
 
     def unsubscribe(self, kind: str, handler) -> None:
-        with self._lock:
-            self._subs = [(k, h) for k, h in self._subs
-                          if not (k == kind and h is handler)]
+        self._bus.unsubscribe(kind, handler)
 
     def publish(self, ev: BusEvent) -> int:
         """Publish; returns the number of handlers that ran. The proactive
         policy gate is a handler like any other (registered by the worker)."""
-        self.published.append(ev)
-        if len(self.published) > 200:
-            self.published = self.published[-200:]
-        with self._lock:
-            subs = [(k, h) for k, h in self._subs if k == ev.kind or k == "*"]
-        n = 0
-        for _k, h in subs:
-            try:
-                h(ev)
-                n += 1
-            except Exception:
-                pass
-        return n
+        return self._bus.emit(ev, name=ev.kind)
 
     def clear(self) -> None:
-        with self._lock:
-            self._subs.clear()
-        self.published.clear()
+        self._bus.clear()
 
 
 # ------------------------------------------------------------------ rules

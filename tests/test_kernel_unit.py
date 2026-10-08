@@ -370,6 +370,9 @@ class _ScriptedClient:
             return {"content": item, "usage": {}}
         return item
 
+    def ollama_up(self):
+        return True
+
     def _has_ollama(self):
         return True
 

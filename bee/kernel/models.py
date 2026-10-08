@@ -94,13 +94,23 @@ class Action:
 
 @dataclass
 class Plan:
+    """Kernel-owned execution plan (Phase 8: typed + validated BEFORE ToolBus).
+
+    kind: the deterministic intent class (informational / single_action /
+          multi_step / requires_approval / impossible / ambiguous).
+    replans: how many times the kernel re-planned after a failed attempt
+          (Plan -> Action -> Observation -> Replan lifecycle).
+    """
     id: str = field(default_factory=lambda: new_id("plan"))
     goal: str = ""
     steps: list[Action] = field(default_factory=list)
     rationale: str = ""
+    kind: str = "single_action"
+    replans: int = 0
 
     def to_dict(self) -> dict:
         return {"id": self.id, "goal": self.goal, "rationale": self.rationale,
+                "kind": self.kind, "replans": self.replans,
                 "steps": [{"id": s.id, "description": s.description, "tool": s.tool,
                            "risk": s.risk, "capability": s.capability} for s in self.steps]}
 

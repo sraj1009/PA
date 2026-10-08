@@ -44,9 +44,18 @@ def skill_tools():
                 if ln.lower().startswith("description:"):
                     desc = ln.split(":", 1)[1].strip()
                     break
-            files = [p.name for p in md.parent.iterdir() if p.is_file()]
-            out.append({"name": md.parent.name, "description": desc, "files": files})
+            files = [p.name for p in md.parent.iterdir() if p.is_file() and p.name != "meta.json"]
+            out.append({"name": md.parent.name, "description": desc, "files": files,
+                        **_meta_brief(md.parent.name)})
         return {"skills": out}
+
+    def _meta_brief(name: str) -> dict:
+        try:
+            from ..evals.skillgate import read_meta
+            m = read_meta(name)
+            return {"version": m.get("version", 1), "status": m.get("status", "active")}
+        except Exception:
+            return {"version": 1, "status": "active"}
 
     def h_get(ctx, name: str):
         try:
@@ -58,10 +67,10 @@ def skill_tools():
             return {"error": f"{name} has no SKILL.md"}
         extra = []
         for p in d.iterdir():
-            if p.is_file() and p.name != "SKILL.md":
+            if p.is_file() and p.name not in ("SKILL.md", "meta.json"):
                 extra.append(p.name)
         return {"name": d.name, "content": md.read_text(encoding="utf-8", errors="ignore")[:12000],
-                "other_files": extra, "path": str(d)}
+                "other_files": extra, "path": str(d), **_meta_brief(d.name)}
 
     def h_create(ctx, name: str, description: str, content: str = "", script: str = ""):
         try:
@@ -76,7 +85,18 @@ def skill_tools():
             md.write_text(TEMPLATE.format(name=name, description=description or name), encoding="utf-8")
         if script:
             (d / "script.py").write_text(str(script), encoding="utf-8")
-        return {"ok": True, "path": str(d), "skill": d.name}
+        # J2: every create/update bumps the version and marks the skill
+        # CANDIDATE — it ships (enters the prompt) only after the gate
+        # (structural check + eval probe) passes, via the nightly skill_gate
+        # job or `/skillgate`.
+        try:
+            from ..evals.skillgate import bump_skill
+            meta = bump_skill(d.name, source="agent")
+            return {"ok": True, "path": str(d), "skill": d.name,
+                    "version": meta["version"], "status": "candidate",
+                    "note": "candidate — hidden from the prompt until it passes the skill gate"}
+        except Exception:
+            return {"ok": True, "path": str(d), "skill": d.name}
 
     def h_search(ctx, query: str):
         q = str(query or "").lower()
@@ -97,7 +117,9 @@ def skill_tools():
         T("skill_get", "Load a skill's full SKILL.md content by name. Use after seeing the skill index in your system prompt.",
           {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}, h_get),
         T("skill_create", "Create or update a skill (SKILL.md + optional script.py). Distill NOVEL, reusable solutions into skills — "
-                          "this is how BEE gets permanently better. Args: name, description, content (full markdown, optional), script (optional python).",
+                          "this is how BEE gets permanently better. Each create/update bumps the skill version; new/changed skills are "
+                          "CANDIDATEs (hidden from the prompt) until they pass the skill gate (structural check + eval probe, nightly or /skillgate). "
+                          "Args: name, description, content (full markdown with a 'description:' line and ## sections, optional), script (optional python that must compile).",
           {"type": "object", "properties": {
               "name": {"type": "string"}, "description": {"type": "string"},
               "content": {"type": "string"}, "script": {"type": "string"}},

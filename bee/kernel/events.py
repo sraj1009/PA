@@ -1,44 +1,33 @@
-"""Typed event bus (Phase 2).
+"""Typed kernel event bus (Phase 2) — a thin facade over the project's ONE
+shared EventBus (bee/events.py, audit item 9).
 
 The kernel emits AgentEvent objects; subscribers (REPL printer, web SSE,
-future realtime-voice / proactive automation) subscribe. Subscribers are
-best-effort: one broken subscriber never breaks the agent.
+realtime voice, telemetry, proactive automation) subscribe. Subscribers are
+best-effort: one broken subscriber never breaks the agent. The public API is
+unchanged from Phase 2 (`subscribe(fn)`, `emit(event)`, `.log`, `.by_kind`).
 """
 from __future__ import annotations
 
-import logging
-
+from ..events import EventBus as _SharedBus
 from .models import AgentEvent, AgentEventKind
-
-log = logging.getLogger("bee.kernel.events")
 
 
 class EventBus:
     def __init__(self, max_log: int = 500):
-        self._subs: list[callable] = []
-        self.log: list[AgentEvent] = []
-        self._max_log = max_log
+        self._bus = _SharedBus(max_log)
 
-    def subscribe(self, fn: callable):
-        if fn not in self._subs:
-            self._subs.append(fn)
-        return fn
+    @property
+    def log(self) -> list[AgentEvent]:
+        return self._bus.log
 
-    def unsubscribe(self, fn: callable):
-        try:
-            self._subs.remove(fn)
-        except ValueError:
-            pass
+    def subscribe(self, fn: callable) -> callable:
+        return self._bus.subscribe_all(fn)
+
+    def unsubscribe(self, fn: callable) -> None:
+        self._bus.unsubscribe_all(fn)
 
     def emit(self, event: AgentEvent) -> AgentEvent:
-        self.log.append(event)
-        if len(self.log) > self._max_log:
-            del self.log[: len(self.log) - self._max_log]
-        for fn in list(self._subs):
-            try:
-                fn(event)
-            except Exception as e:  # subscriber errors never break the kernel
-                log.debug("event subscriber failed: %s", e)
+        self._bus.emit(event, name=event.kind.value)
         return event
 
     def by_kind(self, kind: AgentEventKind) -> list[AgentEvent]:

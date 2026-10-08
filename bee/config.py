@@ -1,9 +1,23 @@
-"""BEE configuration: config.yaml + environment overrides.
+"""BEE configuration: single-source resolution with documented precedence.
 
-Env overrides:
-  OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_EMBED_MODEL
-  CLOUD_LLM, OPENAI_API_KEY / OPENROUTER_API_KEY / ANTHROPIC_API_KEY, CLOUD_BASE_URL
-  BEE_WORKSPACE
+M14 — every resolvable field has exactly ONE winning source, in this order
+(highest wins). Full matrix: docs/CONFIG_PRECEDENCE.md.
+
+  1. process environment   (vars set in the shell/system, e.g. $env:OLLAMA_MODEL)
+  2. .env file             (PROJECT_ROOT/.env — only fills vars NOT already in the
+                            process environment)
+  3. models.yaml           (local_model ONLY — the model-promotion layer written by
+                            the J3 quality gate; env always beats it)
+  4. config.yaml           (explicit file config)
+  5. dataclass defaults    (code)
+
+Exceptions (documented in the matrix):
+  * cloud.api_key — an explicit config.yaml key WINS over env provider keys
+    (an operator who set the key in config.yaml should not be surprised by
+    a stale env var); env is used only to FILL an empty config key.
+  * settings.json — engine selection only (hybrid/local/...); a separate
+    concern that never touches Config fields.
+  * workspace — env only (BEE_WORKSPACE); config.yaml does not set it.
 """
 from __future__ import annotations
 
@@ -225,6 +239,33 @@ class AutomationCfg:
 
 
 @dataclass
+class AlertsCfg:
+    """Audit item 6 — OS-level toasts + threshold alerting.
+
+    A daily `alert_scan` job evaluates 24h metrics stats against these
+    thresholds; each breach toasts once per cooldown (no spam). Job
+    failures/misses toast immediately (JobWorker._notify)."""
+    enabled: bool = True
+    provider_fail_rate: float = 0.5       # alert if >= 50% of LLM calls fail
+    provider_fail_min_calls: int = 5      # ... but only with a real sample
+    verify_fail_rate: float = 0.5         # alert if >= 50% of tasks fail verification
+    min_tasks: int = 3
+    permission_denied: int = 5            # absolute denials in 24h
+    cooldown_seconds: float = 3600.0      # per-alert-key spam guard
+
+
+@dataclass
+class ModelGateCfg:
+    """J3 — model-upgrade quality gate. A candidate local model is promoted
+    (models.yaml) only when it beats the active model's recorded eval baseline
+    by `margin` AND causes no structural-task regression. Empty `candidate`
+    = the nightly gate idles (nothing to test)."""
+    enabled: bool = True
+    candidate: str = ""      # e.g. "bee4b-v2" — set when a new model is trained/pulled
+    margin: int = 1          # candidate must score at least baseline + margin
+
+
+@dataclass
 class Config:
     ollama: OllamaCfg = field(default_factory=OllamaCfg)
     cloud: CloudCfg = field(default_factory=CloudCfg)
@@ -242,7 +283,13 @@ class Config:
     user: UserCfg = field(default_factory=UserCfg)
     computeruse: ComputerUseCfg = field(default_factory=ComputerUseCfg)
     automation: AutomationCfg = field(default_factory=AutomationCfg)
+    alerts: AlertsCfg = field(default_factory=AlertsCfg)
+    model_gate: ModelGateCfg = field(default_factory=ModelGateCfg)
     workspace: Path = paths.WORKSPACE
+    # M14: where each resolvable field actually came from (default | config.yaml
+    # | models.yaml | .env | process-env | env-provider-key). Attached by
+    # load_config; inspectable after the fact (single-source-of-truth proof).
+    precedence: dict = field(default_factory=dict, repr=False, compare=False)
 
     def get_llm(self, name: str) -> dict:
         """Resolve an LLM name (local default, cloud default, or explicit) to a dict."""
@@ -374,11 +421,8 @@ def _section(cls, base, incoming):
     return cls(**{**base.__dict__, **known})
 
 
-def load_config(path: str | Path | None = None) -> Config:
-    p = Path(path) if path else paths.CONFIG_YAML
-    data: dict = {}
-    if p.exists():
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+def _build_from_yaml(data: dict) -> Config:
+    """Defaults + config.yaml (layers 5+4 of the M14 matrix)."""
     c = Config()
     c.ollama = _section(OllamaCfg, c.ollama, data.get("ollama"))
     c.cloud = _section(CloudCfg, c.cloud, data.get("cloud"))
@@ -394,16 +438,109 @@ def load_config(path: str | Path | None = None) -> Config:
     c.clap = _section(ClapCfg, c.clap, data.get("clap"))
     c.livekit = _section(LivekitCfg, c.livekit, data.get("livekit"))
     c.user = _section(UserCfg, c.user, data.get("user"))
+    c.computeruse = _section(ComputerUseCfg, c.computeruse, data.get("computeruse"))
     c.automation = _section(AutomationCfg, c.automation, data.get("automation"))
+    c.alerts = _section(AlertsCfg, c.alerts, data.get("alerts"))
+    c.model_gate = _section(ModelGateCfg, c.model_gate, data.get("model_gate"))
+    return c
+
+
+def _models_yaml_override() -> str:
+    """Layer 3: models.yaml `local_model` (written by the J3 quality gate on
+    promotion; env layers always beat this)."""
+    try:
+        if paths.MODELS_YAML.exists():
+            data = yaml.safe_load(paths.MODELS_YAML.read_text(encoding="utf-8")) or {}
+            m = str(data.get("local_model") or "").strip()
+            if m:
+                return m
+    except Exception:
+        pass
+    return ""
+
+
+def _dotenv_defines(name: str) -> bool:
+    """Does PROJECT_ROOT/.env define `name` (even if a process env var also does)?"""
+    f = paths.PROJECT_ROOT / ".env"
+    if not f.exists():
+        return False
+    try:
+        for ln in f.read_text(encoding="utf-8").splitlines():
+            ln = ln.strip()
+            if not ln or ln.startswith("#") or "=" not in ln:
+                continue
+            if ln.split("=", 1)[0].strip() == name:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _precedence_report(data: dict, env_before: dict, c: Config) -> dict:
+    """M14 — machine-verifiable provenance for every resolvable field:
+    which of {default, config.yaml, models.yaml, .env, process-env,
+    env-provider-key} actually WON."""
+    def win(var: str, yaml_section: str | None, yaml_key: str,
+            models_yaml: bool = False) -> str:
+        if env_before.get(var):
+            return "process-env"
+        if _dotenv_defines(var):
+            return ".env"
+        if models_yaml and _models_yaml_override():
+            return "models.yaml"
+        if yaml_section is not None and (data.get(yaml_section) or {}).get(yaml_key) not in (None, ""):
+            return "config.yaml"
+        return "default"
+
+    rep: dict = {}
+    for var, section, key in (
+            ("OLLAMA_MODEL", "ollama", "model"),
+            ("OLLAMA_BASE_URL", "ollama", "base_url"),
+            ("OLLAMA_EMBED_MODEL", "ollama", "embed_model"),
+            ("CLOUD_LLM", "cloud", "llm"),
+            ("CLOUD_BASE_URL", "cloud", "base_url"),
+            ("EDGE_TTS_KEY", "voice", "edge_key"),
+            ("LIVEKIT_URL", "livekit", "url"),
+            ("LIVEKIT_API_KEY", "livekit", "api_key"),
+            ("LIVEKIT_API_SECRET", "livekit", "api_secret"),
+            ("BEE_USER_NAME", "user", "name"),
+    ):
+        rep[f"{section}.{key}"] = win(var, section, key, models_yaml=(section == "ollama" and key == "model"))
+    # documented exception: explicit config.yaml key beats env provider keys
+    if (data.get("cloud") or {}).get("api_key"):
+        rep["cloud.api_key"] = "config.yaml (wins over env — documented exception)"
+    elif _env_key_for(c.cloud.llm):
+        rep["cloud.api_key"] = "env (provider-matched key)"
+    else:
+        rep["cloud.api_key"] = "default (empty)"
+    rep["workspace"] = win("BEE_WORKSPACE", None, "")
+    rep["engine"] = "settings.json (independent of Config — see matrix)"
+    return rep
+
+
+def load_config(path: str | Path | None = None) -> Config:
+    import os as _os
+    env_before = dict(_os.environ)          # process env BEFORE .env is loaded
+    p = Path(path) if path else paths.CONFIG_YAML
+    data: dict = {}
+    if p.exists():
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    c = _build_from_yaml(data)
+    override = _models_yaml_override()      # layer 3 (models.yaml)
+    if override:
+        c.ollama.model = override
+    paths.ensure_core_dirs()
+    _load_dotenv()                          # fills .env vars (process env wins)
+    c = _apply_env(c)                       # layer 1+2 (highest)
+    # workspace resolved LAST so .env's BEE_WORKSPACE also counts (M14)
     ws = os_environ_get("BEE_WORKSPACE")
     if ws:
         c.workspace = Path(ws).expanduser().resolve()
     else:
         c.workspace = paths.WORKSPACE
     c.workspace.mkdir(parents=True, exist_ok=True)
-    paths.ensure_core_dirs()
-    _load_dotenv()
-    return _apply_env(c)
+    c.precedence = _precedence_report(data, env_before, c)
+    return c
 
 
 def os_environ_get(name: str) -> str | None:

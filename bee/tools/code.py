@@ -3,10 +3,10 @@ For anything heavy/GPU/destructive use sandbox_run (Docker) instead.
 """
 from __future__ import annotations
 
-import subprocess
 import sys
 
 from .base import envelope, T
+from .cancelable import run_cancelable
 
 _PY = sys.executable
 
@@ -17,11 +17,16 @@ def code_tools():
             return {"error": "empty code"}
         timeout = max(1, min(int(timeout or 120), 600))
         try:
-            r = subprocess.run([_PY, "-c", code], capture_output=True, text=True,
-                               cwd=str(ctx.workspace), timeout=timeout)
-            return envelope("python", r.returncode, r.stdout or "", r.stderr or "")
-        except subprocess.TimeoutExpired:
-            return envelope("python", 124, error=f"timeout after {timeout}s")
+            cancel = getattr(ctx, "cancel_event", None)
+            src, out, err, kind = run_cancelable([_PY, "-c", code], ctx.workspace,
+                                                 timeout, cancel, shell=False)
+            if kind == "cancelled":
+                return envelope("python", src, out,
+                                (err + "\n[cancelled: process killed]").strip())
+            if kind == "timeout":
+                return envelope("python", 124, out,
+                                (err + f"\n[timeout after {timeout}s: process killed]").strip())
+            return envelope("python", src, out, err)
         except Exception as e:
             return envelope("python", 1, error=str(e))
 

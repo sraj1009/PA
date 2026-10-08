@@ -39,7 +39,9 @@ class ReceiptLog:
         row["result"] = _redact_value(row.get("result") or "")
         row["error"] = _redact_value(row.get("error") or "")
         try:
+            from ..monitor.rotate import rotate_if_needed
             with _lock:
+                rotate_if_needed(self.path, 2_000_000, 2)   # M13: bounded
                 with self.path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
         except Exception as e:

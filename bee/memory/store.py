@@ -56,11 +56,19 @@ class MemoryItem:
     deleted: bool = False
 
     def expired(self) -> bool:
+        """Timezone-safe expiry check (fixed 2026-10-08): expiries are stored
+        UTC-canonical ('+00:00' suffix), so comparing them to NAIVE
+        datetime.now() raised TypeError -> silently 'never expired'. Now:
+        naive expiry = local time, aware expiry = compared as aware."""
         if not self.expiry:
             return False
         try:
             import datetime as _dt
-            return _dt.datetime.fromisoformat(self.expiry) <= _dt.datetime.now()
+            exp = _dt.datetime.fromisoformat(self.expiry)
+            now = _dt.datetime.now()
+            if exp.tzinfo is None:
+                return exp <= now
+            return exp <= now.astimezone()
         except Exception:
             return False
 

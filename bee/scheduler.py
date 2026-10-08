@@ -158,6 +158,14 @@ def maybe_teach_back(ctx) -> dict:
                 "## Original task\n" + (r.get("task") or "")[:500] + "\n\n"
                 "## Proven solution\n" + text[:6000],
                 encoding="utf-8")
+            # J2: distilled skills enter as CANDIDATES — version 1, hidden
+            # from the prompt until the skill gate (structural + eval probe)
+            # passes (nightly skill_gate job or /skillgate).
+            try:
+                from .evals.skillgate import bump_skill
+                bump_skill(d.name, source="teach-back")
+            except Exception:
+                pass
             made.append(d.name)
         state_f.parent.mkdir(parents=True, exist_ok=True)
         state_f.write_text(json.dumps({"n": len(rows), "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}),
@@ -224,24 +232,37 @@ def _register_nightly_jobs(worker, cfg) -> None:
         total = int(nightly[:2]) * 60 + int(nightly[3:5]) + mins
         return f"{(total // 60) % 24:02d}:{total % 60:02d}"
 
+    # (id, description, trigger, action, max_runtime)
     specs = [
         ("nightly_consolidate", "memory consolidation (diary -> longterm)",
          JobTrigger(kind="daily", time=nightly),
-         {"type": "function", "fn": "bee.scheduler.consolidate"}),
+         {"type": "function", "fn": "bee.scheduler.consolidate"}, 1800.0),
         ("vector_rebuild", "vector index rebuild (12h)",
          JobTrigger(kind="interval", every_seconds=12 * 3600),
-         {"type": "function", "fn": "bee.scheduler.rebuild_vectors"}),
+         {"type": "function", "fn": "bee.scheduler.rebuild_vectors"}, 1800.0),
         ("router_retrain", "ML router retrain (only if new episodes)",
          JobTrigger(kind="daily", time=_plus(30)),
-         {"type": "function", "fn": "bee.scheduler.maybe_train_router"}),
+         {"type": "function", "fn": "bee.scheduler.maybe_train_router"}, 1800.0),
         ("teach_back", "cloud teach-back (golden -> skills)",
          JobTrigger(kind="daily", time=_plus(60)),
-         {"type": "function", "fn": "bee.scheduler.maybe_teach_back"}),
+         {"type": "function", "fn": "bee.scheduler.maybe_teach_back"}, 1800.0),
         ("sft_build", "SFT dataset rebuild",
          JobTrigger(kind="daily", time=_plus(75)),
-         {"type": "function", "fn": "bee.scheduler.maybe_build_sft"}),
+         {"type": "function", "fn": "bee.scheduler.maybe_build_sft"}, 1800.0),
+        ("log_rotation", "rotate + cap all JSONL streams (M13)",
+         JobTrigger(kind="daily", time=_plus(90)),
+         {"type": "function", "fn": "bee.monitor.rotate_all"}, 1800.0),
+        ("alert_scan", "threshold alerts (provider/verify/disk) + toast",
+         JobTrigger(kind="daily", time=_plus(105)),
+         {"type": "function", "fn": "bee.monitor.alert_scan"}, 1800.0),
+        ("skill_gate", "J2 skill gate: structural check + eval probe for candidate skills",
+         JobTrigger(kind="daily", time=_plus(120)),
+         {"type": "function", "fn": "bee.skills.gate_candidates"}, 3600.0),
+        ("model_gate", "J3 model-upgrade quality gate (candidate vs eval baseline)",
+         JobTrigger(kind="daily", time=_plus(150)),
+         {"type": "function", "fn": "bee.evals.model_gate"}, 7200.0),
     ]
-    for jid, desc, trigger, action in specs:
+    for jid, desc, trigger, action, max_rt in specs:
         if worker.store.load_job(jid) is not None:
             continue
         job = Job(id=jid, owner="system", description=desc, action=action,
@@ -249,7 +270,7 @@ def _register_nightly_jobs(worker, cfg) -> None:
                   permissions={"guard_mode": "unattended",
                                "preapproved_capabilities": []},
                   retry_policy={"max_attempts": 2, "backoff_seconds": 300},
-                  max_runtime=1800.0, state=PENDING)
+                  max_runtime=max_rt, state=PENDING)
         worker.create_job(job)
         log.info("registered durable job %s (%s)", jid, trigger.describe())
 

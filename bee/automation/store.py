@@ -86,19 +86,40 @@ class JobStore:
 
     def append_execution(self, ex: JobExecution) -> None:
         """Persist an execution row (called BEFORE the run starts and again
-        on completion — the first write is the duplicate guard)."""
+        on completion — the first write is the duplicate guard). M13: size
+        bounded via rotation (history survives in .1/.2, read by executions())."""
         with self._lock:
             self._exec_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                from ..monitor.rotate import rotate_if_needed
+                rotate_if_needed(self._exec_path, 2_000_000, 2)
+            except Exception:
+                pass
             with open(self._exec_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(ex.to_dict(), ensure_ascii=False) + "\n")
 
+    def _exec_files(self) -> list[Path]:
+        """Execution files OLDEST FIRST (.2 -> .1 -> active) — M13 rotation
+        never loses readable history."""
+        out: list[Path] = []
+        for suffix in (".2", ".1", ""):
+            p = self.dir / f"executions.jsonl{suffix}"
+            if p.exists():
+                out.append(p)
+        return out
+
     def executions(self) -> ExecutionHistory:
         """Last row per execution id wins (a crash-repair appends a terminal
-        row for an open 'running' row); original order otherwise preserved."""
+        row for an open 'running' row); original order otherwise preserved.
+        Reads across rotation backups so history survives M13 rotation."""
         by_id: dict[str, JobExecution] = {}
         order: list[str] = []
-        if self._exec_path.exists():
-            for line in self._exec_path.read_text(encoding="utf-8").splitlines():
+        for p in self._exec_files():
+            try:
+                lines = p.read_text(encoding="utf-8").splitlines()
+            except Exception:
+                continue
+            for line in lines:
                 if line.strip():
                     try:
                         ex = JobExecution.from_dict(json.loads(line))
@@ -114,16 +135,19 @@ class JobStore:
     def _notif_path(self) -> Path:
         return self.dir / "notifications.json"
 
+    NOTIF_CAP = 500    # M13: bounded notification list (newest kept)
+
     def load_notifications(self) -> list[Notification]:
         if not self._notif_path.exists():
             return []
         try:
             rows = json.loads(self._notif_path.read_text(encoding="utf-8"))
-            return [Notification.from_dict(r) for r in rows]
+            return [Notification.from_dict(r) for r in rows[-self.NOTIF_CAP:]]
         except Exception:
             return []
 
     def save_notifications(self, notifs: list[Notification]) -> None:
+        notifs = notifs[-self.NOTIF_CAP:]        # M13: cap the FILE too
         with self._lock:
             _atomic_write(self._notif_path,
                           json.dumps([n.to_dict() for n in notifs],

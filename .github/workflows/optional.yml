@@ -1,0 +1,59 @@
+# Optional environments (Program Phase 7, 2026-10-08)
+#
+# Voice / LiveKit / desktop stacks are heavyweight and/or hardware-bound
+# (live mic, LiveKit server, GPU). They are NOT part of the default CI —
+# core must never block on them. Trigger manually (workflow_dispatch) when
+# those stacks change.
+name: Optional environments
+
+on:
+  workflow_dispatch:
+
+jobs:
+  voice:
+    name: Voice (faster-whisper audio stack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install core + voice stack
+        run: >
+          python -m pip install --upgrade pip &&
+          python -m pip install -r requirements.txt -r requirements-voice.txt
+      - name: Voice category (synthetic audio; no microphone)
+        run: >
+          python -m pytest tests/test_voice_engine.py tests/test_stt_device.py -q
+
+  livekit:
+    name: LiveKit (config/bridge/JWT; no live room)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install core + livekit stack
+        run: >
+          python -m pip install --upgrade pip &&
+          python -m pip install -r requirements.txt -r requirements-livekit.txt
+      # LiveKit config assertions run against the repo's config defaults
+      # (no placeholder credentials in CI — the secret scanner forbids them).
+      - name: LiveKit category (no room connection)
+        run: python -m pytest tests/test_livekit.py tests/test_livekit_bridge.py -q
+
+  windows-desktop:
+    name: Windows desktop (pyautogui control surface)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install core + desktop stack
+        run: >
+          python -m pip install --upgrade pip &&
+          python -m pip install -r requirements.txt -r requirements-desktop.txt
+      - name: Windows desktop/control tests (mocked UI, on real Windows)
+        run: python -m pytest tests/test_computeruse.py tests/test_jarvis_features.py -q

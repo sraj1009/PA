@@ -1,0 +1,19 @@
+# ============================================================
+# PINNED ML STACK (Program Phase 7, 2026-10-08)
+#
+# The router artifact (train/router_model.joblib) carries a `meta` block
+# with the EXACT versions it was trained under. These pins define the
+# canonical LOAD environment. Rules:
+#   * major scikit-learn drift  -> artifact is REFUSED at load (clear message)
+#   * minor/patch drift         -> loads with a logged warning; re-train for
+#                                  exactness: python -m bee.pipeline.train_router
+#   * CI 'ml' job installs THIS file, then runs: pytest tests -q -m ml
+#
+# requirements.txt intentionally keeps loose lower bounds for the rest of the
+# app; the ML stack is pinned here, separately, because serialized models are
+# sensitive to it.
+# ============================================================
+scikit-learn==1.9.1
+numpy==2.5.3
+scipy==1.18.1
+joblib==1.6.0

@@ -973,3 +973,76 @@ grants) · "Every evening, summarize what I accomplished" (daily job).
   setup.ps1 parse errors) are **both already fixed**: `res_v` is initialized at
   loop.py:537 (and fastpath 271/273) before all uses (574-578); setup.ps1
   now runs cleanly ("All core checks passed").
+
+## 20. Final 10-item hardening batch (2026-10-06/08) — delta to this document
+
+Where sections 1–18 describe the pre-batch state, this is the current truth.
+Full evidence: `docs/JARVIS_BASELINE.md` (Phase 0 re-audit, 2026-10-08).
+
+1. **All surfaces kernel-routed** (§1 "duplication" closed): `webapp /voice`,
+   the LiveKit worker (`livekit/agent.py::_build_brain` now builds an
+   `AgentKernel`), and `bee/evals/runner.py` all execute via
+   `kernel.run(...)` — capability gate, receipts, verification, telemetry
+   apply everywhere. No `run_agent`-direct surface remains.
+2. **One EventBus** (§9 updated): `bee/events.py` is the single
+   implementation (subscribe/patterns/bounded log/contained handler
+   exceptions); `kernel/events.py` and `automation/events.py` are thin
+   API-preserving facades (existing call sites unchanged). 4 tests pin both
+   APIs over one implementation.
+3. **M13 rotation/caps** (§13): `monitor/rotate.py` — every JSONL stream
+   (metrics 5MB/2, audit 2MB/2, receipts 2MB/2, episodes 5MB/1, executions
+   2MB/2) rotates at its write chokepoint with throttled state; history reads
+   span backups; notifications capped at 500; nightly `log_rotation` job.
+4. **J1 cancellation hardening + crash recovery** (§14/§12): `shell`/
+   `code_run` run via `tools/cancelable.py` (process-**tree** kill on
+   cancel/timeout: `taskkill /F /T` / `killpg`; return kinds
+   ok/timeout/cancelled). Tasks checkpoint observations after every tool
+   result (redacted, atomic, bounded); a crash mid-task leaves a resumable
+   checkpoint — `kernel.resume(task_id)` / `/resume [id]` re-runs the task
+   with pre-crash observations attached. Limit (documented): task-level, not
+   message-level.
+5. **J3 model-upgrade quality gate** (§13/§8): `bee/evals/gate.py`. A
+   candidate local model promotes only on (score ≥ baseline + margin) AND
+   (no structural-task regression); baselines in `evals/baselines.json`;
+   promotion writes `models.yaml` (new documented config layer between env
+   and config.yaml — see §Config); first run seeds; `/gate` CLI; nightly
+   `model_gate` durable job (2 h budget).
+6. **Untrusted-context isolation** (§15): after any `untrusted_output` tool
+   returns content, the model view is sentinel-wrapped, pre-ingestion
+   task-scoped grants are revoked, and state-changing capabilities (R2+)
+   proposed from that point are escalated to explicit asks
+   (`capabilities.py::_check_one(untrusted_context=…)`). Residual: content
+   influence on reply text (no content-level filter).
+7. **OS alerts** (§13): `monitor/alerts.py` — toasts (`msg.com`/`osascript`/
+   `notify-send`, redacted, ≤200 chars) on job failure/miss + daily
+   `alert_scan` threshold job (provider fail rate, verify fail rate,
+   permission denials, metrics size) with per-key cooldown.
+8. **J2 skill versioning + gate** (§5 tools): skills carry
+   `meta.json` (version/status/eval/history); create/update/teach-back bump
+   the version and mark the skill **candidate** (hidden from the prompt
+   index); nightly `skill_gate` job + `/skillgate` run a structural check +
+   bounded eval probe (structural tasks re-run with the skill force-included
+   via `ctx.force_skills`; no regression allowed) before **active**
+   (shipped). Legacy skills without meta remain active.
+9. **M14 config precedence** (§Config): `docs/CONFIG_PRECEDENCE.md` —
+   process-env > .env > models.yaml (local_model only) > config.yaml >
+   defaults; `cloud.api_key` exception documented; `Config.precedence`
+   reports the winner per field (`/config`); 12 contract tests. Fixed in
+   passing: `BEE_WORKSPACE` from `.env` (was never applied) and the
+   `computeruse` section (was never loaded from config.yaml).
+10. **LiveKit state bridge** (§10/§18): temp-JSON file REPLACED by
+    loopback HTTP push — the agent POSTs each state transition to
+    `/livekit/state` (bearer auth, `BEE_WEB_PORT`); the web UI holds the
+    snapshot in memory and `/face/state` reports `age_s` liveness. No file,
+    nothing survives a webapp restart; push failure never breaks the call.
+
+**Re-audit corrections to earlier sections (2026-10-08):** the ToolBus
+(`kernel/tools_bus.py`) is NOT yet the authoritative dispatch path (the loop
+still calls `tools_by_name()` directly — debt N2), its `timeout` field is not
+enforced (N3), `from_default()` records only the first capability (N9), and
+the capability gate check in `loop.py:593` is coupled to `ctx.guard_on` so
+`/guard off` disables it (N1 — CRITICAL; program rule: the capability layer
+must be mandatory). Cancellation is context-scoped, safe today only because
+each entry point clears its event (N4). These four are the scope of the
+next program phases (ToolBus migration = Phase 2; task-scoped cancellation =
+Phase 4).

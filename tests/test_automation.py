@@ -281,7 +281,11 @@ def test_one_time_lifecycle_and_restart_never_reruns(tmp_path):
 def _force_running(store, job_id, attempt, max_attempts=2):
     job = store.load_job(job_id)
     job.state = "running"
-    job.retry_policy = {"max_attempts": max_attempts, "backoff_seconds": 60}
+    # 2026-10-08 scheduling unification: agent_task jobs are NOT retried
+    # blindly by default (side-effecting work). These tests verify the
+    # crash-repair/REQUEUE MECHANISM, so they opt in explicitly.
+    job.retry_policy = {"max_attempts": max_attempts, "backoff_seconds": 60,
+                        "retry_agent_task": True}
     store.save_job(job)
     store.append_execution(JobExecution(job_id=job_id, attempt=attempt,
                                         status="running"))
@@ -370,8 +374,10 @@ def test_recurring_miss_skips_and_notifies(tmp_path):
     assert report["skipped_recurring"] == 2
     j = w2.store.load_job(job.id)
     assert j.state == "pending"
+    # stored UTC-canonical (2026-10-08); compare the INSTANT in the job tz
     nxt = datetime.fromisoformat(j.next_run)
-    assert nxt.astimezone(TZ).day == 9 and nxt.hour == 12 and nxt.minute == 30  # next future
+    local = nxt.astimezone(TZ)
+    assert local.day == 9 and local.hour == 12 and local.minute == 30  # next future
     assert w2.tick() == []              # nothing backfilled
     assert "missed" in notif_kinds(w2.store)
 
@@ -382,12 +388,17 @@ def test_retry_backoff_then_success(tmp_path):
     kernel = FakeKernel(Ctx(), "fail_once")
     w = make_worker(tmp_path, kernel, clock)
     job = w.create_job(due_one_time(desc="retry me"))
-    job.retry_policy = {"max_attempts": 2, "backoff_seconds": 60}
+    # agent_task retries are opt-in since 2026-10-08 (no blind retry of
+    # side-effecting work); this test verifies the backoff MECHANISM, so it
+    # opts in explicitly.
+    job.retry_policy = {"max_attempts": 2, "backoff_seconds": 60,
+                        "retry_agent_task": True}
     w.store.save_job(job)
     w.tick(); assert w.wait_idle(5)
     j = w.store.load_job(job.id)
     assert j.state == "pending" and j.attempts == 1
-    assert j.next_run == (BASE + timedelta(seconds=60)).isoformat()  # backoff
+    from bee.automation.models import parse_dt
+    assert parse_dt(j.next_run) == BASE + timedelta(seconds=60)  # backoff (UTC-stored)
     assert any("retrying" in n.message for n in w.store.load_notifications()
                if n.kind == "failure")
     # advance past the backoff -> attempt 2 succeeds
@@ -434,15 +445,17 @@ def test_disable_enable_cancel_delete(tmp_path):
               action={"type": "agent_task", "task": "toggle task"},
               trigger=JobTrigger(kind="one_time", at=future.isoformat()),
               timezone="Asia/Kolkata")
+    from bee.automation.models import parse_dt
     w.create_job(job)
-    assert job.next_run == future.isoformat()
+    # next_run is stored UTC-canonical — compare instants, not tz-local strings
+    assert parse_dt(job.next_run) == future
 
     assert w.disable_job(job.id)
     clock.advance(minutes=59)
     assert w.tick() == [] and kernel.calls == []            # disabled: no run
     assert w.enable_job(job.id)
     j = w.store.load_job(job.id)
-    assert j.state == "pending" and j.next_run == future.isoformat()
+    assert j.state == "pending" and parse_dt(j.next_run) == future
     clock.advance(minutes=1)                                # reach the due instant
     assert w.tick() and w.wait_idle(5)                      # now it runs
     assert kernel.calls == [("toggle task", "main")]
@@ -679,7 +692,9 @@ def test_calendar_job_picks_up_new_ics_event(tmp_path):
               timezone="Asia/Kolkata")
     w.create_job(job)
     # the reminder is due 30 min before the meeting = BASE + 10 min
-    assert job.next_run == (BASE + timedelta(minutes=10)).isoformat()
+    # (stored UTC-canonical — compare the instant)
+    from bee.automation.models import parse_dt
+    assert parse_dt(job.next_run) == BASE + timedelta(minutes=10)
     assert w.tick() == []                            # not due yet
     clock = FakeClock(BASE + timedelta(minutes=5))
     w2 = make_worker(tmp_path, FakeKernel(Ctx(), "ok"), clock,

@@ -20,6 +20,7 @@ event, which run_agent honors between iterations and before each tool call.
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -67,7 +68,10 @@ class AgentKernel:
             KernelTelemetry().attach(self.events)
         except Exception:
             pass
-        self.memory = memory or MemoryStack(structured_path=memory_store_path)
+        # temporal.schedule resolves the durable worker lazily (automation
+        # starts after the kernel exists) — one scheduling architecture only
+        self.memory = memory or MemoryStack(structured_path=memory_store_path,
+                                            worker_ref=lambda: getattr(self.ctx, "automation_worker", None))
         self._tasks: dict[str, Task] = {}
         self.last_task: Task | None = None
         self._active_task: Task | None = None
@@ -102,15 +106,18 @@ class AgentKernel:
 
     # ----------------------------------------------------------- main entry
     def run(self, text: str, session_id: str = "repl", on_event=None,
-            model: str | None = None, on_token=None) -> TaskResult:
+            model: str | None = None, on_token=None,
+            max_iters: int | None = None) -> TaskResult:
         self._run_lock.acquire()
         try:
-            return self._run_impl(text, session_id, on_event, model, on_token)
+            return self._run_impl(text, session_id, on_event, model, on_token,
+                                  max_iters=max_iters)
         finally:
             self._run_lock.release()
 
     def _run_impl(self, text: str, session_id: str = "repl", on_event=None,
-                  model: str | None = None, on_token=None) -> TaskResult:
+                  model: str | None = None, on_token=None,
+                  max_iters: int | None = None) -> TaskResult:
         session = self.get_session(session_id)
         start = time.time()
         session.add_turn("user", text)
@@ -150,15 +157,38 @@ class AgentKernel:
         if ctx_block and decision == "continue":
             exec_text = f"{ctx_block}\n\n{resolved}"
 
-        # 3 — PLANNING (kernel decides the plan; the model only proposes tool
-        # actions inside the execution step)
+        # 3 — PLANNING (Phase 8): the kernel classifies intent, builds a typed
+        # plan, and VALIDATES it against the ToolBus BEFORE any execution.
+        # The LLM only proposes tool actions INSIDE the executing step.
+        from . import planner
+        kind, why = planner.classify_intent(resolved, session)
         transition(task, TaskState.PLANNING)
-        task.plan = Plan(goal=resolved[:500],
-                         steps=[Action(description="execute via agent loop (LLM proposes tool actions)",
-                                       tool=None, risk="low"),
-                                Action(description="verify intended effect (deterministic postconditions)",
-                                       tool=None, risk="low")],
-                         rationale="single-executor plan: the agent loop already performs multi-step tool use internally")
+        if kind == planner.IMPOSSIBLE:
+            # no actionable content — answer deterministically BEFORE any
+            # plan/LLM/ToolBus touch (no LLM call, no execution)
+            msg = ("I don't see an actionable request in that — could you "
+                   "tell me what you'd like done?")
+            task.plan = planner.build_plan(kind, resolved, session)
+            task.output = msg
+            # the kernel is asking the user to rephrase — semantically that
+            # is WAITING_FOR_USER (the next turn starts a fresh Task)
+            transition(task, TaskState.WAITING_FOR_USER)
+            session.save(self.sessions_dir)
+            _emit(self.events, AgentEventKind.PLAN_CREATED, session_id, task.id,
+                  plan=task.plan.to_dict())
+            return TaskResult(task=task, agent_result=_agent_stub(msg, ok=True))
+        task.plan = planner.build_plan(kind, resolved, session)
+        p_ok, p_errs = planner.validate_plan(task.plan, self.bus)
+        if not p_ok:
+            task.error = "plan rejected: " + "; ".join(p_errs)[:400]
+            task.failure_kind = "validation"
+            transition(task, TaskState.FAILED)
+            session.save(self.sessions_dir)
+            _emit(self.events, AgentEventKind.TASK_FAILED, session_id, task.id,
+                  error=task.error[:200])
+            return TaskResult(task=task, agent_result=_agent_stub(task.error, ok=False))
+        task.plan.rationale = (f"{kind} ({why}) — single-executor plan: the "
+                               "agent loop performs multi-step tool use internally")
         _emit(self.events, AgentEventKind.PLAN_CREATED, session_id, task.id,
               plan=task.plan.to_dict())
 
@@ -229,8 +259,9 @@ class AgentKernel:
                     result=(obs.result_text if obs else str(ev.get("preview") or ""))[:1500],
                     verification=(obs.effect if obs else "not_run"),
                     duration=obs.seconds if obs else 0.0,
-                    error="" if ev.get("ok") else (obs.result_text[:300] if obs else str(ev.get("preview") or "")),
-                    retry_count=task.retry_count))
+                     error="" if ev.get("ok") else (obs.result_text[:300] if obs else str(ev.get("preview") or "")),
+                     retry_count=task.retry_count))
+                self._write_checkpoint(task)       # J1: crash-recovery point
             elif t == "guard" and ev.get("action") == "deny":
                 _emit(self.events, AgentEventKind.PERMISSION_DENIED, session_id, task.id,
                       tool=ev.get("tool"), reason=ev.get("reason"))
@@ -243,14 +274,115 @@ class AgentKernel:
         self.ctx.current_task_id = task.id
         try:
             return self._execute_loop(task, session_id, exec_text, model, bridge, _approver,
-                                       start, session, on_token)
+                                       start, session, on_token, max_iters=max_iters)
         finally:
             self.gate.store.end_task(task.id)   # task-scoped grants die with the task
             self.ctx.current_task_id = ""
             self._active_task = None
+            # J1: only a terminal task clears its checkpoint — a process
+            # crash (no finally) is exactly what leaves one behind
+            if task.state in (TaskState.COMPLETED, TaskState.FAILED,
+                              TaskState.CANCELLED):
+                self._clear_checkpoint(task)
+
+    # ------------------------------------------- J1: crash-recovery checkpoints
+    @property
+    def _checkpoint_dir(self) -> Path:
+        return Path(self.sessions_dir).parent / "checkpoints"
+
+    def _write_checkpoint(self, task, note: str = "") -> None:
+        """Persist enough of the in-flight task to RESUME after a crash
+        (J1). Redacted, atomic (tmp+replace), best-effort — a checkpoint
+        failure never affects the task. Called after every tool observation
+        and at execution start; cleared when the task reaches a terminal
+        state (a real crash is the only way one persists)."""
+        try:
+            from .. import privacy
+            d = self._checkpoint_dir
+            d.mkdir(parents=True, exist_ok=True)
+            obs = [{"tool": o.tool, "ok": bool(o.ok), "effect": o.effect,
+                    "args": privacy.redact(json.dumps(o.args, default=str))[0][:500],
+                    "result": privacy.redact(o.result_text or "")[0][:300]}
+                   for o in task.observations[-20:]]
+            row = {"task_id": task.id, "session_id": task.session_id,
+                   "text": privacy.redact(task.text or "")[0][:2000],
+                   "state": task.state.value, "retry_count": task.retry_count,
+                   "observations": obs, "note": note, "ts": round(time.time(), 3)}
+            f = d / f"{task.id}.json"
+            tmp = d / f"{task.id}.json.tmp"
+            tmp.write_text(json.dumps(row, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(f)
+        except Exception:
+            pass
+
+    def _clear_checkpoint(self, task) -> None:
+        tid = getattr(task, "id", task)     # Task object or bare id
+        try:
+            (self._checkpoint_dir / f"{tid}.json").unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def pending_checkpoints(self, session_id: str | None = None) -> list[dict]:
+        """Interrupted (non-terminal) checkpoints, oldest first."""
+        d = self._checkpoint_dir
+        out: list[dict] = []
+        if not d.exists():
+            return out
+        for f in d.glob("*.json"):
+            try:
+                row = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if row.get("state") in ("completed", "failed", "cancelled"):
+                try:
+                    f.unlink()          # stale terminal row — sweep
+                except Exception:
+                    pass
+                continue
+            if session_id and row.get("session_id") != session_id:
+                continue
+            out.append(row)
+        return sorted(out, key=lambda r: r.get("ts") or 0)
+
+    def resume(self, task_id: str | None = None, on_event=None) -> "TaskResult":
+        """J1 crash recovery: re-run a task whose checkpoint shows it was
+        interrupted mid-execution. A deterministic CRASH RECOVERY note tells
+        the model which steps were ALREADY executed (so it does not redo
+        destructive work), and the pre-crash observations are attached to the
+        resumed task afterwards for the verification record.
+
+        Honest limit: this resumes at the task level (model re-plans with
+        knowledge of completed steps) — not at the message level of the old
+        in-flight loop.
+        """
+        pends = self.pending_checkpoints()
+        if not pends:
+            raise RuntimeError("no interrupted tasks to resume")
+        row = (next((r for r in pends if r["task_id"] == task_id), None)
+               if task_id else pends[-1])
+        if row is None:
+            raise RuntimeError(f"no interrupted task with id {task_id!r}")
+        done = [o for o in row.get("observations") or [] if o.get("ok")]
+        lines = "\n".join(f"  - {o.get('tool')} (executed ok)" for o in done) \
+            or "  (no completed steps recorded)"
+        note = (row.get("text") or "") + (
+            "\n\n[CRASH RECOVERY] This task was interrupted by a crash and is now "
+            "resuming. The following steps were ALREADY EXECUTED successfully "
+            "before the crash — do NOT redo them. If in doubt, verify their "
+            "effects first, then finish the remaining work.\n" + lines)
+        self._clear_checkpoint(row["task_id"])       # consumed by this resume
+        result = self.run(note, session_id=row.get("session_id") or "repl",
+                          on_event=on_event)
+        for o in row.get("observations") or []:      # attach pre-crash record
+            result.task.observations.insert(0, Observation(
+                tool=str(o.get("tool") or ""), ok=bool(o.get("ok")),
+                effect=str(o.get("effect") or "not_checked"),
+                result_text=str(o.get("result") or "")[:2000]))
+        return result
 
     def _execute_loop(self, task, session_id, exec_text, model, bridge, _approver,
-                      start, session, on_token=None) -> "TaskResult":
+                      start, session, on_token=None,
+                      max_iters: int | None = None) -> "TaskResult":
         result = None
         attempts = 0
         while True:
@@ -260,8 +392,10 @@ class AgentKernel:
                 transition(task, TaskState.RETRYING)
             transition(task, TaskState.EXECUTING)
             attempt_start = len(task.observations)
+            self._write_checkpoint(task)          # J1: resumable from here
             result = run_agent(self.ctx, exec_text, on_event=bridge, model=model,
-                               on_ask=_approver, on_token=on_token)
+                               on_ask=_approver, on_token=on_token,
+                               **({"max_iters": max_iters} if max_iters else {}))
             attempt_obs = task.observations[attempt_start:]
             if result.error == "cancelled":
                 transition(task, TaskState.CANCELLED)
@@ -292,13 +426,17 @@ class AgentKernel:
             if not destructive and self.policy.should_retry(kind, attempts,
                                                             fo.tool if fo else None,
                                                             fo.args if fo else None):
-                 note = ("(PREVIOUS ATTEMPT FAILED VERIFICATION: "
-                         + "; ".join(f"{c['check']}: {c.get('detail','')[:120]}"
-                                    for c in vres.checks if not c["ok"])[:400]
-                         + ". Retry with a different approach, then re-check the ACTUAL effect "
-                           "before answering.)")
-                 exec_text = f"{task.text}\n{note}"
-                 continue
+                  note = ("(PREVIOUS ATTEMPT FAILED VERIFICATION: "
+                          + "; ".join(f"{c['check']}: {c.get('detail','')[:120]}"
+                                     for c in vres.checks if not c["ok"])[:400]
+                          + ". Replan with a different approach, then re-check the ACTUAL effect "
+                            "before answering.)")
+                  exec_text = f"{task.text}\n{note}"
+                  if task.plan is not None:
+                      # Plan -> Action -> Observation -> REPLAN lifecycle: the
+                      # kernel records that this attempt re-planned.
+                      task.plan.replans += 1
+                  continue
             break
 
         # 7 — receipts + 8 — memory + 9 — final state

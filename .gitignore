@@ -43,3 +43,10 @@ models/faster-whisper-base.en/
 # --- OS / logs ---
 .DS_Store
 *.log
+
+# runtime state (Phase 12 repo hygiene, 2026-10-08)
+memory/receipts.jsonl
+memory/sessions/
+memory/store.json
+memory/checkpoints/
+evals/results_summary.json

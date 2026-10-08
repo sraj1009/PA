@@ -121,11 +121,16 @@ class Provider:
         """Cheap, no-network availability probe (key presence / ollama reachability)."""
         if self.cfg.kind == ProviderKind.OLLAMA:
             if ollama_up is None:
+                # config-driven first (Phase 6: callers must not rely on raw
+                # env inspection); env/default is only the fallback when the
+                # deployment did not configure a base URL
+                base = (self.cfg.base_url
+                        or os.environ.get("OLLAMA_BASE_URL")
+                        or "http://localhost:11434").rstrip("/")
                 try:
                     import httpx
-                    ollama_up = httpx.get(
-                        os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434") + "/api/tags",
-                        timeout=3).status_code == 200
+                    ollama_up = httpx.get(base + "/api/tags",
+                                           timeout=3).status_code == 200
                 except Exception:
                     ollama_up = False
             return ProviderHealth(self.cfg.kind, self.cfg.model, ollama_up,

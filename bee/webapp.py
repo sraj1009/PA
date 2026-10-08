@@ -18,6 +18,7 @@ import queue
 import secrets
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -233,9 +234,14 @@ async def voice(request: Request, file: UploadFile = File(...)):
             pass
     if not text:
         return {"transcript": "", "output": "(no speech detected)"}
-    result = run_agent(ctx, text)
-    return {"transcript": text, "output": result.output, "ok": result.ok,
-            "model": result.model, "escalated": result.escalated}
+    # Audit item 1: /voice runs through the SAME kernel as /chat (capability
+    # gate, receipts, verification, telemetry) instead of raw run_agent.
+    k = get_kernel(ctx)
+    tr = k.run(text, session_id="voice")
+    res = tr.agent_result
+    return {"transcript": text, "output": tr.output, "ok": tr.ok,
+            "model": res.model if res else None,
+            "escalated": res.escalated if res else False}
 
 
 @app.get("/engine")
@@ -262,12 +268,15 @@ async def engine_set(body: dict, request: Request):
 
 @app.get("/skills")
 def skills():
+    from .evals.skillgate import read_meta
     out = []
     for md in sorted(paths.SKILLS_DIR.glob("*/SKILL.md")):
         body = md.read_text(encoding="utf-8", errors="ignore")
         desc = next((ln.split(":", 1)[1].strip() for ln in body.splitlines()
                      if ln.lower().startswith("description:")), "")
-        out.append({"name": md.parent.name, "description": desc})
+        m = read_meta(md.parent.name)
+        out.append({"name": md.parent.name, "description": desc,
+                    "version": m.get("version", 1), "status": m.get("status", "active")})
     return {"skills": out}
 
 
@@ -314,6 +323,23 @@ def livekit_token(body: dict, request: Request):
 
 
 # ---------------------------------------------------------------- the face
+# Live-voice state lives IN MEMORY here (the webapp is the single reader);
+# the agent process pushes each transition to /livekit/state (bearer auth).
+# No temp-JSON file: nothing survives a webapp restart, so a dead agent can
+# no longer masquerade as a live one — /face/state reports age_s instead.
+_LK_STATE = {"state": "idle", "last_user": "", "last_reply": "", "engine": "",
+             "ts": 0.0, "seq": 0}
+_LK_LOCK = threading.Lock()
+
+
+def _livekit_snapshot() -> dict:
+    with _LK_LOCK:
+        out = dict(_LK_STATE)
+    ts = out.get("ts")
+    out["age_s"] = round(max(0.0, time.time() - float(ts)), 1) if ts else None
+    return out
+
+
 @app.get("/face", response_class=HTMLResponse)
 def face_page():
     return (_web_dir() / "face.html").read_text(encoding="utf-8")
@@ -322,8 +348,24 @@ def face_page():
 @app.get("/face/state")
 def face_state(request: Request):
     require_auth(request)
-    from .livekit.state import get_state
-    return get_state()
+    return _livekit_snapshot()
+
+
+@app.post("/livekit/state")
+def livekit_state_push(body: dict, request: Request):
+    """Agent -> web UI state push (single writer = the live voice process)."""
+    require_auth(request)
+    with _LK_LOCK:
+        _LK_STATE["state"] = str(body.get("state") or "idle")[:32]
+        if body.get("last_user"):
+            _LK_STATE["last_user"] = str(body["last_user"])[:300]
+        if body.get("last_reply"):
+            _LK_STATE["last_reply"] = str(body["last_reply"])[:600]
+        if body.get("engine"):
+            _LK_STATE["engine"] = str(body["engine"])[:64]
+        _LK_STATE["ts"] = time.time()
+        _LK_STATE["seq"] = int(body.get("seq") or _LK_STATE.get("seq", 0) + 1)
+    return {"ok": True}
 
 
 if __name__ == "__main__":

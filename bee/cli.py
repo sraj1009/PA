@@ -78,6 +78,10 @@ def _cmd_help(p: _Print):
         "  /jobs            list durable jobs (survive restarts; /job <id> for detail)\n"
         "  /job <id> <op>   op: detail | disable | enable | cancel | delete | history\n"
         "  /auto            unread notifications + proactive rules (user-authorized only)\n"
+        "  /resume [id]     J1 crash recovery: list/resume interrupted tasks\n"
+        "  /gate [show|baseline [model]|run [candidate]|rollback]  J3 model-upgrade quality gate\n"
+        "  /skillgate [name]  J2 skill gate: structural check + eval probe (all candidates if no name)\n"
+        "  /config          M14: where each config field actually came from (precedence report)\n"
         "  /clear           clear screen\n"
         "  /exit | /quit    leave\n"
         "  Ctrl-C mid-task  cancels the running task\n"
@@ -205,11 +209,13 @@ def _repl(cfg):
                     p.info(f"  {t.name:16s} {t.description[:100]}")
             elif cmd == "/skills":
                 from . import paths
+                from .evals.skillgate import read_meta
                 for md in sorted(paths.SKILLS_DIR.glob("*/SKILL.md")):
                     body = md.read_text(encoding="utf-8", errors="ignore")
                     desc = next((ln.split(":", 1)[1].strip() for ln in body.splitlines()
                                  if ln.lower().startswith("description:")), "")
-                    p.info(f"  {md.parent.name:24s} {desc[:90]}")
+                    m = read_meta(md.parent.name)
+                    p.info(f"  {md.parent.name:24s} v{m.get('version', 1)} [{m.get('status', 'active'):9s}] {desc[:70]}")
             elif cmd == "/model":
                 if not arg:
                     p.info(f"current override: {model_override or 'auto (local default, cloud escalation)'}")
@@ -294,10 +300,14 @@ def _repl(cfg):
                     jobs = w.jobs()
                     if not jobs:
                         p.info("  (no jobs yet — ask me: 'Every weekday at 8AM, tell me my schedule')")
+                    from .automation.models import display_local
                     for j in jobs:
                         mark = "on " if j.enabled else "off"
-                        p.info(f"  [{mark}] {j.id:22s} {j.state:10s} next={j.next_run or '-':21s} {j.description[:58]}")
-                    p.info("  /job <id> [detail|disable|enable|cancel|delete|history]")
+                        # stored UTC-canonical; DISPLAY in the job's timezone
+                        nx = display_local(j.next_run, j.timezone) if j.next_run else "-"
+                        p.info(f"  [{mark}] {j.id:22s} {j.state:10s} next={nx:22s} {j.description[:56]}")
+                    p.info("  (next-run shown in the job's timezone; stored in UTC) · "
+                           "/job <id> [detail|disable|enable|cancel|delete|history]")
                 else:
                     p.error("usage: /jobs (list) · /job <id> <op>")
             elif cmd == "/job":
@@ -315,8 +325,12 @@ def _repl(cfg):
                     rows = w.history(jid)
                     if not rows:
                         p.info("  (no executions recorded)")
+                    from .automation.models import display_local
+                    hj = w.store.load_job(w._resolve(jid))
+                    hz = hj.timezone if hj else "UTC"
                     for e in rows:
-                        p.info(f"  {e['started_at']}  a{e['attempt']}  {e['status']:12s} {e['error'][:90]}")
+                        st = display_local(e["started_at"], hz) if e.get("started_at") else "-"
+                        p.info(f"  {st}  a{e['attempt']}  {e['status']:12s} {e['error'][:74]}")
                 elif op in ("disable", "enable", "cancel", "delete"):
                     fn = getattr(w, f"{op}_job")
                     p.info(f"  {op}: {'ok' if fn(jid) else 'job not found'}")
@@ -326,9 +340,12 @@ def _repl(cfg):
                         p.error(f"job not found: {jid}")
                         continue
                     s = j.summary()
+                    from .automation.models import display_local
+                    nx = display_local(j.next_run, j.timezone) if j.next_run else "-"
+                    lx = display_local(j.last_run, j.timezone) if j.last_run else "-"
                     p.info(f"  {s['id']}  state={s['state']}  enabled={s['enabled']}")
-                    p.info(f"  trigger: {s['trigger']}  next: {s['next_run'] or '-'}  last: {s['last_run'] or '-'}")
-                    p.info(f"  owner={s['owner']}  attempts={s['attempts']}  tz={j.timezone}")
+                    p.info(f"  trigger: {s['trigger']}  next: {nx}  last: {lx}")
+                    p.info(f"  owner={s['owner']}  attempts={s['attempts']}  tz={j.timezone} (stored UTC)")
                     p.info(f"  permissions: {j.permissions}")
                     p.info(f"  retry: {j.retry_policy}  max_runtime: {j.max_runtime:.0f}s")
                     for e in w.history(j.id, 3):
@@ -354,6 +371,68 @@ def _repl(cfg):
                     p.info(f"  marked {w.mark_notifications_read()} notification(s) read")
                 else:
                     p.error("usage: /auto | /auto read")
+            elif cmd == "/resume":
+                # J1 crash recovery: re-run an interrupted task
+                pends = kernel.pending_checkpoints()
+                if not pends:
+                    p.info("  (no interrupted tasks — checkpoints clear on normal completion)")
+                elif not arg:
+                    for r in pends:
+                        p.info(f"  {r['task_id'][:14]}  state={r['state']}  steps={len(r.get('observations') or [])}  {r['text'][:50]}")
+                    p.info("  /resume <task_id> to resume one (or restart BEE and say 'continue')")
+                else:
+                    try:
+                        res = kernel.resume(task_id=arg)
+                        p.bee((res.output or res.error or "")[:400])
+                    except RuntimeError as e:
+                        p.error(str(e))
+            elif cmd == "/gate":
+                # J3 model-upgrade quality gate
+                from .evals import gate as mgate
+                sub = arg.split()[0] if arg else "show"
+                val = arg.split(None + " ")[1].strip() if len(arg.split()) > 1 else ""
+                if sub in ("", "show"):
+                    data = mgate.load_baselines()
+                    for name, b in (data.get("models") or {}).items():
+                        active = " (ACTIVE)" if name == cfg.ollama.model else ""
+                        p.info(f"  {name:20s} baseline {b.get('score'):8s}  {b.get('ts', '')}{active}")
+                    for pr in (data.get("promotions") or [])[-5:]:
+                        p.info(f"  promotion: {pr.get('from')} -> {pr.get('to')} "
+                               f"({pr.get('before')} -> {pr.get('after')})  {pr.get('ts', '')}")
+                    p.info(f"  candidate: {cfg.model_gate.candidate or '(none — set model_gate.candidate in config.yaml)'}  "
+                           f"margin: {cfg.model_gate.margin}")
+                elif sub == "baseline":
+                    try:
+                        r = mgate.set_baseline(ctx, val or None)
+                        p.bee(str(r))
+                    except Exception as e:
+                        p.error(str(e))
+                elif sub == "run":
+                    try:
+                        r = mgate.model_quality_gate(ctx, candidate=val or None)
+                        p.bee(str(r))
+                    except Exception as e:
+                        p.error(str(e))
+                elif sub == "rollback":
+                    r = mgate.rollback_model()
+                    p.bee(str(r))
+                else:
+                    p.error("usage: /gate [show|baseline [model]|run [candidate]|rollback]")
+            elif cmd == "/skillgate":
+                # J2 skill gate (structural check + bounded eval probe)
+                from .evals import skillgate
+                if arg:
+                    r = skillgate.gate_skill(ctx, arg)
+                    p.bee(str(r))
+                else:
+                    r = skillgate.gate_candidates(ctx)
+                    p.bee(str(r))
+            elif cmd == "/config":
+                # M14: provenance of every resolvable field
+                p.info("  config precedence (winner per field):")
+                for k in sorted(cfg.precedence):
+                    p.info(f"  {k:24s} <- {cfg.precedence[k]}")
+                p.info("  full matrix: docs/CONFIG_PRECEDENCE.md")
             elif cmd == "/eval":
                 from .evals import runner
                 try:
@@ -668,6 +747,9 @@ def _full(cfg, host: str, port: int, room: "str | None"):
     root = Path(__file__).resolve().parent.parent
     logdir = root / "temp"
     logdir.mkdir(exist_ok=True)
+    # the spawned live-voice process pushes UI state to THIS web server
+    # (HTTP bridge, item 10) — it must know the port
+    os.environ["BEE_WEB_PORT"] = str(port)
     spawned: list = []
 
     def spawn(label: str, args: list, logname: str):

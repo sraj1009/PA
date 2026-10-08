@@ -12,6 +12,7 @@ route() returns a dict; route_task() keeps the legacy tuple API.
 from __future__ import annotations
 
 import re
+import time
 
 from ..config import Config
 from ..monitor import metrics
@@ -182,15 +183,21 @@ def route(task: str, cfg: Config, model: str | None = None) -> dict:
     if st is not None:
         return {"name": "smalltalk", "escalated": False, "source": "deterministic",
                 "conf": 1.0, "smalltalk_reply": st}
-    # ML tier (learned from episodes; shadow-logged even when heuristics win)
+    # ML tier (learned from episodes; shadow-logged even when heuristics win).
+    # OPTIONAL OPTIMIZER (Phase 7): the deterministic tiers above already ran;
+    # if ML is absent/broken the heuristic below simply decides. ML may also
+    # escalate (complexity floor) but never demote a structurally complex task.
     heur = _heuristic(t, cfg)
     ml = None
+    ml_ms = 0.0
     if cfg.router.ml_enabled:
+        from ..brain import mlrouter
+        t0 = time.time()
         try:
-            from ..brain import mlrouter
             ml = mlrouter.predict(t, min_conf=cfg.router.ml_confidence)
         except Exception:
             ml = None
+        ml_ms = round((time.time() - t0) * 1000, 1)
     if ml:
         label, conf = ml
         name = "cloud" if label == "cloud" else ("det" if label == "det" else "local")
@@ -203,18 +210,26 @@ def route(task: str, cfg: Config, model: str | None = None) -> dict:
             # complexity floor: ML may escalate, but never demote a
             # structurally complex task to the 3B local model
             name, conf, source = "cloud", 0.9, "complexity"
-        metrics.record("route_ml", pred=label, conf=conf, used=True, source=source)
+        metrics.record("route_ml", pred=label, conf=conf, used=True,
+                       source=source, ms=ml_ms)
         return {"name": name, "escalated": name == "cloud", "source": source, "conf": conf}
 
     if ml is None and cfg.router.ml_enabled:
-        # shadow log: model exists but was not confident / not trained enough
+        # Phase 7 telemetry: record WHY the optimizer fell back (not_trained /
+        # load_failed:<clear message> / low_confidence) — this is what the
+        # runtime report's fallback-rate is computed from.
+        from ..brain import mlrouter
         try:
-            from ..brain import mlrouter
-            raw = mlrouter.load()
-            if raw:
-                metrics.record("route_ml", pred="unavailable", used=False)
+            st = mlrouter.load_status()
+            if st.get("exists"):
+                reason = ("low_confidence" if st.get("loaded")
+                          else f"load_failed: {str(st.get('error') or '')[:80]}")
+            else:
+                reason = "not_trained"
         except Exception:
-            pass
+            reason = "unknown"
+        metrics.record("route_ml_fallback", reason=reason, ms=ml_ms)
+        metrics.record("route_ml", pred="unavailable", used=False, ms=ml_ms)
     return {"name": heur, "escalated": heur == "cloud", "source": "heuristic", "conf": 0.5}
 
 

@@ -27,9 +27,12 @@ class Context:
     kernel: object = None          # Phase 2: AgentKernel instance (set at launch;
                                    # commands use ctx.kernel.direct for LLM calls)
     capability_gate: object = None # Phase 3: CapabilityGate — checked BEFORE tool
-                                   # execution (set by the kernel; legacy direct
-                                   # run_agent paths without a kernel skip it)
+                                    # execution (set by the kernel; legacy direct
+                                    # run_agent paths without a kernel skip it)
     current_task_id: str = ""      # Phase 3: kernel task id for task-scoped grants
+    # J2: skills force-included in the prompt for THIS context (the skill-gate
+    # eval probe uses this to measure a candidate skill with it actually live)
+    force_skills: set = field(default_factory=set)
 
     def __post_init__(self):
         if self.workspace is None:
@@ -69,9 +72,26 @@ def _read(p: Path, limit: int = 4000) -> str:
     return t[:limit]
 
 
-def skills_index(cfg: Config) -> str:
+def skills_index(cfg: Config, force: "set | None" = None) -> str:
+    """Index of SHIPPED skills only.
+
+    J2: skills in `candidate` status (created/updated but not yet through the
+    skill gate) are excluded — unproven instructions must not enter the
+    prompt. Legacy skills without meta.json are treated as active. Names in
+    `force` bypass the filter (the skill-gate eval probe)."""
+    try:
+        from ..evals.skillgate import read_meta
+    except Exception:
+        read_meta = None
     lines = []
     for md in sorted(paths.SKILLS_DIR.glob("*/SKILL.md")):
+        name = md.parent.name
+        if read_meta is not None and name not in (force or set()):
+            try:
+                if read_meta(name).get("status") == "candidate":
+                    continue
+            except Exception:
+                pass
         try:
             body = md.read_text(encoding="utf-8", errors="ignore")
         except Exception:
@@ -82,7 +102,7 @@ def skills_index(cfg: Config) -> str:
             if ln.lower().startswith("description:"):
                 desc = ln.split(":", 1)[1].strip()
                 break
-        lines.append(f"- {md.parent.name}: {desc or first}")
+        lines.append(f"- {name}: {desc or first}")
     if not lines:
         return "(no skills indexed — use skill_create to distill novel solutions)"
     return "\n".join(lines[:60])
@@ -116,7 +136,7 @@ def build_system_prompt(ctx: Context) -> str:
     base = _read(paths.SYSTEM_MD, limit=4000)
     profile = _read(paths.PROFILE_MD, limit=1500)
     longterm = _read(paths.LONGTERM_MD, limit=1500)
-    skills = skills_index(cfg)
+    skills = skills_index(cfg, force=getattr(ctx, "force_skills", None))
     lessons = recent_lessons(cfg)
     u = cfg.user
     interests = f" · interests: {', '.join(u.interests)}" if u.interests else ""

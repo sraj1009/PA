@@ -270,13 +270,13 @@ class CapabilityGate:
         return capabilities_for(tool, args)
 
     def check(self, tool: str, args: dict, task_id: str = "",
-              confirmer=None) -> GateDecision:
+               confirmer=None, untrusted_context: bool = False) -> GateDecision:
         conf = confirmer if confirmer is not None else self.confirmer
         confirmed = False
         policies: set[str] = set()
         worst_id, worst_risk = "", -1
         for cap in self.required_for(tool, args):
-            d = self._check_one(cap, task_id, conf)
+            d = self._check_one(cap, task_id, conf, untrusted_context)
             if not d.allowed:
                 return d
             policies.add(d.policy)
@@ -294,16 +294,26 @@ class CapabilityGate:
         return GateDecision(True, worst_id, "all capabilities permitted", agg,
                             confirmed=confirmed)
 
-    def _check_one(self, cap: Capability, task_id: str, confirmer) -> GateDecision:
+    def _check_one(self, cap: Capability, task_id: str, confirmer,
+                   untrusted_context: bool = False) -> GateDecision:
         entry = self.store.entry(cap.id)
         policy = entry.policy
         if policy == DENY:
             return GateDecision(False, cap.id, f"capability policy is DENY ({cap.description})", policy)
         if policy == ALLOW:
             need_confirm = (cap.confirmation == CONF_ALWAYS and entry.confirm != "never")
-            if need_confirm:
-                return self._ask(cap, task_id, confirmer,
-                                 f"{cap.name}: {cap.description} [always-confirm]")
+            # Prompt-injection hardening (audit item 5): if the model is
+            # proposing this action right AFTER ingesting untrusted external
+            # content (web fetch/search), any STATE-CHANGING capability
+            # (risk R2+) is escalated to an explicit ask. A silent allow is
+            # exactly the channel an injected instruction would exploit.
+            injected = (untrusted_context and int(cap.risk) >= 2
+                        and not self.store.granted_in_task(task_id, cap.id))
+            if need_confirm or injected:
+                reason = (f"{cap.name}: {cap.description}"
+                          + (" [escalated: proposed right after untrusted external content]"
+                             if injected else " [always-confirm]"))
+                return self._ask(cap, task_id, confirmer, reason)
             return GateDecision(True, cap.id, "allowed", policy, confirmed=False)
         if policy == TASK:
             if self.store.granted_in_task(task_id, cap.id):

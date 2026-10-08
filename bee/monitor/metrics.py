@@ -11,6 +11,7 @@ import time
 from collections import Counter
 
 from .. import paths
+from . import rotate as _rotate
 
 _lock = threading.Lock()
 
@@ -38,6 +39,7 @@ def record(event: str, **data) -> None:
         line = json.dumps(row, ensure_ascii=False, default=str)
         with _lock:
             paths.METRICS_DIR.mkdir(parents=True, exist_ok=True)
+            _rotate.rotate_if_needed(paths.METRICS_FILE)   # M13: bounded
             with paths.METRICS_FILE.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
     except Exception:

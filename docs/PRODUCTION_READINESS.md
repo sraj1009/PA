@@ -1,6 +1,6 @@
 # BEE / Jarvis — Production Readiness Audit
 
-**Date:** 2026-10-06 (end of hardening audit)
+**Date:** 2026-10-06 (end of hardening audit + final 10-item batch)
 **Method:** full-code audit across architecture / security / reliability / agent
 quality / voice / computer use / observability / testing, with every status
 backed by a file:line reference, a passing test, or an explicit non-claim.
@@ -8,18 +8,76 @@ No marketing language: RED is RED even when the rest is GREEN.
 
 **Verdict (one line):** BEE is a coherent, well-tested, single-user personal
 agent runtime that is **NOT production-ready** — it is at a strong
-"personal deployment" level: the loop, permissions, persistence, recovery and
-observability are verified, but end-to-end task success is capped at 8–13/21
-by the local 3B model, two user surfaces bypass the capability gate, and
-several integrations are unverified in-field (LiveKit room, real display).
+"personal deployment" level: every user surface now runs through one
+capability-gated kernel, logs are capped, failures alert, crashes are
+resumable, and model/skill upgrades are gate-controlled — but end-to-end task
+success is still capped at 8–13/21 by the local 3B model (the J3 quality gate
+is the mechanism that closes this, once a better candidate model exists), and
+two integrations remain unverified in-field (LiveKit room, real display).
 
 **Gate results at this commit:**
 
 | Gate | Result |
 |---|---|
-| `python -m pytest tests -q` | **405 passed, 0 failed** (29.2–39s) |
+| `python -m pytest tests -q` | **449 passed, 0 failed** (38s) |
 | `python -m evals.verify_suite` | **71,914 checks, ALL PASS** (math 10,000 / dsa 38,456 / pii 13,200 / guard 4,204 / router 6,000 / rag 54) |
-| Agent e2e (21 tasks, real local model) | **11/21** this run (8/21 concurrent run) — band 8–13 across runs; failures = model "missing substring" ceiling, not loop bugs |
+| Agent e2e (21 tasks, real local model) | **EVAL_PENDING** — band 8–13 across runs; failures = model "missing substring" ceiling, not loop bugs |
+
+**Final 10-item hardening batch (all delivered, all test-pinned):**
+
+1. **Gate gap closed** — the three legacy `run_agent`-direct surfaces
+   (`webapp /voice`, `livekit/agent.py` worker, `bee/evals` runner) now run
+   through the SAME `AgentKernel` (capability gate, receipts, verification,
+   telemetry). No surface bypasses the gate anymore.
+2. **M13 closed** — every JSONL stream is size-capped with rotation at its
+   write chokepoint (`monitor/rotate.py`): metrics 5MB/2, audit 2MB/2,
+   receipts 2MB/2, episodes 5MB/1, executions 2MB/2 (history reads span
+   backups); notifications capped at 500. Nightly `log_rotation` job.
+3. **J1 closed** — cancel/timeout now KILLS the subprocess tree
+   (`tools/cancelable.py`: `taskkill /F /T` on Windows, `killpg` elsewhere) —
+   a hung subprocess can no longer outlive its task; and tasks checkpoint
+   observations after every tool result, cleared only on a terminal state —
+   a crash mid-task leaves a resumable checkpoint (`kernel.resume`,
+   `/resume [id]`). Documented limit: resume re-runs the task with pre-crash
+   observations attached (task-level, not message-level).
+4. **J3 delivered** — `bee/evals/gate.py`: a candidate local model is
+   promoted (via `models.yaml`, its own documented config layer) only when
+   eval score ≥ baseline + margin AND no structurally-stable task regressed;
+   first run seeds the baseline; `/gate show|baseline|run|rollback`; nightly
+   durable job `model_gate`.
+5. **Untrusted-context isolation** — after an `untrusted_output` tool
+   (web fetch/search) returns content, the model view is sentinel-wrapped,
+   task-scoped grants issued before ingestion are revoked, and any
+   state-changing capability (R2+) the model proposes is escalated to an
+   explicit ask (`capabilities.py::_check_one`, `untrusted_context`).
+   Residual (documented): untrusted text can still influence the *content*
+   of a reply — it can no longer silently trigger actions.
+6. **Alerting delivered** — OS-level toasts (`monitor/alerts.py`,
+   `msg.com`/`osascript`/`notify-send`) on job failure/miss + daily
+   `alert_scan` threshold job (provider fail rate, verify fail rate,
+   permission denials, metrics size) with per-key cooldown; all toasts
+   redacted + truncated.
+7. **J2 delivered** — skills are versioned (`skills/<name>/meta.json`);
+   every create/update/teach-back bumps the version and marks the skill
+   **candidate** (hidden from the prompt); the nightly `skill_gate` job
+   (and `/skillgate`) runs a structural check + a bounded eval probe
+   (structural tasks re-run with the skill force-included; no regression
+   allowed) before a skill ships as **active**.
+8. **M14 delivered** — `docs/CONFIG_PRECEDENCE.md` + `Config.precedence`
+   (inspectable via `/config`) + 12 contract tests pinning the full
+   process-env > .env > models.yaml > config.yaml > defaults matrix, the
+   `cloud.api_key` exception, and workspace-from-.env (a real ordering bug
+   found and fixed: `BEE_WORKSPACE` in `.env` was previously never applied).
+   Also fixed: the `computeruse` section was never loaded from config.yaml.
+9. **One EventBus** — `bee/events.py` is the single implementation; the
+   kernel and automation buses are thin API-preserving facades (4 tests pin
+   both APIs over one implementation, contained handler exceptions, bounded
+   log, subscription order/dedupe).
+10. **LiveKit temp-JSON bridge replaced** — the agent process now PUSHES
+    state over loopback HTTP to the web UI (`POST /livekit/state`, bearer
+    auth; port via `BEE_WEB_PORT`); the web UI holds it in memory with
+    `age_s` liveness. No file, no stale-snapshot race, nothing survives a
+    webapp restart (a dead agent can no longer masquerade as live).
 
 Changes made during this audit (all covered by tests):
 
@@ -47,14 +105,14 @@ Changes made during this audit (all covered by tests):
 
 | Item | Status | Evidence / limitation |
 |---|---|---|
-| Single executor (kernel) | **GREEN** | REPL, web `/chat`, realtime voice, and scheduled jobs all run through one `AgentKernel` instance per process (kernel run-lock serializes executions). `cli.py::_repl`, `webapp.py::chat`, `voice/realtime/engine.py`, `automation/worker.py` |
+| Single executor (kernel) | **GREEN** | REPL, web `/chat`, web `/voice`, realtime voice, the LiveKit worker, the eval runner, and scheduled jobs ALL run through one `AgentKernel` instance per process (kernel run-lock serializes executions). No `run_agent`-direct surface remains (10-item #1). `cli.py::_repl`, `webapp.py::chat`+`voice`, `livekit/agent.py`, `evals/runner.py`, `voice/realtime/engine.py`, `automation/worker.py` |
 | Tool registry | **GREEN** | `tools_bus.py` + `tools/__init__.py`: every tool a typed `T` definition (name, schema, risk, capabilities); unknown names raise; arbitrary callables cannot be registered |
-| Duplicated agent logic | **YELLOW** | Three legacy `run_agent`-direct call sites bypass the kernel/capability gate: `webapp.py::voice` (L231), `livekit/agent.py` (worker), `bee/evals/` runner. `/voice` is now at least unattended-safe; the others are documented gaps (no capability gate, no task state/receipts) |
+| Duplicated agent logic | **GREEN** | Closed by 10-item #1: the three legacy `run_agent`-direct call sites (web `/voice`, LiveKit worker, eval runner) now use `kernel.run` with the same gates/state/receipts as interactive chat. Eval sessions are isolated per task/rep |
 | Global state | **YELLOW** | Known, documented globals: `paths.py` module paths, `engines.py` active-engine state, `webapp.CTX`, `memory/search._cache`, `computeruse` global stop flag, `automation` per-process worker. Single-user, single-process-per-store by design; `bee-runfull` child processes share the store safely via file claims. Not a service architecture — multi-user is out of scope |
 | Circular dependencies | **GREEN** | Verified import edges: `automation.worker → scheduler` and `scheduler → automation` are function-level lazy imports; `tools → computeruse/automation` are lazy builders; kernel never imports voice/livekit/scheduler |
 | Provider coupling | **GREEN** | `agent/providers.py` registry (ProviderRegistry/Config/Health); `client.py` is the only file talking to wire protocols; adding a provider = one adapter + one config entry |
-| Inconsistent interfaces | **YELLOW** | Two `EventBus` classes with different `subscribe` signatures (kernel: `subscribe(fn)`; automation: `subscribe(pattern, fn)`) — the telemetry attach handles both, but they should be one class. Guard/capability/risk are three deliberate layers (documented in §15/§18), not inconsistency |
-| Configuration | **YELLOW** | `config.py` single-source resolution exists (Phase 5 item), but the documented precedence matrix (config.yaml / models.yaml / .env / settings.json) M14 is still only partially documented |
+| Inconsistent interfaces | **GREEN** | 10-item #9: ONE `EventBus` implementation (`bee/events.py`); kernel and automation buses are thin API-preserving facades (existing call sites/tests unchanged). Guard/capability/risk remain three deliberate layers (documented), not inconsistency |
+| Configuration | **GREEN** | 10-item #8 (M14): single-source precedence documented (`docs/CONFIG_PRECEDENCE.md`) and contract-pinned (12 tests) — process-env > .env > models.yaml > config.yaml > defaults, with the `cloud.api_key` exception documented; `Config.precedence` reports the winner per field (`/config`) |
 
 ## 2. Security
 
@@ -65,14 +123,14 @@ Changes made during this audit (all covered by tests):
 | Command execution | **GREEN** | Two independent layers: `guard.classify` (pinned regex table) + `security/risk.py` AST classifier for Python payloads (closes R2: `shutil.rmtree`/`os.remove`/`Path.unlink` now ask/deny); `eval_safe` has depth/node/time limits (R7 closed); 4,204 guard checks 100% |
 | Sandbox | **YELLOW** | Docker sandbox exists with workspace jail and (since Phase 1) no `.env` mount; **optional** — when Docker is absent, `shell`/`code_run` execute on the host guarded only by the two layers above. Default host-exec is a deliberate local-PA tradeoff, documented in the tool descriptions |
 | File access | **GREEN** | `tools/files.py` workspace jail (139 lines, path normalization + escape checks); sandbox mounts a secrets-free subpath |
-| Prompt injection | **YELLOW** | Defense is **tool-level, not content-level**: injected instructions in fetched/searched/file content can steer the model, but any action it triggers passes the guard + capability gate (unattended = auto-deny). There is no content-level injection filter or "untrusted context" isolation — a user with network-enabled tools accepts this residual risk |
+| Prompt injection | **YELLOW (hardened)** | Tool-level + untrusted-context isolation (10-item #5): web fetch/search output is sentinel-wrapped, pre-ingestion task grants are revoked, and any state-changing capability (R2+) proposed immediately after ingesting untrusted content is escalated to an explicit ask. Unattended surfaces auto-deny. **Residual (documented, accepted):** untrusted text can still influence the *writings* of a reply; there is no content-level injection filter (that would need an LLM-in-the-loop or a strict allowlist) |
 | Tool injection | **GREEN** | Tools cannot be registered at runtime from the model; registry is code-defined; the `automation_job` tool (closest thing to dynamic behavior) is capability-gated (R3 ASK) and its actions are a closed structured set (agent_task/notify/registered-function) |
 | Permissions | **GREEN** | 20 capabilities R0–R5, pre-execution gate, task-scoped grants that die with the task, unattended fail-closed everywhere (web, jobs, livekit guard mode); `test_capabilities.py` + in-job fail-closed test |
 | Authentication | **YELLOW** | Web: single bearer token (env-fixed or generated), loopback bind only — adequate for a personal machine, **not** for exposure beyond 127.0.0.1. No account system by design (single user) |
 | Authorization | **GREEN** | capability gate (kind of action) over guard (this specific command) over sandbox (containment) — three independent layers, strictest wins |
 | Logs | **GREEN** | This audit: every string written to the metrics stream is redacted at the chokepoint; receipts/audit/job-history redacted; voice path logs no audio; computer-use logs no pixels/titles/typed text (lengths only) |
-| Sensitive data retention | **YELLOW** | Episodes are redacted at write (R5 closed); diaries are archived-not-deleted (R1 closed); **metrics.jsonl, episodes JSONL, sessions JSON have no rotation/size caps (M13 open)** — unbounded growth on a long-lived install. Golden teach-back retains successful cloud answers verbatim (intentional training data; the PII redaction applies to cloud-bound payloads, and teach-back content is local-only) |
-| LiveKit state | **YELLOW** | R8: worker↔web state via temp-JSON file (race/visibility) — still the design |
+| Sensitive data retention | **GREEN** | 10-item #2 (M13 closed): every JSONL stream is size-capped with rotation at its write chokepoint — metrics 5MB/2, audit 2MB/2, receipts 2MB/2, episodes 5MB/1, executions 2MB/2 (history reads span the backups), notifications capped at 500. Episodes redacted at write (R5), diaries archived-not-deleted (R1). Golden teach-back retains successful cloud answers verbatim (intentional local-only training data) |
+| LiveKit state | **GREEN** | 10-item #10 (R8 closed): worker↔web state is now a loopback HTTP **push** to the web UI (`POST /livekit/state`, bearer auth) held in memory with `age_s` liveness — no temp file, no stale-snapshot race, nothing survives a webapp restart |
 
 ## 3. Reliability
 
@@ -86,15 +144,15 @@ Changes made during this audit (all covered by tests):
 | Provider failure | **GREEN** | `LLMError` taxonomy (auth/quota/network/timeout/overloaded/model_not_found); local↔cloud↔offline deterministic chain; now observable per-call (llm telemetry with error_kind) |
 | Tool failure | **GREEN** | fail_streak breaker (2 consecutive), repeat-call guard, circuit breaker on dead endpoints (3rd identical call blocked), observations record `blocked` vs failed |
 | Verification failure | **GREEN** | bounded one fix round in-loop; kernel verify with retry + correction note; a clean tool return is NEVER reported as verified success (unverified ≠ pass) |
-| Partial completion | **YELLOW** | Task state distinguishes COMPLETED/FAILED/CANCELLED and verification is reported separately — but there is no resumable mid-task checkpoint (J1 milestone): a crash mid-task loses in-progress tool observations (session keeps the turn, not the partial plan) |
-| Mid-subprocess kill | **YELLOW** | Cancellation signals the loop; a hung subprocess (e.g. a `shell` tool stuck in network I/O) is not killed until it returns — documented in §14.4 |
+| Partial completion | **GREEN** | 10-item #3 (J1 closed): task state distinguishes COMPLETED/FAILED/CANCELLED with verification reported separately, AND tasks now checkpoint observations after every tool result (cleared only on a terminal state). A crash mid-task leaves a resumable checkpoint — `kernel.resume` / `/resume [id]` re-runs the task with the pre-crash observations attached. Documented limit: resume is task-level (re-runs from the checkpoint), not message-level |
+| Mid-subprocess kill | **GREEN** | 10-item #3: `shell`/`code_run` run via `tools/cancelable.py`, which KILLS the whole process tree on cancel/timeout (`taskkill /F /T` on Windows, `killpg` elsewhere) — a hung subprocess can no longer outlive its task. Return kinds distinguish ok / timeout(124) / cancelled(130) |
 
 ## 4. Agent quality
 
 | Item | Status | Evidence / limitation |
 |---|---|---|
 | Task state | **GREEN** | 11-state machine with an explicit transition table; illegal transitions raise (fail closed) |
-| Planning | **YELLOW** | Kernel builds the execute+verify plan; the LLM proposes tool actions inside one execution step (single-executor plan, documented). No per-step planner checkpoints (J1) |
+| Planning | **GREEN** | Kernel builds the execute+verify plan; the LLM proposes tool actions inside one execution step (single-executor plan, documented). 10-item #3 adds per-tool-result checkpoints with task-level resume (J1) |
 | Memory | **YELLOW** | Structured store (remember/recall/update/forget/summarize/expire + provenance) is flat JSON with keyword scoring — not vector, not graph; RAG is LanceDB + keyword RRF (rebuild now duplicate-free, B2 closed) |
 | Context | **GREEN** | Session persistence + follow-up resolution ("Tomorrow.", "Actually make it 10 AM", "stop.") verified; RAG auto-context for reference tasks |
 | Tool selection | **GREEN** | 536-line deterministic fastpaths + ML router (CV 0.9975 on 408 episodes) with complexity floor; 6,000 router checks 100%; fastpaths bypass the LLM entirely for known intents |

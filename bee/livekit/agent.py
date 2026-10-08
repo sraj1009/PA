@@ -63,16 +63,27 @@ def validate_room(room: str) -> str:
 
 # ------------------------------------------------------------------ brain
 def _build_brain(cfg):
-    """Returns (brain_fn, engine_label). brain_fn(task) -> reply text."""
+    """Returns (brain_fn, engine_label). brain_fn(task) -> reply text.
+
+    Audit item 1: the LiveKit worker now runs through the SAME AgentKernel
+    as every other surface — capability gate, task state, receipts,
+    verification, telemetry. Unattended by construction: the approver
+    auto-denies, so an 'ask' fails closed (no human is at this process).
+    """
     from ..agent import engines
     from ..agent.context import create_context
-    from ..agent.loop import run_agent
+    from ..kernel import AgentKernel
 
     engine = engines.load_engine()
 
     # guard_mode passed EXPLICITLY (was: cfg.guard.mode = "unattended", which
     # mutated the shared config object for anything else holding it)
     ctx = create_context(cfg, guard_mode="unattended")
+    if getattr(ctx, "kernel", None) is None:
+        kernel = AgentKernel(ctx, approver=lambda tool, args, reason: False)
+        ctx.kernel = kernel
+    else:
+        kernel = ctx.kernel
 
     def brain(task: str) -> str:
         task = (task or "").strip()
@@ -80,7 +91,7 @@ def _build_brain(cfg):
             return ""
         st.set_state("thinking", last_user=task, engine=engine)
         try:
-            res = run_agent(ctx, task)
+            res = kernel.run(task, session_id="livekit")
             out = (res.output or "").strip()
             if not res.ok and not out:
                 out = f"Sorry, that didn't work. {res.error or ''}".strip()

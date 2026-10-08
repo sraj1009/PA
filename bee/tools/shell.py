@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import shlex
-import subprocess
 
 from .base import envelope, T
+from .cancelable import run_cancelable
 
 def shell_tools():
     def h_shell(ctx, command: str, timeout: int = 120):
@@ -15,11 +15,16 @@ def shell_tools():
             timeout = 120
         timeout = max(1, min(int(timeout), 900))
         try:
-            r = subprocess.run(command, shell=True, capture_output=True, text=True,
-                               cwd=str(ctx.workspace), timeout=timeout)
-            return envelope(command, r.returncode, r.stdout or "", r.stderr or "")
-        except subprocess.TimeoutExpired:
-            return envelope(command, 124, error=f"timeout after {timeout}s (killed)")
+            cancel = getattr(ctx, "cancel_event", None)
+            code, out, err, kind = run_cancelable(command, ctx.workspace,
+                                                  timeout, cancel, shell=True)
+            if kind == "cancelled":
+                return envelope(command, code, out,
+                                (err + "\n[cancelled: process tree killed]").strip())
+            if kind == "timeout":
+                return envelope(command, 124, out,
+                                (err + f"\n[timeout after {timeout}s: process tree killed]").strip())
+            return envelope(command, code, out, err)
         except Exception as e:
             return envelope(command, 1, error=str(e))
 

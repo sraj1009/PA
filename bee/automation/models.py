@@ -1,10 +1,21 @@
-"""Durable automation models (Phase 6).
+"""Durable automation models (Phase 6; UTC-canonical storage, 2026-10-08).
 
 Job / JobTrigger / JobExecution / Notification + ExecutionHistory. A Job
 persists everything needed to survive an application restart: identity,
 owner/session, task description, STRUCTURED action, trigger, timezone,
 enabled flag, permissions, retry policy, max runtime, timestamps, and the
 computed next_run.
+
+TIMEZONE RULE (scheduling unification, 2026-10-08):
+  * ALL persisted timestamps (created_at, next_run, last_run, execution rows,
+    notifications) are stored CANONICALLY IN UTC (offset +00:00). Persistence
+    therefore never depends on the host machine's local timezone.
+  * The user's timezone is stored SEPARATELY on the job (`job.timezone`,
+    IANA name) and is what the scheduler uses to compute occurrences and what
+    `display_local()` uses for human display.
+  * Legacy rows written before this rule carry their own (host-local) offset
+    and still parse/compare correctly — aware datetimes are comparable
+    across offsets, so old and new rows coexist without migration.
 
 Structured action types (no free code):
   {"type": "agent_task", "task": "..."}   -> AgentKernel.run() — the SAME
@@ -19,7 +30,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 # ------------------------------------------------------------------- states
@@ -43,7 +54,8 @@ WEEKDAY_NAMES = {0: "Monday", 1: "Tuesday", 2: "Wednesday", 3: "Thursday",
 
 
 def _now_iso() -> str:
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    # CANONICAL UTC — persistence must not depend on the host's local tz.
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _new_id(prefix: str) -> str:
@@ -239,10 +251,35 @@ class Notification:
 
 def parse_dt(s: str) -> Optional[datetime]:
     try:
-        return datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(s)
     except (ValueError, TypeError):
         return None
+    # Naive stamps (only possible in very old rows / one_time `at` values) are
+    # treated as UTC so comparisons stay total-order; the job's tz is applied
+    # by the SCHEDULER (schedule.next_run), never here.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def iso(dt: Optional[datetime]) -> str:
-    return dt.astimezone().isoformat(timespec="seconds") if dt else ""
+    """Persist a datetime CANONICALLY IN UTC (timezone rule, 2026-10-08)."""
+    if not dt:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def display_local(iso_str: str, tz_name: str) -> str:
+    """Render a stored (UTC-canonical) timestamp in the USER'S timezone —
+    for display only; storage always stays UTC."""
+    dt = parse_dt(iso_str)
+    if dt is None:
+        return iso_str or ""
+    try:
+        from .schedule import get_tz
+        dt = dt.astimezone(get_tz(tz_name))
+    except Exception:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%d %H:%M") + (f" ({tz_name})" if tz_name else "")
