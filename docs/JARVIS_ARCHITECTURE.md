@@ -118,7 +118,7 @@ Supporting subsystems (not on the hot path per turn):
 | RAG | `bee/brain/rag.py` | — | RRF fusion of vectors + keyword |
 | Verifier | `bee/brain/verifier.py` | — | Math recompute / file re-read / URL checks; 1 bounded fix round |
 | Tool base | `bee/tools/base.py` | — | `T` dataclass (name/description/parameters/handler); `build_default_tools()`; `eval_safe` (AST allowlist, **no depth/size/time limits**) |
-| Tool modules | `bee/tools/*.py` | 14 | files (139, workspace jail), automate (342, Playwright), shell (45, `shell=True`), web (multi-engine ddg→bing→wikipedia), code (47, host `python -c`), calculator (35), sandbox (117), memory (76), skills (119), planner (39), spawn_tool (29), scheduler_tool (107), health, systemctl (314) |
+ | Tool modules | `bee/tools/*.py` | 30 tools (2026-10-08, counted) | files (workspace jail), automate, shell, web (netguard SSRF-protected, multi-engine ddg→bing→wikipedia), code, calculator, sandbox (Docker, hardened flags), memory (structured), skills, planner, spawn_task (sub-agents inherit the capability gate — acceptance audit F1), automation_job, computer_use (observe/input/window/clipboard/stop), health, systemctl, scheduler |
 | Episodes | `bee/agent/episodes/logger.py` | 113 | JSONL episode records; **unredacted tool output** persisted (loop.py:579-580) |
 | Monitor | `bee/monitor/{metrics,health,dashboard}.py` | — | Metrics JSONL history (unbounded), health, static HTML dashboard |
 | Native daemon | `bee/native/__init__.py` | 177 | Go telemetry daemon bootstrap |
@@ -158,7 +158,18 @@ discovered by reading `config.py`.
 
 ### 1.5 The 12 kernel responsibilities today
 
-The target Agent Kernel must own 12 responsibilities. Current locations:
+> **STALE-SECTION NOTICE (2026-10-08 acceptance audit):** the table below is the
+> Phase-0 gap analysis. Rows 1–9 (session, task state, planning, execution,
+> permissions, cancellation, verification, memory) have since been BUILT —
+> `AgentSession`, `Task`/`TaskState`, the typed `planner` (intent → validated
+> Plan → Action), kernel-owned execution with `ToolBus` as the dispatch point,
+> the capability gate (task-scoped grants, untrusted-context escalation),
+> first-class `cancel_event` (job-scoped for scheduled work), `verify_task`
+> effect checks, and `StructuredMemory` with provenance. The authoritative
+> current state is [JARVIS_ACCEPTANCE_AUDIT.md](JARVIS_ACCEPTANCE_AUDIT.md) §2
+> and [STATUS.md](STATUS.md).
+
+The target Agent Kernel must own 12 responsibilities. Current locations (as of Phase 0):
 
 | # | Responsibility | Current location | State |
 |---|---|---|---|

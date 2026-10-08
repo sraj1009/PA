@@ -17,6 +17,7 @@ Governance rules (enforced in code, not convention):
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -25,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import privacy
+
+log = logging.getLogger("bee.memory")
 
 VALID_TYPES = {"fact", "preference", "event", "workflow", "entity", "working"}
 VALID_SOURCES = {"user", "tool", "web", "model_inference"}
@@ -95,12 +98,29 @@ class StructuredMemory:
         self._lock = threading.RLock()
         self._items: dict[str, MemoryItem] = {}
         if self.path and self.path.exists():
+            # Corrupt-file resilience (Phase 12 reliability): a totally
+            # unreadable file degrades to an EMPTY store (never crashes);
+            # a file with a few bad rows salvages the good rows instead of
+            # losing everything.
+            rows: list = []
             try:
-                for row in json.loads(self.path.read_text(encoding="utf-8")).get("items", []):
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    rows = data.get("items", []) or []
+                elif isinstance(data, list):
+                    rows = data
+            except Exception:
+                rows = []
+            skipped = 0
+            for row in rows:
+                try:
                     it = MemoryItem.from_dict(row)
                     self._items[it.id] = it
-            except Exception:
-                self._items = {}
+                except Exception:
+                    skipped += 1
+            if skipped:
+                log.warning("memory store: skipped %d corrupt row(s), "
+                            "salvaged %d", skipped, len(self._items))
 
     # ---------------------------------------------------------- remember
     def remember(self, content: str, type: str = "fact", source: str = "user",

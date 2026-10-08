@@ -590,7 +590,12 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
             # run_agent paths without a kernel skip it. A denial feeds the
             # same blocked-result flow as the guard, so audit/episode/telemetry
             # and the model's 'explain the refusal' behavior all work.
-            if getattr(ctx, "capability_gate", None) is not None and ctx.guard_on:
+            # Phase 12 (N1 CRITICAL): the gate is the kernel's authorization
+            # layer and MUST run even when the user toggles the interactive
+            # command guard off (`/guard off`) — a REPL convenience flag can
+            # never bypass capability authorization. The legacy command
+            # guard below (line 605) is the one thing `guard_on` controls.
+            if getattr(ctx, "capability_gate", None) is not None:
                 gate_res = ctx.capability_gate.check(tname, args,
                                                      task_id=getattr(ctx, "current_task_id", ""),
                                                      untrusted_context=untrusted_active)
@@ -623,8 +628,30 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                                       f"a different tool/approach, or answer without it."}
                 elif tname in registry:
                     executed = True
+                    # Acceptance audit P1-1: the ToolBus IS the execution
+                    # dispatcher. Kernel-backed runs execute through
+                    # bus.call — one dispatch point, pre-call cancel check
+                    # (stop_check), unified unknown-tool / malformed-args
+                    # errors, and the bus's per-tool metadata. Legacy
+                    # kernel-less direct run_agent falls back to the
+                    # registry (identical handler set).
+                    bus = getattr(getattr(ctx, "kernel", None), "bus", None)
                     try:
-                        res_v = registry[tname](ctx, **args)
+                        if bus is not None:
+                            res_v, _bdt, _bok, _bmeta = bus.call(
+                                ctx, tname, args, stop_check=ev_cancel.is_set)
+                        else:
+                            res_v = registry[tname](ctx, **args)
+                    except PermissionError as e:
+                        # bus.call raises PermissionError("cancelled before
+                        # execution") when stop_check() fires. A PermissionError
+                        # from the handler itself (e.g. workspace jail) is an
+                        # ERROR for this call, not a task cancellation.
+                        if "cancelled" in str(e):
+                            ev_cancel.set()
+                            cancelled = True
+                            break
+                        res_v = {"error": f"{tname} raised PermissionError: {e}"}
                     except TypeError as e:
                         res_v = {"error": f"bad arguments for {tname}: {e}"}
                     except KeyboardInterrupt:

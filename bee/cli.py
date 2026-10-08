@@ -861,6 +861,14 @@ def main(argv=None):
         from .agent.context import create_context
         from .voice import clap as clap_mode
         ctx = create_context(cfg)
+        # Acceptance audit P1-2: clap voice tasks run through the SAME kernel
+        # as every other surface — before this fix this process ran
+        # run_agent with a kernel-less ctx (no capability gate, no receipts,
+        # no verification).
+        import threading
+        ctx.cancel_event = threading.Event()
+        from .kernel import AgentKernel
+        ctx.kernel = AgentKernel(ctx)
         # engine choice only matters when the clap records a spoken task
         if (cfg.clap.action or "welcome").lower() == "voice":
             from .agent import engines

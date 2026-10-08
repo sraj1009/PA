@@ -235,3 +235,81 @@ def test_guard_still_runs_after_gate(tmp_path):
     # the guard's own deny (recursive rm) is recorded in the tool receipt
     tool_rows = [row for row in rows if row["tool"] == "shell"]
     assert tool_rows and "recursive rm" in tool_rows[0]["result"]
+
+
+def test_f1_spawn_subagent_inherits_capability_gate(tmp_path):
+    """Acceptance audit P0-1: spawn_task's sub-context MUST inherit the
+    parent's capability gate + task id. Before the fix, spawn rebuilt the
+    ctx with only cfg/workspace/name/client/model_note — the loop then
+    skipped the gate for the ENTIRE sub-run (model-controllable bypass)."""
+    import threading
+    from bee.agent import spawn as spawn_mod
+    from bee.agent.context import Context
+    from bee.config import load_config
+    from bee.security.capabilities import GateDecision
+    from test_kernel_integration import ScriptedClient, tc
+
+    class RecordingGate:
+        def __init__(self):
+            self.checked = []
+        def check(self, tool, args, task_id="", confirmer=None, untrusted_context=False):
+            self.checked.append((tool, task_id))
+            return GateDecision(False, "test.deny", "denied by audit test", "deny")
+
+    cfg = load_config()
+    cfg.cloud.enabled = False
+    cfg.workspace = tmp_path
+    client = ScriptedClient([tc("c1", "shell", {"command": "dir"}), "sub done"])
+    ctx = Context(cfg, workspace=tmp_path, client=client,
+                  guard_on=True, guard_mode="unattended",
+                  episodes_on=False, rag_on=False,
+                  cancel_event=threading.Event())
+    gate = RecordingGate()
+    ctx.capability_gate = gate
+    ctx.current_task_id = "t_audit"
+    out = spawn_mod.spawn(ctx, "do a sub task")
+    assert gate.checked, "sub-agent tool call NEVER reached the capability gate"
+    assert gate.checked[0][0] == "shell"
+    assert all(tid == "t_audit" for _t, tid in gate.checked), \
+        "sub-agent grants must be task-scoped to the PARENT task"
+    assert out.startswith("[OK") or out.startswith("[FAIL")
+
+
+def test_f2_loop_executes_tools_through_toolbus(tmp_path):
+    """Acceptance audit P1-1: with a kernel attached, the agent loop must
+    dispatch tools through ToolBus.call (one execution path) — not a
+    parallel direct-registry call."""
+    from test_kernel_integration import make_kernel, tc
+    k, client, ctx = make_kernel(tmp_path, [
+        tc("c1", "skill_list", {}),
+        "Skills listed.",
+    ])
+    orig = k.bus.call
+    seen = []
+
+    def spy(c, name, args, **kw):
+        seen.append(name)
+        return orig(c, name, args, **kw)
+
+    k.bus.call = spy
+    r = k.run("Show me your skill catalog.", session_id="f2")
+    assert "skill_list" in seen, \
+        f"loop executed the tool outside ToolBus.call (bus saw: {seen})"
+    assert r.ok
+
+
+def test_n1_capability_gate_runs_even_when_guard_off(tmp_path):
+    """Phase 12 N1 (CRITICAL): the REPL `/guard off` toggle (ctx.guard_on)
+    must NOT disable the kernel's capability gate — capability authorization
+    cannot be bypassed by a UI convenience flag. The legacy command guard
+    is the only thing guard_on controls."""
+    from test_kernel_integration import make_kernel
+    k, client, ctx = make_kernel(tmp_path, [
+        {"tool_calls": [{"id": "c1", "name": "shell", "arguments": {"command": "del notes.txt"}}]},
+        "Blocked by policy.",
+    ])
+    ctx.guard_on = False                    # user typed `/guard off`
+    (tmp_path / "notes.txt").write_text("keep me")
+    r = k.run("Delete the file notes.txt.", session_id="g4")
+    assert (tmp_path / "notes.txt").exists(), "gate must enforce even with guard OFF"
+    assert AgentEventKind.PERMISSION_DENIED in [e.kind for e in k.events.log]

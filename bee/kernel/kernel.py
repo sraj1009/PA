@@ -216,7 +216,13 @@ class AgentKernel:
                 permission="granted" if granted else "denied",
                 result=reason, verification="not_run", duration=0.0,
                 retry_count=task.retry_count))
-            if granted:
+            # BOTH outcomes return the task to EXECUTING: on grant the action
+            # runs; on deny the model explains the refusal to the user. Either
+            # way the waiting phase is over and the task is mid-execution —
+            # leaving it in WAITING_FOR_PERMISSION after a denial made the
+            # later EXECUTING/VERIFYING move an illegal transition
+            # (InvalidTransitionError — found by the guard_blocked eval).
+            if task.state != TaskState.EXECUTING:
                 transition(task, TaskState.EXECUTING)
             return granted
 

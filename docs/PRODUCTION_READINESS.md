@@ -1,5 +1,16 @@
 # BEE / Jarvis — Production Readiness Audit
 
+> **SUPERSEDED (2026-10-08):** this document reflects the state at the
+> 10-item hardening batch (Phases 0–4). Phases 6–12 (providers, unified
+> durable scheduling, ML reproducibility, typed planner, realtime voice,
+> computer-use vision layer, proactive policy, production hardening) and the
+> independent acceptance audit changed the picture: the suite is now
+> **534/534** (was 449), a model-controllable capability-gate bypass
+> (`spawn_task`) was found and fixed (audit P0-1/F1), and the ToolBus is now
+> the loop's execution dispatcher (P1-1/F2). Read
+> [JARVIS_ACCEPTANCE_AUDIT.md](JARVIS_ACCEPTANCE_AUDIT.md) for the current
+> evidence and [STATUS.md](STATUS.md) for the feature-by-feature state.
+
 **Date:** 2026-10-06 (end of hardening audit + final 10-item batch)
 **Method:** full-code audit across architecture / security / reliability / agent
 quality / voice / computer use / observability / testing, with every status

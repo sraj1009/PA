@@ -85,6 +85,9 @@ _INTEGRATION = [
     # Phase 11 (2026-10-08): proactive event intelligence (default-deny
     # policy, rate limits, quiet hours, external gating, sources).
     "test_proactive",
+    # Phase 12 (2026-10-08): corrupted-memory / corrupt-persistence-file
+    # reliability (degrade, never crash; salvage good rows).
+    "test_phase12_reliability",
 ]
 # Files that need OPTIONAL packages / a specific platform — the default CORE
 # suite must not fail because these are absent (Program Phase 7). Phase 7

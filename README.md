@@ -1,9 +1,17 @@
-# BEE — production-ready personal assistant
+# BEE — a local-first personal assistant
 
-**BEE** is an elite, highly adaptive, all-in-one executive and personal assistant that lives on
-**your** machine. It plans your day, drafts your writing, summarizes anything, writes and
-debugs production code, stress-tests your decisions, and executes technical work through a
-hybrid local + cloud brain — with zero fluff in its output and none in its architecture.
+> **Status (verified 2026-10-08):** BEE is a well-tested single-user personal agent
+> for human-supervised deployment on this machine — 534/534 tests green, 71,914
+> deterministic checks passing, all major security invariants audit-verified.
+> It is **not** multi-user, **not** "production-ready" in the service sense, and its
+> hardware paths (real mic/display/LiveKit room) are test-verified only with mocks.
+> Authoritative status: [docs/STATUS.md](docs/STATUS.md) · evidence:
+> [docs/JARVIS_ACCEPTANCE_AUDIT.md](docs/JARVIS_ACCEPTANCE_AUDIT.md)
+
+**BEE** is an all-in-one executive and personal assistant that lives on **your**
+machine. It plans your day, drafts your writing, summarizes anything, writes and
+debugs code, stress-tests your decisions, and executes technical work through a
+hybrid local + cloud brain.
 
 Measured on a Windows desktop (RTX 3050 4 GB · 16 GB RAM): local **bee4b** (Qwen2.5-3B + BEE
 persona, ~50–90 tok/s, fully on-GPU) orchestrates by default; hard tasks escalate to a
@@ -19,7 +27,7 @@ persona, ~50–90 tok/s, fully on-GPU) orchestrates by default; hard tasks escal
 │  routing: det > explicit > smalltalk > fast-paths > ML > heuristic  │
 │  + escalation · guard rails · PII redaction · offline fallback     │
 ├─────────────────────────────────┬──────────────────────────────────┤
-│  22 tools (file, shell, sandbox,│  Memory (plain Markdown, yours)  │
+ │  30 tools (file, shell, sandbox,│  Memory (plain Markdown, yours)  │
 │  calc, web, memory, skills,     │  diary/ · lessons/ · profile.md  │
 │  planner, scheduler, …)         │  vectors/ (LanceDB) · RAG hybrid │
 ├─────────────────────────────────┴──────────────────────────────────┤
@@ -460,14 +468,14 @@ bee/
   commands/                ★ modular slash-commands (registry + 5 commands)
   agent/                   loop · client · router · offline · context · reflection · spawn
   brain/                   verifier · rag (RRF hybrid) · mlrouter (learned)
-  tools/                   22 tools (registry: tools/__init__.py)
+  tools/                   30 tools (registry: tools/__init__.py)
   memory/ · episodes/      markdown memory + hybrid search · SFT trajectory capture
   pipeline/                validate → sanitize → build SFT → train ML router
   monitor/                 metrics.jsonl stream · health · dashboard
   voice/                   mic · transcribe (whisper) · speak (TTS) · loop
   dsa/                     algorithm library + bench harness
   evals/                   21-task runner + model benchmark
-tests/                     14 pytest suites + verify helpers + smoke + acceptance
+ tests/                     30+ pytest files (markers: core/security/windows/ml/voice/livekit)
 training/qlora/            SFT/merge/export for the dedicated model
 skills/ · evals/ · memory/ · train/ · metrics/ · docs/
 config.yaml · models.yaml · requirements*.txt · setup.ps1
@@ -497,8 +505,9 @@ The REPL, `/help`, and any new surface (web/voice) pick it up automatically.
 ## 11. Testing & verification
 
 ```powershell
-python -m pytest tests -q                 # unit + integration — 200 passed
-python -m evals.verify_suite              # 71,914 deterministic checks vs references
+python -m pytest tests -q                 # full suite — 534 passed (2026-10-08)
+python -m pytest tests -q -m core         # portable core (unit+integration) — 463
+python evals/verify_suite.py              # 71,914 deterministic checks vs references
 python -m bee.cli eval                    # 21-task agent eval (measured, per run)
 python -m bee.evals.bench_model           # tok/s + latency benchmark
 ```
@@ -579,8 +588,11 @@ then a real QLoRA run on a GPU box → `merge_export.py` → `ollama create bee-
 flip `models.yaml`. Full plan: `docs/llm-component.md`, `docs/training-plan.md`.
 
 **Safety invariants (tested):** file tools jailed to the workspace · AST-whitelisted
-calculator · guard rails enforced in the loop · cloud PII-redacted · web UI localhost-only
-· voice audio never leaves the machine · secrets env-only.
+calculator · guard rails + capability gate enforced in the loop (every kernel surface,
+sub-agents and clap mode included) · cloud PII-redacted · web UI localhost-only
+· local voice audio never leaves the machine (LiveKit room audio transits LiveKit
+Cloud — see §6.5) · secrets env-only · external web content treated as untrusted
+(state-changing actions after ingestion are escalated to explicit approval).
 
 ---
 

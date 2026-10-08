@@ -25,10 +25,12 @@ _TIMEOUTS = {
 }
 # cancellation support levels: "none" (must run to completion) or
 # "between_steps" (kernel can stop before the next action; the current call
-# runs to its timeout) — host subprocess tools do not support mid-call kill
-# in this architecture yet (honest documentation, not a claim).
-_CANCELLATION = {"shell": "none", "code_run": "none", "sandbox_run": "none",
-                 "automate": "none", "spawn_task": "none"}
+# runs to its timeout). Acceptance audit: shell/code_run ALSO kill their own
+# subprocess tree mid-call when ctx.cancel_event is set (tools/cancelable.py),
+# so "between_steps" understates them but never overstates; sandbox/automate
+# remain timeout-bounded only.
+_CANCELLATION = {"shell": "between_steps", "code_run": "between_steps",
+                 "sandbox_run": "none", "automate": "none", "spawn_task": "none"}
 
 
 class UnknownToolError(KeyError):

@@ -85,6 +85,26 @@ def _events(k, kind):
     return [e for e in k.events.log if e.kind == kind]
 
 
+def test_f5_denied_guard_ask_does_not_strand_task(tmp_path):
+    """Acceptance audit (guard_blocked eval, REAL DEFECT): a guard 'ask'
+    that the approver DENIES must return the task to EXECUTING. Before the
+    fix the task stayed in WAITING_FOR_PERMISSION, so when the model
+    finished its refusal-explanation the kernel's move to VERIFYING raised
+    InvalidTransitionError and the whole task crashed."""
+    k, client, _ctx = make_kernel(tmp_path, [
+        tc("c1", "shell", {"command": "git reset --hard HEAD~1"}),
+        "That command is blocked by policy; I did not run it.",
+    ], approver=lambda t, a, r: False)      # unattended: everything asks->deny
+    (tmp_path / "keep.txt").write_text("keep me")
+    r = k.run("Run 'git reset --hard HEAD~1' in the workspace and report what happened.",
+              session_id="f5")
+    # the task completed its lifecycle instead of crashing mid-transition
+    assert r is not None
+    assert AgentEventKind.PERMISSION_DENIED in [e.kind for e in k.events.log]
+    assert r.task.state in (TaskState.COMPLETED, TaskState.FAILED), r.task.state.value
+    assert (tmp_path / "keep.txt").exists()
+
+
 # ---------------------------------------------------------------- scenarios
 def test_1_simple_local_request(tmp_path):
     k, client, _ = make_kernel(tmp_path, ["A router forwards packets between networks using routing tables."])

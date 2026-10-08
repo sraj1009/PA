@@ -173,7 +173,17 @@ def _voice_once(ctx) -> None:
     if not text:
         return
     print(f"  you: {text}")
-    result = run_agent(ctx, text)
+    # Acceptance audit P1-2: run through the kernel when one is attached
+    # (capability gate + receipts + verification), same as every other
+    # surface; the cancel event is cleared per utterance (no poisoning).
+    kernel = getattr(ctx, "kernel", None)
+    if kernel is not None:
+        ev = getattr(ctx, "cancel_event", None)
+        if isinstance(ev, threading.Event):
+            ev.clear()
+        result = kernel.run(text, session_id="clap")
+    else:
+        result = run_agent(ctx, text)
     if result and result.output:
         print(f"  BEE> {result.output}")
         if cfg.voice.speak:
