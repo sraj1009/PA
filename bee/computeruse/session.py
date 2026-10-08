@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from .action import ComputerAction, is_credential_target
 from .privacy import ScreenshotStore, redact_entry
 from .verify import snapshot, verify_action
+from .vision import make_vision
 
 log = logging.getLogger("bee.computeruse")
 
@@ -141,7 +142,8 @@ class ComputerUseSession:
                  stop_event: threading.Event | None = None,
                  cancel_event: threading.Event | None = None,
                  task_id: str = "", on_event=None,
-                 screenshots: ScreenshotStore | None = None):
+                 screenshots: ScreenshotStore | None = None,
+                 vision=None):
         self.desktop = desktop
         self.max_actions = max_actions
         self.task_id = task_id
@@ -153,6 +155,9 @@ class ComputerUseSession:
         self._last_rects: list[tuple] = []     # provenance from last observe
         self.log: list[dict] = []
         self.screenshots = screenshots or ScreenshotStore()
+        # Phase 10: pluggable vision backend (vendor-neutral). A failing
+        # backend degrades to structural — it never blocks the loop.
+        self.vision = vision if vision is not None else make_vision()
         with _REGISTRY_LOCK:
             _ACTIVE_SESSIONS[id(self)] = self
 
@@ -194,12 +199,29 @@ class ComputerUseSession:
         self.screenshots.push(frame)
         with self._lock:
             self._last_rects = [w.rect for w in wins]
-        return {
+        out = {
             "active": aw.public() if aw else None,
             "windows": [w.public() for w in wins],
             "n_windows": len(wins),
             "screen_hash": (self.screenshots.hashes() or [""])[-1],
         }
+        # vision layer (Phase 10): elements + description from the backend.
+        # Degrades silently — a broken vision model must not block control.
+        try:
+            els = self.vision.detect_elements(self.desktop, frame)
+            out["elements"] = [{"label": e.label, "rect": list(e.rect),
+                                "score": e.score, "kind": e.kind}
+                               for e in els[:24]]
+            out["vision"] = getattr(self.vision, "name", "?")
+            for e in els:                    # element rects join provenance
+                with self._lock:
+                    self._last_rects.append(e.rect)
+            desc = self.vision.describe(self.desktop, frame)
+            out["description"] = desc[:500]
+        except Exception as e:
+            out["vision"] = "unavailable"
+            out["vision_error"] = str(e)[:120]
+        return out
 
     # ------------------------------------------------------------- execute
     def execute(self, action: ComputerAction) -> dict:
@@ -224,6 +246,25 @@ class ComputerUseSession:
             return self._blocked(
                 action, "credential entry is not in the Phase 5 safe set — "
                         "never type passwords/PINs/tokens")
+
+        # Phase 10: semantic target -> coordinates via the vision backend,
+        # resolved against the FRESH UI snapshot (never stale model-side
+        # pixels). If the model gave no coordinates, this is the only way
+        # in; if it did, they are still provenance-checked below.
+        if action.action in ("click", "double_click") \
+                and (action.x is None or action.y is None):
+            resolved = None
+            try:
+                resolved = self.vision.locate(self.desktop, None, action.target)
+            except Exception:
+                resolved = None
+            if resolved is None:
+                return self._blocked(
+                    action, f"no coordinates and vision could not locate "
+                            f"{action.target!r} — call computer_observe, then "
+                            "click a rect from the snapshot")
+            action.x, action.y, _conf = resolved
+            action.coordinate_source = "element_rect"
 
         # coordinate provenance — NEVER trust coordinates blindly
         proven = None

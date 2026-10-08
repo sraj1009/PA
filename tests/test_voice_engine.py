@@ -26,7 +26,7 @@ from bee.voice.realtime import (
     FakeTTS, InvalidVoiceTransition, NullTransport, VoiceEngine,
     VoiceEngineCfg, VoiceState, voice_transition,
 )
-from bee.voice.realtime.stt_stream import SttTimeout
+from bee.voice.realtime.stt_stream import SttError, SttTimeout
 
 
 # ------------------------------------------------------------------ helpers
@@ -402,9 +402,11 @@ class ScriptedClient:
     def __init__(self, script: list):
         self.script = list(script)
         self.calls = 0
+        self.messages: list = []      # per-call message list (continuity tests)
 
     def chat(self, name, messages, tools=None, **kw):
         self.calls += 1
+        self.messages.append([dict(m) for m in messages])
         item = self.script.pop(0) if self.script else "Done."
         return {"content": item, "usage": {}}
 
@@ -457,4 +459,126 @@ def test_10_end_to_end_real_kernel(tmp_path):
     assert "Done. I opened the browser for you." in tts.sentences
     # genuine streaming: the first sentence was spoken before the task ended
     assert any(e["type"] == "state" and e["to"] == "SPEAKING" for e in ev)
+    eng.close()
+
+
+# -------------------------------------------- Phase 9 additions (2026-10-08)
+def test_11_stt_failure_routes_to_error_and_recovers():
+    """STT provider crash mid-utterance -> ERROR (fail closed, no crash loop)
+    -> back to LISTENING once healthy. Never raises into the frame loop."""
+    tts = FakeTTS()
+    eng, ev = make_engine(cfg_over=dict(always_on=True),
+                          stt=FakeSTT(finals=[SttError("whisper died")]),
+                          tts=tts)
+    eng.transport.connect()
+    for f in rep(SPEECH, 5) + rep(SILENCE, 8):
+        eng.step_frame(f)
+    assert [e for e in ev if e["type"] == "error"], "STT failure must be reported"
+    # the always-on engine auto-recovers on the NEXT frame once the transport
+    # is healthy (ERROR is transient, not a dead end) — and it never raised
+    # into the frame loop
+    assert eng.state == VoiceState.LISTENING
+    assert [e for e in ev if e["type"] == "recovered"]
+    assert eng.recover() is True     # idempotent once healthy
+
+
+def test_12_tts_failure_keeps_engine_alive():
+    """TTS synthesis failure: the engine fails closed (ERROR) or completes
+    silently — never crashes — and recovers to LISTENING."""
+    kernel = FakeKernel(reply="One. Two. Three.", tokens=True)
+    eng, ev = make_engine(cfg_over=dict(always_on=True),
+                          stt=FakeSTT(finals=["say hello"]),
+                          kernel=kernel, tts=FakeTTS(fail=True))
+    eng.transport.connect()
+    for f in rep(SPEECH, 5) + rep(SILENCE, 8):
+        eng.step_frame(f)
+    assert wait_for(lambda: kernel.calls == ["say hello"])
+    ok = step_until(eng, lambda: eng.state in (VoiceState.ERROR, VoiceState.LISTENING),
+                    timeout=5.0)
+    assert ok, f"engine stuck in {eng.state} after TTS failure"
+    if eng.state == VoiceState.ERROR:
+        assert eng.recover()
+        assert eng.state == VoiceState.LISTENING
+
+
+def test_13_network_drop_mid_session_reconnects():
+    """The transport dies mid-session AFTER delivering audio: run() closes,
+    reconnects with capped backoff, and the engine returns to a listening
+    state — the conversation survives a network blip."""
+    from bee.voice.realtime.transport import TransportError
+
+    class DropTransport(NullTransport):
+        def __init__(self):
+            super().__init__(frames=rep(SILENCE, 6))
+            self._n = 0
+            self.dropped = False
+
+        def read_frame(self, timeout=0.2):
+            self._n += 1
+            if self._n > 20 and not self.dropped:
+                self.dropped = True
+                raise TransportError("network dropped")
+            return super().read_frame(timeout)
+
+    sleeps: list = []
+    tr = DropTransport()
+    eng, ev = make_engine(cfg_over=dict(always_on=True),
+                          transport=tr, sleep_fn=lambda s: sleeps.append(s))
+    th = threading.Thread(target=eng.run, daemon=True)
+    th.start()
+    assert wait_for(lambda: tr.connects >= 2, timeout=8.0), \
+        f"no reconnect: connects={tr.connects} state={eng.state}"
+    eng.stop()
+    th.join(timeout=5)
+    assert eng.reconnects >= 1
+    assert sleeps and max(sleeps) <= 30.0, "backoff must stay capped"
+    assert eng.state in (VoiceState.LISTENING, VoiceState.IDLE, VoiceState.ERROR)
+
+
+def test_14_voice_text_continuity_both_directions(tmp_path):
+    """Voice and text share ONE AgentSession ('voice'):
+      text -> voice:  a text task, then a VOICE follow-up resolves against it
+      voice -> text:  a voice task, then a TEXT follow-up resolves against it
+    This is the spec's 'voice-to-text continuity / task continuation'."""
+    from bee.agent.context import Context
+    from bee.config import load_config
+    from bee.kernel import AgentKernel
+
+    cfg = load_config()
+    cfg.cloud.enabled = False
+    cfg.workspace = tmp_path
+    client = ScriptedClient([
+        "Sure — the invoice is drafted.",     # 1: text task
+        "Noted — tomorrow it is.",            # 2: voice follow-up
+        "Updated — reminder set for 10 AM.",  # 3: text follow-up
+    ])
+    ctx = Context(cfg, workspace=tmp_path, client=client,
+                  guard_on=True, guard_mode="unattended",
+                  episodes_on=False, rag_on=False,
+                  cancel_event=threading.Event())
+    kernel = AgentKernel(ctx, sessions_dir=tmp_path / "sessions",
+                         receipts_path=tmp_path / "receipts.jsonl")
+    ctx.kernel = kernel
+
+    # 1) TEXT task on session 'voice'
+    kernel.run("Remind me to send the invoice.", session_id="voice")
+
+    # 2) VOICE follow-up 'tomorrow' on the SAME session
+    eng, ev = make_engine(cfg_over=dict(always_on=True),
+                          stt=FakeSTT(finals=["tomorrow"]),
+                          kernel=kernel, tts=FakeTTS())
+    eng.transport.connect()
+    for f in rep(SPEECH, 5) + rep(SILENCE, 8):
+        eng.step_frame(f)
+    assert step_until(eng, lambda: client.calls == 2, timeout=10.0)
+    user2 = client.messages[1][-1]["content"]
+    assert "invoice" in user2.lower(), "voice follow-up lost the text task context"
+    assert "tomorrow" in user2.lower()
+
+    # 3) TEXT follow-up on the voice-built session
+    r3 = kernel.run("Actually at 10 AM.", session_id="voice")
+    assert client.calls == 3
+    user3 = client.messages[2][-1]["content"]
+    assert "10 AM" in user3
+    assert "follow-up" in r3.task.text
     eng.close()

@@ -241,6 +241,10 @@ class FakeTTS:
         self._worker.start()
 
     def feed(self, sentence):
+        if self._fail:
+            # mirrors the real contract: the engine's tts.feed() can raise
+            # (synthesis backend blew up) -> the engine routes to ERROR
+            raise TtsError("fake TTS failure")
         s = (sentence or "").strip()
         if s and not self._stop.is_set() and self.busy.is_set():
             self._fed = True
@@ -282,8 +286,6 @@ class FakeTTS:
                     continue
                 if s is None or self._stop.is_set():
                     break
-                if self._fail:
-                    raise TtsError("fake TTS failure")
                 if self._delay:
                     time.sleep(self._delay)
                 if self._stop.is_set():

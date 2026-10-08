@@ -82,6 +82,9 @@ _INTEGRATION = [
     # Phase 8 (2026-10-08): conversation state, memory governance, typed
     # planner (scripted LLM, no model/network).
     "test_phase8_memory_planning",
+    # Phase 11 (2026-10-08): proactive event intelligence (default-deny
+    # policy, rate limits, quiet hours, external gating, sources).
+    "test_proactive",
 ]
 # Files that need OPTIONAL packages / a specific platform — the default CORE
 # suite must not fail because these are absent (Program Phase 7). Phase 7
@@ -122,6 +125,7 @@ MARKERS = {
     ],
     "scheduler": [
         "test_automation", "test_scheduling_unified", "test_pipeline",
+        "test_proactive",
     ],
     "e2e": [
         "test_kernel_integration", "test_engine_speed", "test_webauth",

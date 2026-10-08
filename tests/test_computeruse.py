@@ -50,6 +50,100 @@ def make_ctx(tmp_path=None, md: MockDesktop | None = None) -> SimpleNamespace:
                            computeruse_desktop=md or MockDesktop())
 
 
+# ------------------------------------------------------- Phase 10 (2026-10-08)
+def test_13_structural_vision_locates_semantic_target():
+    """The model names an element (no coordinates); the vision backend
+    resolves it against the FRESH UI snapshot; the click is proven."""
+    from bee.computeruse import StructuralVision
+    md = MockDesktop()
+    md.add_window("Notepad - todo.txt", "Notepad", (100, 100, 700, 500))
+    v = StructuralVision()
+    s = make_session(md, vision=v)
+    s.observe()
+    loc = v.locate(md, None, "Notepad")
+    assert loc is not None
+    x, y, conf = loc
+    assert 100 <= x <= 700 and 100 <= y <= 500
+    assert conf >= 0.8
+    # semantic click (no coords on the action) -> vision resolves -> executes
+    r = s.execute(ComputerAction(action="click", target="Notepad",
+                                 coordinate_source="element",
+                                 description="click the Notepad window"))
+    assert r.get("executed") is True, r
+    assert r.get("blocked") is not True
+
+
+def test_14_semantic_target_unlocatable_is_blocked():
+    """No coords AND vision cannot find the target -> blocked with a clear
+    instruction (never a blind click)."""
+    md = MockDesktop()
+    md.add_window("Program Manager", "Progman", (0, 0, 1920, 1080))
+    s = make_session(md)
+    s.observe()
+    r = s.execute(ComputerAction(action="click", target="NoSuchButton",
+                                 coordinate_source="element"))
+    assert r.get("blocked") is True
+    assert "vision could not locate" in r["error"]
+
+
+def test_15_vision_backend_is_swappable_and_degrades():
+    """Vendor-neutrality: any object with the protocol plugs in; a BROKEN
+    backend degrades the observe() (never crashes the session)."""
+    from bee.computeruse import VisionBackend
+
+    class CustomVision:
+        name = "custom-test"
+
+        def describe(self, desktop, frame):
+            return "custom description"
+
+        def detect_elements(self, desktop, frame):
+            from bee.computeruse import Element
+            return [Element(label="FakeButton", rect=(10, 10, 50, 50),
+                            score=0.9, kind="button")]
+
+        def locate(self, desktop, frame, target):
+            return (30, 30, 0.9) if "Fake" in target else None
+
+        def verify(self, desktop, frame, expected):
+            return (None, "custom")
+
+    assert isinstance(CustomVision(), VisionBackend)   # protocol-checkable
+    md = MockDesktop()
+    md.add_window("Program Manager", "Progman", (0, 0, 1920, 1080))
+    s = make_session(md, vision=CustomVision())
+    obs = s.observe()
+    assert obs["vision"] == "custom-test"
+    assert obs["elements"][0]["label"] == "FakeButton"
+    assert obs["description"] == "custom description"
+
+    class BrokenVision:
+        name = "broken"
+        def describe(self, *a): raise RuntimeError("model down")
+        def detect_elements(self, *a): raise RuntimeError("model down")
+        def locate(self, *a): raise RuntimeError("model down")
+        def verify(self, *a): raise RuntimeError("model down")
+
+    s2 = make_session(md, vision=BrokenVision())
+    obs2 = s2.observe()          # must degrade, not raise
+    assert obs2["vision"] == "unavailable"
+    assert obs2["n_windows"] == 1    # structural data still present
+
+
+def test_16_action_id_and_public_contract():
+    a = ComputerAction(action="screenshot")
+    assert a.action_id and a.action_id.startswith("cu_")
+    b = ComputerAction(action="screenshot")
+    assert a.action_id != b.action_id        # unique per action
+    pub = a.public()
+    assert pub["action_id"] == a.action_id
+    # type_text payload still never appears in the public view
+    t = ComputerAction(action="type_text", text="s3cret-value")
+    tp = t.public()
+    assert "s3cret-value" not in json.dumps(tp)
+    assert tp["text_len"] == len("s3cret-value")
+
+
 def make_session(md: MockDesktop | None = None, max_actions=10, **kw):
     return ComputerUseSession(md or MockDesktop(), max_actions=max_actions, **kw)
 

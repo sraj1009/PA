@@ -23,6 +23,7 @@ from .session import (ComputerUseSession, DEFAULT_MAX_ACTIONS, HotkeyStopper,
                       default_windows_key_state)
 from .tools import computeruse_tools
 from .verify import Verification, snapshot, verify_action
+from .vision import Element, StructuralVision, VisionBackend, make_vision
 
 __all__ = [
     "ComputerAction", "VERBS", "WINDOW_VERBS", "INPUT_VERBS", "OBSERVE_VERBS",
@@ -32,4 +33,5 @@ __all__ = [
     "DEFAULT_MAX_ACTIONS", "HotkeyStopper", "active_sessions",
     "computeruse_emergency_stop", "default_windows_key_state",
     "computeruse_tools", "Verification", "snapshot", "verify_action",
+    "Element", "StructuralVision", "VisionBackend", "make_vision",
 ]

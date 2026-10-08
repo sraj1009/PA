@@ -55,10 +55,16 @@ def is_credential_target(target: str, description: str) -> bool:
     return bool(CREDENTIAL_RE.search(f"{target or ''} {description or ''}"))
 
 
+def _new_action_id() -> str:
+    import uuid
+    return "cu_" + uuid.uuid4().hex[:12]
+
+
 @dataclass
 class ComputerAction:
     action: str                          # verb (VERBS key)
     target: str = ""                     # app/window/element name (semantic)
+    action_id: str = field(default_factory=_new_action_id)
     x: int | None = None
     y: int | None = None
     coordinate_source: str | None = None # "window_rect" | "element_rect" | "model_raw"
@@ -74,7 +80,11 @@ class ComputerAction:
             raise ValueError(f"unsupported computer-use action: {self.action!r} "
                              f"(safe set: {', '.join(sorted(VERBS))})")
         if self.action in ("click", "double_click") and (self.x is None or self.y is None):
-            raise ValueError(f"{self.action} requires coordinates (x, y)")
+            # coordinates are only OPTIONAL when the action asks the vision
+            # backend to resolve the semantic target ('element'); any other
+            # source must carry explicit, provable coordinates
+            if self.coordinate_source not in (None, "element", "semantic"):
+                raise ValueError(f"{self.action} requires coordinates (x, y)")
         if self.action == "type_text" and not self.text:
             raise ValueError("type_text requires text")
         if self.action == "key_press" and not self.keys:
@@ -107,6 +117,7 @@ class ComputerAction:
         clipboard contents, or pixel data (see privacy.py)."""
         d = {
             "action": self.action,
+            "action_id": self.action_id,
             "target": self.target,
             "description": self.description,
             "x": self.x, "y": self.y,

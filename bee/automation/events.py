@@ -85,6 +85,10 @@ class ProactiveRule:
     created_at: str = field(default_factory=lambda:
                             datetime.now().astimezone().isoformat(timespec="seconds"))
     created_by: str = "user"           # MUST be explicit user authorization
+    # Phase 11: EXTERNAL side effects (email/whatsapp/sms) additionally need
+    # explicit authorization — matching is not enough. The policy denies any
+    # external action on a rule that has not been authorized for it.
+    external_authorized: bool = False
 
     def matches(self, ev: BusEvent) -> bool:
         if ev.kind != self.kind:
@@ -98,7 +102,8 @@ class ProactiveRule:
         return {"id": self.id, "kind": self.kind, "match": self.match,
                 "action": self.action, "description": self.description,
                 "enabled": self.enabled, "max_per_hour": self.max_per_hour,
-                "created_at": self.created_at, "created_by": self.created_by}
+                "created_at": self.created_at, "created_by": self.created_by,
+                "external_authorized": self.external_authorized}
 
     @classmethod
     def from_dict(cls, d: dict) -> "ProactiveRule":
@@ -109,19 +114,42 @@ class ProactiveRule:
                    enabled=bool(d.get("enabled", True)),
                    max_per_hour=int(d.get("max_per_hour", 6)),
                    created_at=d.get("created_at", ""),
-                   created_by=d.get("created_by", "user"))
+                   created_by=d.get("created_by", "user"),
+                   external_authorized=bool(d.get("external_authorized", False)))
 
 
 class ProactivePolicy:
-    """Default-deny gate between the event bus and any action.
+    """Default-deny gate between the event bus and any action (Phase 11).
 
-    check(event) -> list of (rule, action) allowed to fire, honoring each
-    rule's rate limit. The EXECUTOR is the worker — the policy only decides
-    what is allowed, from explicitly user-authorized rules."""
+    check(event) -> list of (rule, action) allowed to fire. Denial paths,
+    all explicit and testable:
+      * no matching rule                        (no rule, no action — ever)
+      * rule disabled
+      * EXTERNAL action without explicit authorization
+        (email/whatsapp/sms/… need rule.external_authorized=True — the
+        user must have authorized that specific side effect)
+      * quiet hours: non-critical `notify` actions are suppressed
+        (critical notifications and agent_tasks still fire)
+      * per-rule rate limit  (max_per_hour)
+      * GLOBAL rate limit    (global_max_per_hour — anti-spam across rules)
 
-    def __init__(self, rules: list[ProactiveRule] | None = None):
+    The EXECUTOR is the worker — the policy only decides what is allowed,
+    from explicitly user-authorized rules."""
+
+    # action types that leave the machine (need explicit authorization)
+    EXTERNAL_TYPES = {"send_email", "email", "whatsapp", "sms", "message",
+                      "external"}
+
+    def __init__(self, rules: list[ProactiveRule] | None = None,
+                 quiet_hours: tuple[int, int] | None = None,
+                 global_max_per_hour: int = 24):
+        """quiet_hours=(start,end) local hours, wrap-aware ((22, 7) = 22:00
+        to 07:00). Default OFF — enable per deployment."""
         self.rules = list(rules or [])
         self._fired: dict[str, list[float]] = {}
+        self._global: list[float] = []
+        self.quiet_hours = tuple(quiet_hours) if quiet_hours else None
+        self.global_max_per_hour = int(global_max_per_hour)
 
     def add_rule(self, rule: ProactiveRule) -> None:
         self.rules.append(rule)
@@ -131,18 +159,40 @@ class ProactivePolicy:
         self.rules = [r for r in self.rules if r.id != rule_id]
         return len(self.rules) < before
 
+    def in_quiet_hours(self, now: float | None = None) -> bool:
+        if not self.quiet_hours:
+            return False
+        start, end = self.quiet_hours
+        if start == end:
+            return False
+        h = datetime.fromtimestamp(now if now is not None else time.time()).hour
+        return (start <= h < end) if start < end else (h >= start or h < end)
+
     def check(self, ev: BusEvent, now: float | None = None) -> list[tuple[ProactiveRule, dict]]:
         now = now if now is not None else time.time()
+        quiet = self.in_quiet_hours(now)
+        gf = [t for t in self._global if now - t < 3600]
         out: list[tuple[ProactiveRule, dict]] = []
         for r in self.rules:
             if not r.enabled or not r.action or not r.matches(ev):
                 continue
+            atype = str(r.action.get("type") or "")
+            is_external = (atype in self.EXTERNAL_TYPES
+                           or bool(r.action.get("channel")))
+            if is_external and not r.external_authorized:
+                continue      # never external without explicit authorization
+            if quiet and atype == "notify" and not r.action.get("critical"):
+                continue      # quiet hours suppress non-critical pings
             fired = [t for t in self._fired.get(r.id, []) if now - t < 3600]
             if len(fired) >= r.max_per_hour:
-                continue                       # rate-limited: deny this fire
+                continue      # per-rule rate limit
+            if len(gf) >= self.global_max_per_hour:
+                continue      # global anti-spam cap
             fired.append(now)
             self._fired[r.id] = fired
+            gf.append(now)
             out.append((r, r.action))
+        self._global = gf
         return out
 
 
