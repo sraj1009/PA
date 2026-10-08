@@ -261,3 +261,35 @@ MEDIUM 12+3 (8 closed/partial as above; **N5, N6, N7**) · LOW 5+3
 (**N8, N9**). **N1 is the blocking item for the program's Phase 2 security
 rule; N2/N3 together define the ToolBus migration scope; N4 defines the
 Phase 4 cancellation scope.**
+
+---
+
+## Coherence-pass closures (2026-10-08, post acceptance-audit)
+
+Evidence: `docs/JARVIS_ACCEPTANCE_AUDIT.md` + `tests/test_debt_fixes.py`
+(regressions pinned) + source at cited locations.
+
+| ID | Status | Closed by |
+|---|---|---|
+| N1 (CRITICAL) | **CLOSED** | F0: capability gate decoupled from `ctx.guard_on` (loop.py); regression `test_n1_capability_gate_runs_even_when_guard_off` |
+| N2 (HIGH) | **CLOSED** | F1+**F2**: the agent loop dispatches every tool through `ToolBus.call` (one execution path); sub-agents inherit the gate; regression `test_f2_loop_executes_tools_through_toolbus` |
+| N3 (HIGH) | **CLOSED** | `ToolBus.call` now enforces its per-tool timeout (worker thread + `ToolTimeoutError`); the agent can no longer be blocked indefinitely by one tool; regressions `test_n3_bus_timeout_enforced` / `test_n3_fast_call_unaffected_by_timeout_path` / `test_n3_handler_exception_still_maps` |
+| N4 (HIGH-latent) | **CLOSED** | The KERNEL owns task-scoped cancellation: `AgentKernel._run_impl` clears the cancel event at every new task start (kernel.py); a cancelled task can no longer poison the next, on any surface; regression `test_n4_stale_cancel_event_does_not_poison_new_task`. (Web/LiveKit still have no *cancel route* — a feature gap, not a leak path; the kernel clear makes a future route safe.) |
+| N5 (MEDIUM) | **CLOSED** | `.gitignore` covers `memory/receipts.jsonl`, `memory/sessions/`, `memory/store.json`, `memory/checkpoints/` (verified by `git ls-files`) |
+| N6 (MEDIUM) | **CLOSED — root-caused** | The `guard_blocked` eval anomaly was a REAL DEFECT: a guard-'ask' DENIED by the approver left the task in `WAITING_FOR_PERMISSION`; the later move to `VERIFYING` raised `InvalidTransitionError`. F5: `_approver` returns the task to `EXECUTING` on both outcomes; regression `test_f5_denied_guard_ask_does_not_strand_task`; `guard_blocked` re-run with the live model: **PASS (42.0s)**. The "denied automation.manage asks burned tool budget" observation was the same model retrying after a block — no approver-reuse bug found. |
+| N7 (LOW) | OPEN | Load-dependent flake in `tests/test_automation.py` (`wait_idle(10)`). Not reproduced in this session's runs (all green). Correct fix = deterministic worker shutdown (join with timeout + drain check) — deferred; must NOT be loosened. |
+| N8 (LOW) | **CLOSED** | `evals/results_summary.json` is no longer tracked (`git ls-files evals/` = verify_suite.py, tasks.yaml, bench_model.json, REPORT.md only) |
+| N9 (LOW) | **CLOSED** | `ToolBus.from_default` records the FULL capability list (`ToolDef.capabilities`); `capability` kept as primary for compatibility; regression `test_n9_bus_records_full_capability_list` |
+| H6 (HIGH, half) | **MITIGATED + documented (SDK constraint)** | `livekit.agents.cli.run_app(server)` has no argv parameter (verified against the installed SDK source: `_build_cli(server)()` reads `sys.argv`); the scoped save/swap/`finally`-restore in `livekit/agent.py:306-314` is the only mechanism. Residual: concurrent argparse use INSIDE the livekit worker process while the worker runs (latent, single-user worker process). Revisit if the SDK gains an argv parameter. |
+| H8 (HIGH) | **CLOSED** | `eval_safe` now bounds syntax (nodes 512 / depth 64 / literal 10k), the single-op explosion (`_guarded_pow` exponent cap 10⁴ on both `**` and built-in `pow` — `9**9**9**9` and `pow(2, 10**9)` rejected in ms), and expression-complexity computation (250k-step budget in `_ev` — defense-in-depth; a pathological BUILT-IN call such as `sum(range(10**18))` remains a single C loop the budget cannot interrupt — residual documented, bus timeout N3 unblocks the agent). Regressions `test_h8_*` (3) |
+| M6 (MEDIUM) | **CLOSED** | One root per concern, documented: `train/NOTE.md` (runtime data) + `training/NOTE.md` (code) |
+| M7 (MEDIUM) | **CLOSED** | `cfg.automation.default_timezone` is the source (scheduler.py:228/311 with safe default fallback); the `offline.py` Kolkata label is gone |
+| M11 (MEDIUM) | **CLOSED** | `num_ctx` is `cfg.ollama.num_ctx` (client.py:437-440, default 8192) — surfaced in config |
+| M15 (MEDIUM) | **PARTIAL** | Makefile `full` target added (→ `bee.cli full`). `bee.py` retained as a 11-line compat launcher (documented); `temp/` = git-ignored local runtime scratch, not part of the release tree (52 files at audit time; never committed) |
+| L2 (LOW) | **CLOSED** | No `WebSocket` import remains in `webapp.py` |
+
+**Remaining OPEN after this pass:** N7 (flake, deferred with a rule: fix the
+worker shutdown, never loosen the test), M8-dashboard live data (feature,
+not scheduled), M12 (import-cycle lint, cosmetic), and the §3-risky rows
+already closed above (R1/R2/R5/R8 closed in Phase 1; R3 web auth closed in
+Phase 1; R4 secrets closed in Phase 0; R7 closed via H8; R6 = H6 mitigated).

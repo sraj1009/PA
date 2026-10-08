@@ -1,5 +1,10 @@
 # BEE LLM Component — Design & Implementation
 
+> **Status (2026-10-08):** this is the PLAN for the optional `bee-8b` fine-tune
+> route (J3 model gate). The pipeline exists (`training/qlora/`), the nightly
+> quality gate exists (`bee/evals/gate.py`), and no fine-tuned model has been
+> promoted yet — the active local model is stock Ollama (`qwen3:8b`).
+
 The dedicated LLM for BEE: what it is, how it's trained on your data, what hardware it
 needs, how it's deployed, monitored, and kept safe — and how it plugs into the assistant.
 
@@ -21,7 +26,7 @@ This is the **local brain** of the hybrid architecture. It is *one* component am
 ```
 
 - **Why Qwen3-8B**: best tool-calling per GB on an 8 GB card, native function-calling
-  format that matches BEE's 22-tool schema, strong enough as an orchestrator. The
+  format that matches BEE's 30-tool schema, strong enough as an orchestrator. The
   loop's *text tool-call recovery parser* already rescues weaker 7–8B outputs (7/7 tests).
 - **Why QLoRA (not full FT) at this tier**: full-precision FT of 8B needs ~100 GB
   (weights+grads+Adam states). QLoRA trains ~200 M LoRA params (~0.2 GB) on a frozen

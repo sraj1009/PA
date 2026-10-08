@@ -228,13 +228,18 @@ def test_7_verification_failure_then_retry(tmp_path):
     assert kinds.count(AgentEventKind.VERIFICATION_COMPLETED) == 2
 
 
-def test_8_cancellation_pre_set(tmp_path):
-    k, client, ctx = make_kernel(tmp_path, ["never returned"])
-    ctx.cancel_event.set()  # user said Stop before/during the task
-    r = k.run("Do a long thing.", session_id="i8a")
-    assert r.cancelled is True and r.task.state == TaskState.CANCELLED
-    assert client.calls == [], "cancellation must prevent the LLM call"
-    assert AgentEventKind.TASK_CANCELLED in [e.kind for e in k.events.log]
+def test_8_cancellation_scoped_not_pre_set(tmp_path):
+    """N4 contract (supersedes the old pre-set test): a cancel event left
+    SET by a previously-cancelled task must NOT cancel the NEXT task — the
+    kernel clears it at task start. Cancellation is task-scoped and owned by
+    the kernel, not by whichever entry point happens to clear the event.
+    (Mid-run cancellation — the real cancel path — is test_8b.)"""
+    k, client, ctx = make_kernel(tmp_path, ["all good"])
+    ctx.cancel_event.set()   # stale cancel from an earlier task
+    r = k.run("Do a quick thing.", session_id="i8a")
+    assert r.cancelled is False, "stale cancel event must not poison the new task"
+    assert not ctx.cancel_event.is_set(), "kernel must clear the event at task start"
+    assert client.calls, "the new task must run normally"
 
 
 def test_8b_cancellation_mid_run(tmp_path):

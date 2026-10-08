@@ -1,7 +1,7 @@
 # BEE — a local-first personal assistant
 
 > **Status (verified 2026-10-08):** BEE is a well-tested single-user personal agent
-> for human-supervised deployment on this machine — 534/534 tests green, 71,914
+> for human-supervised deployment on this machine — 543/543 tests green, 71,914
 > deterministic checks passing, all major security invariants audit-verified.
 > It is **not** multi-user, **not** "production-ready" in the service sense, and its
 > hardware paths (real mic/display/LiveKit room) are test-verified only with mocks.
@@ -168,7 +168,7 @@ you> lock my pc                    # fast path — guard-checked, one confirmati
 you> what is a transformer         # fast path — Wikipedia REST summary, no LLM
 ```
 
-**Fast paths** (`bee/agent/fastpaths.py`) are a catalog of ~35 pure-Python handlers
+**Fast paths** (`bee/agent/fastpaths.py`) are a catalog of 39 pure-Python handlers
 for the things a PA is asked most: time/date/uptime, open `<app>` (chrome, notepad,
 excel, vscode, …), open `<workspace file>`, search/google `<q>`, weather, unit +
 temperature conversions, coin/dice/random/pick, note, todo, CPU/RAM/disk/battery stats,
@@ -505,8 +505,8 @@ The REPL, `/help`, and any new surface (web/voice) pick it up automatically.
 ## 11. Testing & verification
 
 ```powershell
-python -m pytest tests -q                 # full suite — 534 passed (2026-10-08)
-python -m pytest tests -q -m core         # portable core (unit+integration) — 463
+python -m pytest tests -q                 # full suite — 543 passed (2026-10-08)
+python -m pytest tests -q -m core         # portable core (unit+integration) — 474
 python evals/verify_suite.py              # 71,914 deterministic checks vs references
 python -m bee.cli eval                    # 21-task agent eval (measured, per run)
 python -m bee.evals.bench_model           # tok/s + latency benchmark
@@ -606,7 +606,7 @@ Cloud — see §6.5) · secrets env-only · external web content treated as untr
    episode data flywheel + QLoRA pipeline, monitoring, 71,914-check verification suite
    (5 suites with Wilson 95 % CI lower ≥ 99.9 %), **assistant command layer
    (`/plan /draft /summarize /code /think`), BEE persona, configurable TTS**,
-   **fast-path command catalog (~35 pure-Python handlers) + engine selection
+    **fast-path command catalog (39 pure-Python handlers) + engine selection
    (hybrid/local/ollama-cloud/api-cloud) + cloud teach-back**
 - [x] **Phase 4.5** — **Super JARVIS integration**: Welcome Home protocol,
    double-clap acoustic trigger, hands-free PC control (systemctl: stats/battery/
@@ -641,8 +641,19 @@ Cloud — see §6.5) · secrets env-only · external web content treated as untr
     (`jsonq` jq-lite / `count` / `find` / `zip` — 10 total). SFT pipeline: data-**quality
     scoring** + `--min-quality` filter + opt-in cloud-teacher **paraphrase augmentation**
     (`--paraphrase N`) to train more from the same verified examples.
- - [ ] **Phase 5** — first `bee-8b` fine-tune from verified episodes · GPU sandbox variant ·
-  unattended-automation hardening · more commands (`/inbox`, `/remind`) via the registry
+  - [ ] **Phase 5** — first `bee-8b` fine-tune from verified episodes (pipeline + J3
+    quality gate ready; no trained model promoted yet) · GPU sandbox variant ·
+   unattended-automation hardening · more commands (`/inbox`, `/remind`) via the registry
+- [x] **Phases 6–12 (JARVIS program, 2026-10-08)** — provider abstraction · unified
+   durable scheduler (JobWorker through the kernel) · ML-router reproducibility + CI ·
+   typed planner + persistent sessions + provenance memory · realtime voice engine
+   (barge-in, 6-state machine, LiveKit behind a transport) · safe computer use
+   (observe→act→verify loop, coordinate provenance, emergency stops, vision
+   abstraction) · proactive policy (default-deny, quiet hours, external
+   authorization) · final production hardening + **independent acceptance audit**
+   (`docs/JARVIS_ACCEPTANCE_AUDIT.md`, 535/535 tests, P0/P1 fixes F0–F5).
+   Authoritative feature status: `docs/STATUS.md` · full phase history:
+   `docs/JARVIS_ROADMAP.md`.
 
 ---
 

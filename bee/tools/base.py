@@ -82,12 +82,20 @@ def run_subprocess(cmd, workspace: Path, timeout: int = 120) -> dict:
 _ALLOWED_FUNCS = {
     "abs": abs, "round": round, "min": min, "max": max, "sum": sum, "len": len,
     "int": int, "float": float, "str": str, "list": list, "dict": dict, "set": set,
-    "tuple": tuple, "pow": pow, "divmod": divmod, "sorted": sorted, "enumerate": enumerate,
+    "tuple": tuple, "divmod": divmod, "sorted": sorted, "enumerate": enumerate,
     "range": range, "zip": zip, "map": map, "filter": filter, "any": any, "all": all,
     "isinstance": isinstance, "type": type, "repr": repr, "bin": bin, "hex": hex,
     "oct": oct, "chr": chr, "ord": ord, "reversed": reversed, "frozenset": frozenset,
     "bool": bool, "bytes": bytes, "complex": complex,
 }
+def _pow_func(base, exp, mod=None):
+    """H8: guarded built-in pow() — same exponent bound as the ** operator."""
+    if isinstance(exp, (int, float)) and abs(exp) > 10_000:
+        raise ValueError(f"exponent too large for eval_safe: {exp}")
+    return pow(base, exp) if mod is None else pow(base, exp, mod)
+
+
+_ALLOWED_FUNCS["pow"] = _pow_func   # guarded (H8), replaces the raw builtin
 import math
 import random
 _ALLOWED_FUNCS.update({k: getattr(math, k) for k in (
@@ -95,10 +103,19 @@ _ALLOWED_FUNCS.update({k: getattr(math, k) for k in (
     "exp", "floor", "ceil", "pi", "e", "factorial", "gcd", "lcm", "hypot", "degrees", "radians")
     if not isinstance(getattr(math, k, None), type)})
 
+def _guarded_pow(base, exp):
+    """H8: the step budget counts _ev calls, not work INSIDE one C call —
+    a single 9**9**9**9 would otherwise allocate an astronomically-big int.
+    Bound the exponent; the value can still be large but stays computable."""
+    if isinstance(exp, (int, float)) and abs(exp) > 10_000:
+        raise ValueError(f"exponent too large for eval_safe: {exp}")
+    return pow(base, exp)
+
+
 _BIN_OPS = {
     ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
     ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
-    ast.Pow: pow,
+    ast.Pow: _guarded_pow,
 }
 _UNARY = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 _CMPS = {
@@ -107,7 +124,17 @@ _CMPS = {
 }
 
 
+# H8/R7: bounds the COMPUTATION, not just the syntax. A 4-node expression
+# like 9**9**9**9 is tiny in the AST but uncomputable in any time budget;
+# every _ev step is counted and the evaluation is aborted past the limit.
+_MAX_STEPS = 250_000
+_step_budget = [250_000]
+
+
 def _ev(node, env):
+    _step_budget[0] -= 1
+    if _step_budget[0] < 0:
+        raise ValueError(f"computation budget exceeded (>{_MAX_STEPS} steps)")
     if isinstance(node, ast.Expression):
         return _ev(node.body, env)
     if isinstance(node, ast.Constant):
@@ -195,9 +222,11 @@ def _check_bounds(tree: ast.AST) -> None:
 
 
 def eval_safe(expression: str) -> str:
-    """Evaluate a math/data expression safely (no imports, no statements)."""
+    """Evaluate a math/data expression safely (no imports, no statements,
+    bounded size/depth/literal/computation — debt H8/R7)."""
     tree = ast.parse(expression, mode="eval")
     _check_bounds(tree)
+    _step_budget[0] = _MAX_STEPS
     val = _ev(tree, {})
     s = str(val)
     return truncate(s, 4000)

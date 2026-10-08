@@ -11,6 +11,8 @@ security risk layer — nothing is duplicated.
 """
 from __future__ import annotations
 
+import queue
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -52,7 +54,8 @@ class ToolDef:
     schema: dict
     handler: object                      # bound from a registered builder ONLY
     risk: str = "low"                     # low | medium | high | critical
-    capability: str = ""
+    capability: str = ""                  # primary (first) capability — legacy field
+    capabilities: tuple = ()              # N9: the FULL list (gate uses the full set)
     timeout: float = DEFAULT_TIMEOUT
     cancellation: str = "between_steps"
     verify: str | None = None             # deterministic postcondition name
@@ -83,6 +86,7 @@ class ToolBus:
                 handler=t.handler,
                 risk=getattr(t, "risk", "low") or "low",
                 capability=caps[0] if caps else "",
+                capabilities=tuple(caps),   # N9: full list, not just the first
                 timeout=_TIMEOUTS.get(t.name, DEFAULT_TIMEOUT),
                 cancellation=_CANCELLATION.get(t.name, "between_steps"),
                 verify=None,
@@ -122,15 +126,56 @@ class ToolBus:
             raise MalformedArgsError(f"arguments for {name} must be an object, got {type(args).__name__}")
         if stop_check is not None and stop_check():
             raise PermissionError("cancelled before execution")
+        # N3 (debt): a per-tool timeout must actually bound the call. The
+        # handler runs in a worker thread; if it outlives the budget the
+        # agent is NOT blocked forever — ToolTimeoutError is raised so the
+        # loop records a failed observation and moves on. (Python cannot kill
+        # a thread; the tool's own subprocess/timeout limits still bound the
+        # underlying work, and cancelable tools die via ctx.cancel_event.)
+        eff_timeout = timeout if timeout is not None else d.timeout
         t0 = time.time()
-        try:
-            res = d.handler(ctx, **args)
-        except TypeError as e:
-            raise MalformedArgsError(f"bad arguments for {name}: {e}") from e
-        except PermissionError:
-            raise
-        except Exception as e:
-            res = {"error": f"{name} raised {type(e).__name__}: {e}"}
+        if eff_timeout and eff_timeout > 0:
+            q: "queue.Queue" = queue.Queue(maxsize=1)
+
+            def _runner() -> None:
+                try:
+                    res = d.handler(ctx, **args)
+                except TypeError as e:
+                    q.put(("badargs", f"bad arguments for {name}: {e}"))
+                except PermissionError as e:
+                    q.put(("perm", e))
+                except Exception as e:
+                    q.put(("error", f"{name} raised {type(e).__name__}: {e}"))
+                else:
+                    q.put(("ok", res))
+
+            threading.Thread(target=_runner, daemon=True,
+                             name=f"toolbus-{name}").start()
+            try:
+                tag, payload = q.get(timeout=eff_timeout)
+            except queue.Empty:
+                raise ToolTimeoutError(
+                    f"{name} timed out after {eff_timeout:.0f}s "
+                    f"(the agent is unblocked; the tool keeps to its own limits)")
+        else:
+            # timeout<=0 / None => unbounded (legacy behavior for opt-out tools)
+            try:
+                res = d.handler(ctx, **args)
+            except TypeError as e:
+                raise MalformedArgsError(f"bad arguments for {name}: {e}") from e
+            except PermissionError:
+                raise
+            except Exception as e:
+                res = {"error": f"{name} raised {type(e).__name__}: {e}"}
+        if eff_timeout and eff_timeout > 0:
+            if tag == "badargs":
+                raise MalformedArgsError(payload)
+            if tag == "perm":
+                raise payload
+            if tag == "error":
+                res = {"error": payload}
+            else:
+                res = payload
         dt = round(time.time() - t0, 3)
         ok = not (isinstance(res, dict) and (res.get("error") or res.get("blocked")))
         return res, dt, ok, {"timed_out": False, "cancelled": False,

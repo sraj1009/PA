@@ -9,20 +9,22 @@ Legend:
 - **YELLOW** — implemented with known, documented limitations
 - **RED** — incomplete / unverified / unsafe
 
-Test basis: `pytest tests -q` = **534 passed, 0 failed** (core 463 ·
-security 93 · windows 73 · ml 39 · voice/livekit 32 — suites overlap by
-marker); `evals/verify_suite.py` = **71,914 checks, ALL PASS**.
+Test basis (final, post-coherence-pass): `pytest tests -q` = **543 passed,
+0 failed** (core 474 · security 95 · integration 277 · windows 73 · ml 39 ·
+voice/livekit 32 — suites overlap by marker); `evals/verify_suite.py` =
+**71,914 checks, ALL PASS**; 21-task eval = **12/21** (9 = local-3B
+answer-quality ceiling).
 
 ## Agent core
 
 | Feature | Status | Note / limitation |
 |---|---|---|
 | Single Agent Kernel (state machine, receipts, telemetry) | GREEN | all surfaces (REPL/web/livekit/voice/jobs/proactive) run through it |
-| ToolBus as execution dispatcher | GREEN (this audit, fix F2) | loop now dispatches via `bus.call`; planner validates against the same bus |
+| ToolBus as execution dispatcher | GREEN (fixes F2 + N3 + N9) | loop dispatches via `bus.call`; **per-tool timeouts now enforced** (worker thread + `ToolTimeoutError`); full capability list per tool; planner validates against the same bus |
 | Capability gate (task-scoped grants, fail-closed unattended) | GREEN | post F0 (N1): `/guard off` no longer disables it; post F1: sub-agents + clap inherit it |
-| Fast-path catalog (~40 handlers) | YELLOW | deterministic + legacy-guard-checked, but **skips the capability gate by design** (user's own words, regex-fixed action set, pre-LLM). Accepted design; documented here. |
+| Fast-path catalog (39 handlers) | YELLOW | deterministic + legacy-guard-checked, but **skips the capability gate by design** (user's own words, regex-fixed action set, pre-LLM — not model-reachable). Accepted design; documented here. |
 | Verification-gated success (no false success) | GREEN | `verify_task` + per-tool effect checks; blind retry only on non-destructive steps |
-| Cancellation (REPL Ctrl-C / "stop" / voice / job timeout) | GREEN | task-scoped per entry point (REPL/voice clear per run; jobs swap a job-scoped event). Kernel itself does not own the clear — P2. Web & LiveKit have **no** mid-task cancel (fail-closed approver limits blast radius). |
+| Cancellation (REPL Ctrl-C / "stop" / voice / job timeout) | GREEN | **kernel-owned task scope** (N4): every new task starts with a clean cancel event at `kernel.run`; jobs additionally swap a job-scoped event. Web & LiveKit have **no** mid-task cancel *route* (feature gap, not a leak — fail-closed approver limits blast radius). |
 | Crash recovery (J1 checkpoints + `/resume`) | GREEN | task-level resume with "do not redo executed steps" note |
 | Provider abstraction (local Ollama + cloud kinds) | GREEN | one registry, one execution path; keys env-only, matched per provider |
 | Cloud-unavailable operation | GREEN (tested) / YELLOW (live) | fallback + deterministic floor verified with fake clients; live offline drill not performed in this audit |
@@ -106,11 +108,14 @@ matrix). Real-network/real-hardware versions: not exercised.
 
 Fastpath gate-skip (design) · event sources schema-only (email/app/battery/
 network/device) · learned vision not implemented (structural only) ·
-wall-clock scheduler not CI-exercised · web/livekit no mid-task cancel ·
-kernel not owner of cancel-event clearing (4 entry points do it) · LiveKit
-room + real mic/display unverified in field · prompt-injection corpus absent ·
+wall-clock scheduler not CI-exercised · web/livekit no mid-task cancel *route*
+(kernel-owned clearing makes a future route safe) · LiveKit room + real
+mic/display unverified in field · prompt-injection corpus absent ·
+`sys.argv` swap in the LiveKit worker (SDK constraint — `run_app` has no argv
+parameter; scoped + `finally`-restored) · `tests/test_automation.py`
+load-dependent flake (N7, deferred: fix worker shutdown, never loosen) ·
 behavioral eval capped by the local model (J3 model-gate is the closure path).
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 534-test suite. Nothing here is marketing.*
+or to a green test in the 543-test suite. Nothing here is marketing.*

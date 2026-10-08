@@ -140,6 +140,16 @@ class AgentKernel:
             return TaskResult(task=task, cancelled=True,
                               agent_result=_agent_stub("(stopped: cancelled by user)", ok=False))
 
+        # N4 (debt): the KERNEL owns task-scoped cancellation. A cancel
+        # requested for task N applies to task N only — every NEW task starts
+        # with the cancel event cleared, so a cancelled/stopped task can never
+        # poison the next one, regardless of which surface (REPL/web/voice/
+        # job/proactive) invoked run(). Entry points that clear too (REPL,
+        # voice engine) remain harmless redundancies.
+        ev = self.ctx.cancel_event
+        if isinstance(ev, threading.Event):
+            ev.clear()
+
         task = Task(session_id=session_id, text=resolved[:2000])
         self._tasks[task.id] = task
         self.last_task = task

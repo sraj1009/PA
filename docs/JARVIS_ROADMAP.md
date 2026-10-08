@@ -7,7 +7,24 @@ No code was changed while producing this roadmap.
 
 ---
 
-## 0. Phase status (updated 2026-10-08, Phase 0 re-audit)
+## 0. Phase status (updated 2026-10-08, coherence pass — latest)
+
+**Row 11 — ACCEPTANCE AUDIT + COHERENCE PASS (2026-10-08): DONE.**
+Independent re-verification of 25 claims from source (`docs/JARVIS_ACCEPTANCE_AUDIT.md`);
+**543/543 tests** (final, after debt closures) + **71,914 verify checks ALL PASS** +
+**eval 12/21** (9 = local-3B answer-quality ceiling, 1 = kernel defect fixed). Fixed this pass: **F0** N1
+(`/guard off` no longer disables the capability gate), **F1** spawn_task sub-agents
+inherit the gate (model-controllable bypass closed), **F2** the agent loop now
+dispatches ALL tools through `ToolBus.call` (N2), **F3** clap voice runs through the
+kernel, **F4** docs de-marketed, **F5** denied-permission crash (N6, root-caused),
+**N3** ToolBus timeout enforcement, **N4** kernel-owned task-scoped cancellation,
+**N9** full capability lists, **H8** `eval_safe` computation budget, **M6/M7/M11/M15/L2**
+housekeeping. Debt closures with evidence: `docs/TECHNICAL_DEBT.md` §Coherence-pass.
+Authoritative feature state: `docs/STATUS.md`.
+
+(Previous header, retained for history:)
+
+## 0a-old. Phase status (2026-10-08, Phase 0 re-audit)
 
 **Row 10 — FINAL 10-ITEM HARDENING BATCH (2026-10-06/08): DONE (uncommitted at re-audit time).**
 Kernel routing for all surfaces (gate gap closed); M13 rotation/caps for all
@@ -74,22 +91,24 @@ Statuses below are re-verified against the 2026-10-08 tree.
 | ~~B1~~ | ~~User cron scheduling~~ | **CLOSED in Phase 6 (2026-10-06):** the no-op scheduler tool is superseded by `bee/automation/` — durable JobWorker executes jobs through the AgentKernel; execution row before start + cross-process claims prevent duplicates; nightly jobs are durable function jobs | `bee/automation/worker.py` (tools/scheduler_tool.py remains as a legacy read-only tool, superseded) |
 | ~~B2~~ | ~~Vector store rebuild~~ | **CLOSED (audit 2026-10-06):** clear-before-add rebuild + stable-row-count regression test | memory/search.py |
 | ~~B4~~ | ~~Web `/voice` contract~~ | **CLOSED (10-item batch):** docstring now matches JSON-only behavior; the endpoint itself is kernel-routed (gate gap closed) | webapp.py `/voice` |
-| B5 | 10/21 agent-eval tasks fail (was 11/21) | Local 3B "missing substring" quality ceiling (file/DSA/memory/plan tasks) — model quality, not loop bugs; the J3 gate is the mechanism for closing it once a candidate model exists | evals/tasks.yaml run 2026-10-08: **10/21** |
-| **N1** | **`/guard off` disables the capability gate** | **CRITICAL (re-audit 2026-10-08):** the gate check is conjoined with `ctx.guard_on`; disabling the legacy regex guard must never bypass capability authorization — the gate must be mandatory, kernel-owned, not chat-toggleable. Blocks program Phase 2 security rule | cli.py:434-437, loop.py:593 |
-| **N6** | `guard_blocked` eval regression candidate | Re-audit 2026-10-08: the task failed (`expect_guard=blocked but no guard block occurred`) while unrelated eval tasks burned their tool budget on denied `automation.manage` asks (repeated `[y/N]` stdin prompts) — suspected kernel/approver reuse in the `/eval` REPL path; guard classifier itself intact (4,204 checks ALL PASS). Not root-caused; must not be normalized | eval run log 2026-10-08 |
+| B5 | 9/21 agent-eval tasks fail (12/21 pass) | Local 3B "missing substring" quality ceiling (file/DSA/memory/plan tasks) — model quality, not loop bugs; the J3 gate is the mechanism for closing it once a candidate model exists | acceptance-audit eval run 2026-10-08: **12/21** (all 21 executed; the one non-quality failure — `guard_blocked` — was a kernel defect, fixed, now PASS) |
+| ~~N1~~ | ~~`/guard off` disables the capability gate~~ | **CLOSED (2026-10-08, F0):** gate decoupled from `ctx.guard_on`; regression test pins it | loop.py (audit P0-2) |
+| ~~N6~~ | ~~`guard_blocked` eval regression~~ | **CLOSED — root-caused (2026-10-08, F5):** denied guard-'ask' stranded the task in `WAITING_FOR_PERMISSION` → `InvalidTransitionError` at VERIFYING. `_approver` now returns the task to `EXECUTING` on both outcomes; live re-run PASS (42.0s) | kernel.py `_approver`; audit P0-3 |
 
 ## 3. Risky capabilities (work, but can harm user data/system)
 
-| # | Risk | Location |
-|---|---|---|
-| R1 | Consolidation deletes original diary files after summarizing (`f.unlink()`) — irreversible data loss | scheduler.py:56-60 |
-| R2 | `code_run` guard bypass: shell-style regexes over Python text; `shutil.rmtree`, `os.remove`, `Path.unlink`, truncating writes classify `allow` | guard.py:59-65 + tools/code.py |
-| R3 | Unauthenticated web endpoints drive the full agent (with shell tools), mint 2 h LiveKit JWTs, and mutate the global engine | webapp.py:68-96, 149-158, 190-210 |
-| R4 | `.env` (LiveKit keys) in a OneDrive-synced dir, not in `.gitignore`, no VCS → future `git init` would commit credentials; sandbox workspace mount exposes `.env` to the container | .gitignore (absent entry), sandbox/Dockerfile |
-| R5 | Episodes persist unredacted tool output → feeds SFT + cloud teach-back | loop.py:579-580 |
-| R6 | `sys.argv` mutation inside a running process (scheduler retrain job; livekit "start" hack) | scheduler.py:98-105, livekit/agent.py:298-306 |
-| R7 | `eval_safe` has no depth/size/time limits (DoS surface in calculator) | tools/base.py, tools/calculator.py:35 |
-| R8 | LiveKit state shared via temp-JSON file across processes (race/visibility) | livekit/state.py ↔ webapp.py:219-222 |
+Statuses re-verified 2026-10-08 (coherence pass):
+
+| # | Risk | Location | Status |
+|---|---|---|---|
+| R1 | Consolidation deletes original diary files after summarizing (`f.unlink()`) — irreversible data loss | scheduler.py:56-60 | **CLOSED** (archive-not-delete, Phase 1 / H3) |
+| R2 | `code_run` guard bypass: shell-style regexes over Python text; `shutil.rmtree`, `os.remove`, `Path.unlink`, truncating writes classify `allow` | guard.py:59-65 + tools/code.py | **CLOSED** (AST risk layer, Phase 1 / H1; 4,204-check suite) |
+| R3 | Unauthenticated web endpoints drive the full agent (with shell tools), mint 2 h LiveKit JWTs, and mutate the global engine | webapp.py:68-96, 149-158, 190-210 | **CLOSED** (bearer auth on all stateful endpoints, Phase 1 / C1) |
+| R4 | `.env` (LiveKit keys) in a OneDrive-synced dir, not in `.gitignore`, no VCS → future `git init` would commit credentials; sandbox workspace mount exposes `.env` to the container | .gitignore (absent entry), sandbox/Dockerfile | **CLOSED** (git + `.gitignore` + `.env.example` + secret scan, Phase 0 / C2; sandbox masks `.env`; OneDrive *history* rotation remains an operator action) |
+| R5 | Episodes persist unredacted tool output → feeds SFT + cloud teach-back | loop.py:579-580 | **CLOSED** (redaction at write, Phase 1 / H2) |
+| R6 | `sys.argv` mutation inside a running process (scheduler retrain job; livekit "start" hack) | scheduler.py:98-105, livekit/agent.py:298-306 | **HALF → MITIGATED**: scheduler fixed (explicit args); livekit swap retained — verified the installed SDK's `run_app` has no argv parameter (scoped swap + `finally` restore; see TECHNICAL_DEBT H6) |
+| R7 | `eval_safe` has no depth/size/time limits (DoS surface in calculator) | tools/base.py, tools/calculator.py:35 | **CLOSED** (nodes 512 / depth 64 / literal 10k + 250k-step computation budget, H8; `test_h8_*`) |
+| R8 | LiveKit state shared via temp-JSON file across processes (race/visibility) | livekit/state.py ↔ webapp.py:219-222 | **CLOSED** (bearer-auth HTTP push → in-memory state, 10-item #10 / H7) |
 
 ## 4. Missing capabilities (required for the target architecture)
 
@@ -164,9 +183,13 @@ Statuses below are re-verified against the 2026-10-08 tree.
 
 ### Per-phase test gates (hard rule)
 
-- `python -m pytest tests -q` — must end **202+ passed, 0 failed**
-- `python -m evals.verify_suite` — must end **ALL PASS** after any module it covers is touched
-- `/eval` (21 tasks) — run at each phase boundary; regressions are blocking, quality-ceiling fails are tracked, not blocking
+- `python -m pytest tests -q` — must end **543+ passed, 0 failed** (suite grew 202→543
+  across Phases 2–12; the number is a FLOOR, not a target)
+- `python evals/verify_suite.py` — must end **ALL PASS** (71,914 checks) after any
+  module it covers is touched
+- 21-task eval (`python eval_batch.py <ids>` or `/eval`) — run at each phase boundary;
+  regressions are blocking, quality-ceiling fails are tracked, not blocking
+  (2026-10-08 run: 12/21; 9 fails = local-3B answer-quality ceiling)
 
 ## 6. Future Jarvis milestones (post-migration)
 
@@ -179,13 +202,17 @@ Statuses below are re-verified against the 2026-10-08 tree.
 
 ## 7. Explicit non-claims
 
-- The system is **not** production-ready: 8-13/21 end-to-end eval tasks fail
-  (model quality ceiling, not loop bugs — structural tasks stable across
-  runs; Phase 6 run 2026-10-06: 9/21), the LiveKit worker and the `/eval`
-  runner still call `run_agent` directly instead of the kernel — and
-  therefore **do not pass through the Phase 3 capability gate**
-  (kernel-only by construction; `ctx.capability_gate` is None there).
-  (User scheduling B1/M8 is no longer a no-op — closed in Phase 6.)
+- The system is **not** production-ready (single-user, human-supervised,
+  hardware paths unverified — see `docs/STATUS.md` RED/YELLOW). End-to-end
+  eval: **12/21** (2026-10-08 acceptance-audit run); the 9 remaining fails
+  are the local-3B model's answer-quality ceiling, not loop bugs (structural
+  tasks stable across runs).
+- ~~The LiveKit worker and the `/eval` runner call `run_agent` directly and
+  bypass the capability gate.~~ **STALE — fixed:** both now route through the
+  AgentKernel (eval runner `kernel.run`; LiveKit brain `kernel.run`; clap
+  voice `kernel.run` via F3; spawn_task sub-agents inherit the gate via F1).
+  Every agent surface passes the Phase-3 capability gate. (User scheduling
+  B1/M8 closed in Phase 6.)
 - The capability gate is a policy layer OVER the guard; it maps tools to
   capabilities by name + argument heuristics, which a creative command
   phrasing can under-map (e.g. an aliased delete). The guard/AST layers and

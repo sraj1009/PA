@@ -1,6 +1,6 @@
 PY ?= python
 
-.PHONY: install voice sandbox bee voice-mode web test bench eval plan setup secretscan
+.PHONY: install voice sandbox bee voice-mode web full test bench eval plan setup secretscan
 
 install:            ## core python deps
 	$(PY) -m pip install -r requirements.txt
@@ -19,6 +19,9 @@ voice-mode:         ## start voice command mode
 
 web:                ## start web UI
 	$(PY) -m bee.cli web
+
+full:               ## full stack: web + livekit workers + browser + REPL (debt M15)
+	$(PY) -m bee.cli full
 
 test:               ## DSA correctness tests
 	$(PY) -m pytest tests/ -q

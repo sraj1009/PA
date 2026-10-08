@@ -14,6 +14,16 @@ changes made by the Phase-12 pass *during* this audit session:
 `tests/test_capabilities.py` (new N1 regression test), `tests/conftest.py`
 (marker). All were included in the test runs below.
 
+**Coherence pass (after this audit, same session):** commits `8c1873f`
+(audit + F0–F5) plus the debt closures F6-onwards — N3 (ToolBus timeout
+enforcement), N4 (kernel-owned task-scoped cancellation), N9 (full
+capability lists), H8 (eval_safe exponent guard + step budget), M6/M7/M11/
+M15/L2 housekeeping — with `tests/test_debt_fixes.py` (8 regressions) and
+one contract update (`test_8_cancellation_scoped_not_pre_set`, which
+supersedes the old pre-set semantics N4 intentionally replaced). Docs:
+`TECHNICAL_DEBT.md` §Coherence-pass closures, `JARVIS_ROADMAP.md` §0 row 11,
+`STATUS.md`, `README.md`, `llm-component.md`, train/training root notes.
+
 ---
 
 ## 1. Exact test results (this session, this machine: Windows 10, Python 3.11)
@@ -26,7 +36,7 @@ changes made by the Phase-12 pass *during* this audit session:
 | 4 | `python -m pytest tests -q -m windows` | **73 passed**, 11.5s (mocked UI, real Windows) |
 | 5 | `python -m pytest tests -q -m ml` | **39 passed**, 14.1s |
 | 6 | `python -m pytest tests -q -m "voice or livekit"` | **32 passed**, 20.7s (synthetic audio; livekit SDK present) |
-| 7 | `python -m pytest tests -q` (full suite) | **532 passed, 0 failed, 0 skipped**, 54.1s — then, after fixes F1/F2/F5 landed with their regression tests: **535 passed, 0 failed**, 69.3s (final) |
+| 7 | `python -m pytest tests -q` (full suite) | **532 passed, 0 failed, 0 skipped**, 54.1s → **535** after F1/F2/F5 → **543 passed, 0 failed, 54.5s (FINAL, after the coherence-pass debt fixes + 8 regressions)** |
 | 8 | `python evals/verify_suite.py` | **ALL PASS** — math 10,000 / dsa 38,456 / pii 13,200 / guard 4,204 / router 6,000 / rag 54 = 71,914 checks, every accuracy 100%, CI95 lower ≥ 99.9% (rag 93.4%, small-n) |
 | 9 | `python -m compileall -q bee tests evals` | rc=0 |
 | 10 | full `pkgutil` import walk of `bee.*` (livekit module excluded) | 0 import failures |
@@ -88,14 +98,15 @@ Statuses: VERIFIED · PARTIALLY VERIFIED · DOCUMENTED ONLY · BROKEN · UNSAFE 
 | P1-2 | Clap-mode voice (`bee.cli clap`) runs `run_agent` with a kernel-less ctx → gate-less, interactive-guard-only | **F3 — done**: clap ctx gets the same kernel wiring as the REPL (gate + receipts + verification); `_voice_once` runs through `kernel.run` per utterance |
 | P1-3 | Documentation overstates readiness & surface (Q25 list a–i) | **F4 — done**: README (title, 200→535, 22→30 tools, 14→47 suites, audio claim, verify command, safety invariants), JARVIS_ARCHITECTURE stale rows + notice, PRODUCTION_READINESS superseded-pointer, new `docs/STATUS.md` (GREEN/YELLOW/RED) |
 
-### P2 (documented, not fixed in this pass)
-- Kernel does not own `cancel_event.clear()` — 4 entry points each clear (Q4); a 5th could regress. Move clearing into `AgentKernel.run`.
-- Webapp & LiveKit have no mid-task cancellation endpoint (fail-closed approver limits the blast radius).
-- `tools_bus.py:30` `_CANCELLATION` metadata is stale for shell/code_run (they ARE cancelable in-call).
-- Fastpaths skip the capability gate by design (user-triggered, regex-fixed actions, legacy-guard checked) — keep, document in STATUS.md.
-- `web_fetch` has no mid-stream cancel (timeouts bound it).
+### P2 (coherence pass 2026-10-08 — resolutions)
+- ~~Kernel does not own `cancel_event.clear()`~~ — **RESOLVED (N4)**: `AgentKernel.run` clears at every new task start; regression `test_n4_*`.
+- Webapp & LiveKit have no mid-task cancellation **route** — feature gap, remains documented (kernel-owned clearing makes a future route safe; fail-closed approver limits blast radius).
+- ~~`tools_bus.py:30` `_CANCELLATION` metadata stale~~ — **RESOLVED** (F2 pass): shell/code_run marked `between_steps` with the in-call kill documented.
+- Fastpaths skip the capability gate by design (user-triggered, regex-fixed actions, legacy-guard checked, **pre-LLM / not model-reachable**) — kept, documented in STATUS.md.
+- `web_fetch` has no mid-stream cancel — bounded by netguard timeouts + the N3 bus timeout; remains documented.
+- **NEW this pass (N3)**: `ToolBus.call` now enforces its per-tool timeout (worker thread + `ToolTimeoutError`) — the bus is no longer metadata-only; regressions `test_n3_*`.
 - Real-hardware paths unverified: real mic/speaker, LiveKit room, real display (all mocked/synthetic in CI); Linux CI not run here.
-- Behavioral eval ceiling: local 3B model caps task success (band 8–13/21 historically; this run: see §7). This is a model-quality limit, not a loop bug — the J3 model-gate is the mechanism to close it.
+- Behavioral eval ceiling: 12/21 this run (9 = local-3B answer-quality, 1 = the F5 defect, fixed). Model-quality limit, not a loop bug — the J3 model-gate is the mechanism to close it.
 
 ---
 
@@ -163,7 +174,8 @@ J3 model gate + a stronger local model (or cloud-routed evals).
 ## 8. Final recommendation
 **Do NOT call this system production-ready.** It is a coherent, well-tested,
 single-user personal agent at a strong "personal deployment" level: the full
-suite is green (**535/535** final), 71,914 deterministic checks pass, and the
+suite is green (**543/543** final after the coherence pass), 71,914
+deterministic checks pass, and the
 major security invariants (SSRF incl. redirects, untrusted-content
 escalation, corrupt-store resilience, restart recovery, task-scoped grants)
 are verified in source and tests.
@@ -186,3 +198,46 @@ in field."**
 
 *Nothing in this document is claimed that was not run or read in this
 session.*
+
+---
+
+## 9. Coherence pass — closing validation (2026-10-08)
+
+After the fixes above, every actionable debt item was closed (see
+`TECHNICAL_DEBT.md` §Coherence-pass closures) and the full matrix re-run:
+
+| Suite | Result |
+|---|---|
+| `pytest tests -q -m core` | **474 passed**, 51.3s |
+| `pytest tests -q -m security` | **95 passed**, 17.3s |
+| `pytest tests -q -m "integration and not livekit"` | **277 passed**, 28.9s |
+| `pytest tests -q -m windows` | **73 passed**, 15.2s |
+| `pytest tests -q -m ml` | **39 passed**, 16.3s |
+| `pytest tests -q -m "voice or livekit"` | **32 passed**, 23.1s |
+| `pytest tests -q` (full) | **543 passed, 0 failed, 0 skipped**, 54.5s |
+| `python evals/verify_suite.py` | **ALL PASS** (71,914 checks) |
+| `python -m compileall -q bee tests evals` | rc=0 (earlier this session) |
+
+**Remaining risks / limitations / blocked items (final register):**
+- **N7 (LOW, open):** `tests/test_automation.py` load-dependent flake
+  (`wait_idle(10)`); not reproduced in any run this session. Fix =
+  deterministic worker shutdown — deferred deliberately (never loosen).
+- **Hardware/field-unverified (ENVIRONMENT-DEPENDENT):** real mic/speaker,
+  LiveKit room, real display, Linux CI. All mocked/synthetic-verified.
+- **LiveKit `sys.argv` swap (H6):** SDK constraint (`run_app` has no argv
+  parameter — verified in installed SDK source); scoped swap + `finally`
+  restore; residual = concurrent argparse inside the worker process.
+- **`eval_safe` residual:** pathological built-in calls (e.g.
+  `sum(range(10**18))`) are single C loops the step budget cannot
+  interrupt; agent unblocks via the N3 bus timeout; documented.
+- **Dashboard live data (M8)** and **import-cycle lint (M12):** open,
+  unscheduled, cosmetic/feature.
+- **Behavioral eval ceiling:** 12/21 with the stock local 3B model — the
+  J3 model gate + a stronger model is the closure path (tracked, not
+  blocking: every failure is answer-quality, no loop defect).
+- **`bee.py` root launcher:** retained 11-line compat stub (documented,
+  not removed — user entry point).
+
+**Recommendation (unchanged in substance, strengthened in evidence):**
+verified for single-user, human-supervised personal deployment on this
+machine — not production-ready, not multi-user, hardware paths unverified.

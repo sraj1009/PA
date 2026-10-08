@@ -88,6 +88,9 @@ _INTEGRATION = [
     # Phase 12 (2026-10-08): corrupted-memory / corrupt-persistence-file
     # reliability (degrade, never crash; salvage good rows).
     "test_phase12_reliability",
+    # Coherence pass (2026-10-08): debt-fix regressions (N3 bus timeout,
+    # N4 kernel-owned cancel scope, N9 full caps, H8 eval_safe budget).
+    "test_debt_fixes",
 ]
 # Files that need OPTIONAL packages / a specific platform — the default CORE
 # suite must not fail because these are absent (Program Phase 7). Phase 7
