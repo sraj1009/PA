@@ -272,11 +272,21 @@ class CapabilityGate:
     def check(self, tool: str, args: dict, task_id: str = "",
                confirmer=None, untrusted_context: bool = False) -> GateDecision:
         conf = confirmer if confirmer is not None else self.confirmer
+        # The human approving a CAPABILITY has to see the call it authorizes, not
+        # just the capability name — the kernel hands the approver `args={}`
+        # because a capability spans several tools. So the pending call is
+        # summarized here and carried in the reason every approver receives.
+        preview = ""
+        try:
+            from ..guard import preview_call
+            preview = preview_call(tool, args)
+        except Exception:
+            preview = ""
         confirmed = False
         policies: set[str] = set()
         worst_id, worst_risk = "", -1
         for cap in self.required_for(tool, args):
-            d = self._check_one(cap, task_id, conf, untrusted_context)
+            d = self._check_one(cap, task_id, conf, untrusted_context, preview)
             if not d.allowed:
                 return d
             policies.add(d.policy)
@@ -295,9 +305,12 @@ class CapabilityGate:
                             confirmed=confirmed)
 
     def _check_one(self, cap: Capability, task_id: str, confirmer,
-                   untrusted_context: bool = False) -> GateDecision:
+                   untrusted_context: bool = False,
+                   preview: str = "") -> GateDecision:
         entry = self.store.entry(cap.id)
         policy = entry.policy
+        # what this capability would actually do, carried into every ask
+        pend = f" — pending: {preview}" if preview else ""
         if policy == DENY:
             return GateDecision(False, cap.id, f"capability policy is DENY ({cap.description})", policy)
         if policy == ALLOW:
@@ -312,18 +325,19 @@ class CapabilityGate:
             if need_confirm or injected:
                 reason = (f"{cap.name}: {cap.description}"
                           + (" [escalated: proposed right after untrusted external content]"
-                             if injected else " [always-confirm]"))
+                             if injected else " [always-confirm]") + pend)
                 return self._ask(cap, task_id, confirmer, reason)
             return GateDecision(True, cap.id, "allowed", policy, confirmed=False)
         if policy == TASK:
             if self.store.granted_in_task(task_id, cap.id):
                 return GateDecision(True, cap.id, "granted for this task", policy)
             return self._ask(cap, task_id, confirmer,
-                             f"{cap.name}: {cap.description} [task-scoped: allowed only while this task is active]")
+                             f"{cap.name}: {cap.description} [task-scoped: allowed only while this task is active]" + pend)
         # policy == ASK (default for most R3/R4)
         if self.store.granted_in_task(task_id, cap.id):
             return GateDecision(True, cap.id, "granted earlier in this task", policy, confirmed=True)
-        return self._ask(cap, task_id, confirmer, f"{cap.name}: {cap.description}")
+        return self._ask(cap, task_id, confirmer,
+                         f"{cap.name}: {cap.description}" + pend)
 
     def _ask(self, cap: Capability, task_id: str, confirmer, reason: str) -> GateDecision:
         if confirmer is None:

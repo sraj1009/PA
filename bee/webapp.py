@@ -80,7 +80,18 @@ def require_auth(request: Request) -> None:
     provided = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     if not provided:
         provided = request.query_params.get("token", "")
-    if not provided or not hmac.compare_digest(provided, tok):
+    # Compare BYTES: hmac.compare_digest raises TypeError on strings that
+    # contain non-ASCII, so an odd-shaped (or deliberately malformed) header
+    # used to answer 500 instead of 401. A 500 also leaks that the handler
+    # blew up rather than that the credential was wrong.
+    if not provided:
+        raise HTTPException(
+            status_code=401,
+            detail="unauthorized — send Authorization: Bearer <token> "
+                   "(token: server console / temp/web_token.txt / BEE_WEB_TOKEN)")
+    ok = hmac.compare_digest(
+        provided.encode("utf-8", "replace"), tok.encode("utf-8", "replace"))
+    if not ok:
         raise HTTPException(
             status_code=401,
             detail="unauthorized — send Authorization: Bearer <token> "
@@ -109,7 +120,7 @@ def get_ctx() -> Context:
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return (Path(__file__).parent / "web" / "index.html").read_text(encoding="utf-8")
+    return _page("index.html")
 
 
 @app.get("/health")
@@ -118,6 +129,21 @@ def health():
     models = ctx.client.models_list()
     return {"ok": True, "ollama_models": models,
             "voice_stt": _voice_available()}
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard(request: Request):
+    """Live monitoring page — rendered per request from the current metrics.
+
+    `python -m bee.cli dashboard` writes a SNAPSHOT file, so opening it later
+    showed whatever was true when it was generated (audit item L3/M8: the
+    dashboard could not show live data). This route builds the same HTML on every
+    request and tells the browser to re-fetch, so the numbers move while you
+    watch. Gated like the other data surfaces: the content IS usage data."""
+    require_auth(request)
+    from .monitor import dashboard as dash
+    return HTMLResponse(content=dash.render(refresh_seconds=30),
+                        headers={"Cache-Control": "no-store"})
 
 
 def _voice_available() -> bool:
@@ -131,6 +157,30 @@ def _voice_available() -> bool:
 def _default_engine_override() -> str | None:
     from .agent import engines
     return engines.override_for(engines.load_engine())
+
+
+@app.post("/cancel")
+def cancel_task(request: Request):
+    """Stop the ACTIVE task. The REPL has always had this (Ctrl-C / 'stop') and
+    the voice engine has it (barge-in / "Stop."); the web UI had no route at all,
+    so a browser user could only watch a runaway task finish.
+
+    Safe because cancellation is kernel-owned and task-scoped: the kernel clears
+    the cancel event at every new task start, so this can never poison the next
+    task (audit item N4).
+    """
+    require_auth(request)
+    ctx = get_ctx()
+    kernel = getattr(ctx, "kernel", None)
+    if kernel is None:
+        return JSONResponse({"cancelled": False, "running": False,
+                             "reason": "no agent has run in this process yet"})
+    active = getattr(kernel, "_active_task", None)
+    kernel.cancel()
+    return {"cancelled": True, "running": active is not None,
+            "task_id": getattr(active, "id", "") or "",
+            "note": "" if active is not None else
+                    "no task was running — nothing to stop"}
 
 
 @app.post("/chat")
@@ -285,9 +335,19 @@ def _web_dir() -> Path:
     return Path(__file__).parent / "web"
 
 
+def _page(name: str) -> HTMLResponse:
+    """Serve a bundled page with no-store.
+
+    The face/kiosk tab and the chat tab stay open for days; without a cache
+    directive an upgrade leaves them running the OLD page (which is how a fixed
+    UI bug can appear to survive its own fix)."""
+    return HTMLResponse(content=(_web_dir() / name).read_text(encoding="utf-8"),
+                        headers={"Cache-Control": "no-store"})
+
+
 @app.get("/livekit", response_class=HTMLResponse)
 def livekit_page():
-    return (_web_dir() / "livekit.html").read_text(encoding="utf-8")
+    return _page("livekit.html")
 
 
 @app.get("/livekit/status")
@@ -342,7 +402,7 @@ def _livekit_snapshot() -> dict:
 
 @app.get("/face", response_class=HTMLResponse)
 def face_page():
-    return (_web_dir() / "face.html").read_text(encoding="utf-8")
+    return _page("face.html")
 
 
 @app.get("/face/state")

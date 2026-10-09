@@ -8,8 +8,11 @@ talks to abstractions.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Protocol, runtime_checkable
+
+log = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -112,21 +115,32 @@ class _Semantic:
             return
         src = f" [source: {source}{': ' + provenance if provenance else ''}]" \
             if source and source != "user" else ""
-        line = f"- {t}{src}"
         p = paths.PROFILE_MD if kind == "profile" else paths.LONGTERM_MD
-        if p.exists():
-            p.write_text(p.read_text(encoding="utf-8").rstrip() + f"\n\n{line}\n",
-                         encoding="utf-8")
-        else:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(f"# {'Profile' if kind == 'profile' else 'Long-term memory'}\n\n{line}\n",
-                         encoding="utf-8")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # add_facts, not `open(..., 'a')`: the same fact promoted twice used to
+        # land as two bullets, and a changed value as a third one beside it.
+        from ..memory.md import add_facts
+        add_facts(p, f"{t}{src}")
+        # same queue as the diary: findable on the next flush, not the next rebuild
+        from ..memory.search import mark_dirty
+        mark_dirty(p)
+
+    def __init__(self, ctx_ref=None):
+        # rag.retrieve() is (ctx, query, k) — this facade used to call
+        # retrieve(query, k=k), i.e. pass the QUERY as ctx, so the TypeError it
+        # raised was caught by the bare except below and semantic memory
+        # silently returned nothing for every caller.
+        self._ctx_ref = ctx_ref
 
     def search(self, query: str, k: int = 5) -> list[dict]:
         try:
             from ..brain.rag import retrieve
-            return list(retrieve(query, k=k) or [])
-        except Exception:
+            ctx = self._ctx_ref() if self._ctx_ref else None
+            if ctx is None:
+                return []
+            return list(retrieve(ctx, query, k=k) or [])
+        except Exception as e:
+            log.warning("semantic search failed for %r: %s", query, e)
             return []
 
 
@@ -169,11 +183,16 @@ class _Temporal:
             return {"ok": False,
                     "note": "durable automation is not running in this context — "
                             "intent noted in diary, no job created"}
-        from datetime import datetime
+        from datetime import datetime, timedelta
         from zoneinfo import ZoneInfo
         from ..automation.models import Job, JobTrigger, display_local, iso
+        from ..automation.schedule import get_tz, worker_now
         tz = w.default_timezone
-        z = ZoneInfo(tz) if tz else None
+        z = get_tz(tz) if tz else None
+        # 'now' from the WORKER's clock, not the wall clock: this instant decides
+        # whether a bare "17:30" means today or tomorrow, and whether a time is
+        # already past — the same comparisons the tick makes.
+        now = worker_now(w, tz)
         when = (when or "").strip()
         trigger = None
         try:
@@ -182,24 +201,37 @@ class _Temporal:
                 h, m = (int(x) for x in when.split(":"))
                 if not (h <= 23 and m <= 59):
                     raise ValueError("time out of range")
-                base = datetime.now(z).replace(hour=h, minute=m, second=0, microsecond=0)
-                if base <= datetime.now(z):
-                    from datetime import timedelta
+                base = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if base <= now:
                     base += timedelta(days=1)
                 trigger = JobTrigger(kind="one_time", at=base.strftime("%Y-%m-%dT%H:%M"))
             else:
+                try:
+                    dt = datetime.fromisoformat(when)
+                except (ValueError, TypeError):
+                    dt = None
+                if dt is None:
+                    # spoken grammar: "tomorrow 9am", "in 20 min", "friday 4pm",
+                    # "tonight". Same deterministic parser /remind uses, so the
+                    # slash command and the voice/planner path understand exactly
+                    # the same words (and neither needs the model to be awake).
+                    from ..commands.remind import parse_when
+                    dt, _rest = parse_when(when, now)
+                    if dt is None:
+                        raise ValueError("no recognisable time")
                 # ISO datetime (naive = job tz, aware = used as-is)
-                dt = datetime.fromisoformat(when)
                 if dt.tzinfo is None and z:
                     dt = dt.replace(tzinfo=z)
-                if dt <= datetime.now(z):
+                if dt <= now:
                     raise ValueError("time is in the past")
                 trigger = JobTrigger(kind="one_time", at=dt.astimezone(
                     z or ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M"))
         except (ValueError, TypeError) as e:
             return {"ok": False, "note": f"could not parse when={when!r} ({e}) — "
-                                         "use 'HH:MM' or an ISO datetime; for "
-                                         "recurring schedules use the automation_job tool"}
+                                         "use 'HH:MM', an ISO datetime or plain "
+                                         "words like 'tomorrow 9am' / 'in 20 min'; "
+                                         "for recurring schedules use the "
+                                         "automation_job tool"}
         # Phase 8: a follow-up against an EXISTING pending reminder updates
         # THAT job ('Remind me to send the invoice.' -> 'Tomorrow.' ->
         # 'Actually at 10 AM.' = one job whose trigger moves), never a
@@ -233,7 +265,13 @@ class _Temporal:
         from ..automation.models import display_local
         out = []
         for j in w.jobs():
-            if (j.owner or "") in ("main",) and j.enabled and j.state not in ("cancelled",):
+            # owner "reminder" is the /remind + spoken fast-path family; the
+            # model must see those too or it will offer to create a duplicate.
+            # LIVE states only — a one_time job keeps enabled=True after it
+            # fires, so listing every job tells the model a fired reminder is
+            # still coming up (and it will say so to the user).
+            if (j.owner or "") in ("main", "reminder") and j.enabled \
+                    and j.state in ("pending", "running"):
                 out.append({"id": j.id, "description": j.description,
                             "next_run": display_local(j.next_run, j.timezone),
                             "state": j.state})
@@ -265,16 +303,20 @@ class MemoryStack:
     Phase 3: `structured` is the canonical user-facing store (facts,
     preferences, events, workflows, entities) with provenance + governance;
     the other stores adapt the pre-existing systems."""
-    def __init__(self, structured_path=None, worker_ref=None):
+    def __init__(self, structured_path=None, worker_ref=None, ctx_ref=None):
         self.working: WorkingMemory = _Working()
         self.episodic: EpisodicMemory = _Episodic()
-        self.semantic: SemanticMemory = _Semantic()
+        self.semantic: SemanticMemory = _Semantic(ctx_ref)
         self.procedural: ProceduralMemory = _Procedural()
         # worker_ref: callable -> JobWorker|None — temporal.schedule creates
         # REAL durable jobs through the one scheduling architecture
         self.temporal: TemporalMemory = _Temporal(worker_ref=worker_ref)
         from .. import paths
         from ..memory.store import StructuredMemory
+        # paths.MEMORY_DIR, not PROJECT_ROOT/"memory": the same file in
+        # production, but a test run that redirects MEMORY_DIR can no longer
+        # write facts into the user's real memory (it did — an eval fixture's
+        # invented GPU ended up in memory/store.json as a user fact).
         self.structured = StructuredMemory(structured_path or
-                                           paths.PROJECT_ROOT / "memory" / "store.json")
+                                           paths.MEMORY_DIR / "store.json")
         self.entities: EntityMemory = _Entity(self.structured)

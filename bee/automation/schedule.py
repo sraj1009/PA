@@ -16,7 +16,7 @@ entire scheduler is testable without sleeping.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -28,6 +28,29 @@ def get_tz(name: str) -> ZoneInfo:
         return ZoneInfo(name or "UTC")
     except Exception:
         return ZoneInfo("UTC")
+
+
+def worker_now(worker, tz_name: str = "") -> datetime:
+    """'Now' exactly as the SCHEDULER sees it, expressed in the job's timezone.
+
+    Anything that turns words ('in 20 min', 'tomorrow 9am') or a bare 'HH:MM'
+    into an instant must use this and never `datetime.now()`: JobWorker's tick
+    compares next_run against its OWN clock, so a second clock source means the
+    creation side and the firing side disagree — and the layer cannot be tested
+    without sleeping. Falls back to the wall clock for a worker with no clock
+    (a bare/stub worker), which is what the older call sites expected."""
+    now = None
+    fn = getattr(worker, "now", None)
+    if callable(fn):
+        try:
+            now = fn()
+        except Exception:
+            now = None
+    if now is None:
+        now = datetime.now()
+    if now.tzinfo is None:                      # a naive 'now' would be a lie
+        now = now.replace(tzinfo=timezone.utc)
+    return now.astimezone(get_tz(tz_name)) if tz_name else now
 
 
 def _parse_local(s: str, tz: ZoneInfo) -> Optional[datetime]:

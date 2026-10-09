@@ -251,3 +251,227 @@ def test_summarize_fallback_sections(ctx, tmp_path):
     assert "## TL;DR" in out
     assert "## Key points" in out
     assert "Comparative table" in out
+
+
+# ============================ /remind (durable reminders) ====================
+# Time parsing is deterministic, and a reminder is exactly one durable notify job
+# on the SAME store/worker as every other job — no second scheduler, no LLM call.
+def test_remind_creates_one_durable_job(tmp_path):
+    import sys
+    from datetime import datetime, timedelta, timezone
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    from test_automation import FakeKernel, Ctx, FakeClock, make_worker
+    from bee import commands as reg
+
+    tz = timezone(timedelta(hours=5, minutes=30))
+    clock = FakeClock(datetime(2026, 10, 8, 19, 5, tzinfo=tz))
+    w = make_worker(tmp_path, FakeKernel(Ctx(), "ok"), clock)
+    ctx = type("C", (), {"automation_worker": w, "cfg": None})()
+
+    out = reg.run(ctx, "/remind call the bank tomorrow 9am")
+    assert "Reminder set" in out and "call the bank" in out, out
+    jobs = [j for j in w.jobs() if j.owner == "reminder"]
+    assert len(jobs) == 1
+    j = jobs[0]
+    assert j.action["type"] == "notify" and j.action["message"] == "Reminder: call the bank"
+    assert j.trigger.kind == "one_time"
+    # 9 AM IST tomorrow == 03:30 UTC; the store keeps stamps canonically in UTC
+    assert j.next_run == "2026-10-09T03:30:00+00:00", j.next_run
+    assert j.timezone == w.default_timezone
+    # durable means it survives the process: reload the store from disk
+    from bee.automation.store import JobStore
+    reloaded = [x for x in JobStore(tmp_path / "automation").load_all_jobs()
+                if x.owner == "reminder"]
+    assert len(reloaded) == 1 and reloaded[0].id == j.id
+    assert reloaded[0].next_run == j.next_run and reloaded[0].state == "pending"
+
+
+def test_remind_relative_time_and_text_preservation(tmp_path):
+    import sys
+    from datetime import datetime, timedelta, timezone
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    from test_automation import FakeKernel, Ctx, FakeClock, make_worker
+    from bee import commands as reg
+
+    tz = timezone(timedelta(hours=5, minutes=30))
+    w = make_worker(tmp_path, FakeKernel(Ctx(), "ok"),
+                    FakeClock(datetime(2026, 10, 8, 19, 5, tzinfo=tz)))
+    ctx = type("C", (), {"automation_worker": w, "cfg": None})()
+    out = reg.run(ctx, "/remind pay the client -- urgent -- in 20 min")
+    j = [x for x in w.jobs() if x.owner == "reminder"][0]
+    assert "Reminder set" in out
+    assert "pay the client" in j.action["message"] and "urgent" in j.action["message"]
+    assert j.next_run == "2026-10-08T13:55:00+00:00", j.next_run   # 19:25 IST
+
+
+def test_remind_uses_the_worker_clock_not_the_wall_clock(tmp_path):
+    """Regression: a reminder is measured against the scheduler's own notion of
+    now. If the handler read datetime.now() instead, "in 10 min" would be ten
+    minutes after the REAL instant and disagree with the tick that decides
+    whether the job is already late."""
+    import sys
+    from datetime import datetime, timedelta, timezone
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    from test_automation import FakeKernel, Ctx, FakeClock, make_worker
+    from bee import commands as reg
+
+    tz = timezone(timedelta(hours=5, minutes=30))
+    w = make_worker(tmp_path, FakeKernel(Ctx(), "ok"),
+                    FakeClock(datetime(2027, 3, 4, 10, 0, tzinfo=tz)))
+    ctx = type("C", (), {"automation_worker": w, "cfg": None})()
+    reg.run(ctx, "/remind submit the report in 10 min")
+    j = [x for x in w.jobs() if x.owner == "reminder"][0]
+    assert j.next_run == "2027-03-04T04:40:00+00:00", j.next_run   # 10:10 IST
+
+
+def test_remind_list_and_cancel(tmp_path):
+    import sys
+    from datetime import datetime, timedelta, timezone
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    from test_automation import FakeKernel, Ctx, FakeClock, make_worker
+    from bee import commands as reg
+
+    tz = timezone(timedelta(hours=5, minutes=30))
+    w = make_worker(tmp_path, FakeKernel(Ctx(), "ok"),
+                    FakeClock(datetime(2026, 10, 8, 9, 0, tzinfo=tz)))
+    ctx = type("C", (), {"automation_worker": w, "cfg": None})()
+    reg.run(ctx, "/remind water the plants at 18:00")
+    reg.run(ctx, "/remind stretch in 45 minutes")
+    listing = reg.run(ctx, "/remind list")
+    assert listing.count("Reminder") >= 2 and "when (local)" in listing
+    ident = [j for j in w.jobs() if j.owner == "reminder"][0].id
+    assert "Cancelled" in reg.run(ctx, "/remind cancel " + ident[-6:])
+    assert "Cancelled" in reg.run(ctx, "/remind cancel all")
+    assert "No reminders" in reg.run(ctx, "/remind list")
+
+
+def test_remind_reports_errors_rather_than_raising(tmp_path):
+    from bee import commands as reg
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(automation_worker=None, cfg=None)
+    out = reg.run(ctx, "/remind call mom tomorrow")
+    assert out.startswith("ERROR:") and "automation" in out.lower()
+
+
+def test_remind_without_a_time_asks_instead_of_guessing(tmp_path):
+    import sys
+    from datetime import datetime, timedelta, timezone
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    from test_automation import FakeKernel, Ctx, FakeClock, make_worker
+    from bee import commands as reg
+
+    tz = timezone(timedelta(hours=5, minutes=30))
+    w = make_worker(tmp_path, FakeKernel(Ctx(), "ok"),
+                    FakeClock(datetime(2026, 10, 8, 9, 0, tzinfo=tz)))
+    ctx = type("C", (), {"automation_worker": w, "cfg": None})()
+    out = reg.run(ctx, "/remind call my mother")
+    assert out.startswith("ERROR:")
+    assert "tomorrow" in out.lower()          # it shows the usage line instead
+    assert [j for j in w.jobs() if j.owner == "reminder"] == []
+
+
+def test_remind_is_registered_and_documented():
+    from bee import commands as reg
+    assert "remind" in reg.COMMANDS
+    assert "/remind" in reg.help_text()
+    cmd = reg.COMMANDS["remind"]
+    assert cmd.description and cmd.usage.startswith("/remind")
+
+
+def _reminder_worker(tmp_path, clock, ctx):
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    from test_automation import FakeKernel, make_worker
+    return make_worker(tmp_path, FakeKernel(ctx, "ok"), clock, ctx=ctx)
+
+
+def _syspath():
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+
+
+def test_remind_coming_due_reaches_the_desktop(tmp_path, monkeypatch):
+    """Delivery, not bookkeeping: a reminder whose time has come must raise an
+    OS toast. The toast gate used to cover only failure/missed, so every notify
+    job reported 'succeeded' into the store and the log while the user waited."""
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    _syspath()
+    from test_automation import Ctx, FakeClock
+    from bee import commands as reg
+    from bee.monitor import alerts
+
+    toasts: list[tuple] = []
+    monkeypatch.setattr(alerts, "os_notify",
+                        lambda title, text: toasts.append((title, text)) or True)
+
+    tz = timezone(timedelta(hours=5, minutes=30))
+    clock = FakeClock(datetime(2026, 10, 8, 19, 5, tzinfo=tz))
+    ctx = Ctx()
+    ctx.cfg = SimpleNamespace(alerts=SimpleNamespace(enabled=True))
+    w = _reminder_worker(tmp_path, clock, ctx)
+    reg.run(ctx, "/remind stretch in 5 minutes")
+    j = [x for x in w.jobs() if x.owner == "reminder"][0]
+    assert j.state == "pending" and not toasts
+
+    clock.advance(minutes=6)
+    assert j.id in w.tick()                      # the scheduler picked it up
+    assert w.wait_idle(5.0)
+    assert toasts, "reminder came due and nothing reached the desktop"
+    assert len(toasts) == 1, f"one reminder must be exactly one popup: {toasts}"
+    title, text = toasts[0]
+    assert title == "BEE reminder" and "stretch" in text, toasts
+    assert w.store.load_job(j.id).state == "completed"
+
+
+def test_remind_respects_alerts_switch(tmp_path, monkeypatch):
+    """cfg.alerts.enabled=false is the user's opt-out from desktop popups —
+    the record still lands in the store (and shows in /auto)."""
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    _syspath()
+    from test_automation import Ctx, FakeClock
+    from bee import commands as reg
+    from bee.monitor import alerts
+
+    toasts: list[tuple] = []
+    monkeypatch.setattr(alerts, "os_notify",
+                        lambda title, text: toasts.append((title, text)) or True)
+
+    tz = timezone(timedelta(hours=5, minutes=30))
+    clock = FakeClock(datetime(2026, 10, 8, 19, 5, tzinfo=tz))
+    ctx = Ctx()
+    ctx.cfg = SimpleNamespace(alerts=SimpleNamespace(enabled=False))
+    w = _reminder_worker(tmp_path / "off", clock, ctx)
+    reg.run(ctx, "/remind stretch in 5 minutes")
+    j = [x for x in w.jobs() if x.owner == "reminder"][0]
+    clock.advance(minutes=6)
+    w.tick()
+    assert w.wait_idle(5.0)
+    assert toasts == []
+    assert any(n.job_id == j.id for n in w.store.load_notifications())
+
+
+def test_parse_when_table():
+    from datetime import datetime, timedelta, timezone
+    from bee.commands.remind import parse_when
+    now = datetime(2026, 10, 8, 19, 5, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    cases = {
+        "call the bank tomorrow 9am": ("call the bank", (2026, 10, 9, 9, 0)),
+        "pay client in 20 min": ("pay client", (2026, 10, 8, 19, 25)),
+        "water the plants 18:00": ("water the plants", (2026, 10, 9, 18, 0)),
+        "file the taxes 2026-10-12 07:30": ("file the taxes", (2026, 10, 12, 7, 30)),
+        "review contract friday 4pm": ("review contract", (2026, 10, 9, 16, 0)),
+        "gym tonight": ("gym", (2026, 10, 8, 20, 0)),
+        "renew passport day after tomorrow at 11:30": ("renew passport",
+                                                       (2026, 10, 10, 11, 30)),
+        "submit expense 12 Oct 09:00": ("submit expense", (2026, 10, 12, 9, 0)),
+    }
+    for text, (want_rest, want_dt) in cases.items():
+        dt, rest = parse_when(text, now)
+        assert dt is not None, text
+        assert (dt.year, dt.month, dt.day, dt.hour, dt.minute) == want_dt, (text, dt)
+        assert rest == want_rest, (text, rest)
+    for text in ("call mom", "do the thing later"):
+        dt, rest = parse_when(text, now)
+        assert dt is None, f"{text!r} invented a date: {dt}"

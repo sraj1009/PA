@@ -16,6 +16,7 @@ Emergency stop — three independent ways, all immediate:
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import weakref
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ from .vision import make_vision
 log = logging.getLogger("bee.computeruse")
 
 DEFAULT_MAX_ACTIONS = 15
+DEFAULT_ACTION_TIMEOUT = 10.0   # seconds; config computeruse.action_timeout
 
 # ------------------------------------------------------------------ globals
 _ACTIVE_SESSIONS: "weakref.WeakValueDictionary[int, 'ComputerUseSession']" = \
@@ -93,22 +95,90 @@ class HotkeyStopper:
         self._stop.set()
 
 
+# Virtual-key codes for the stop combo (Windows VK_* values).
+_VK = {"ctrl": 0x11, "alt": 0x12, "shift": 0x10, "win": 0x5B,
+       "q": 0x51, "s": 0x53, "e": 0x45, "x": 0x58, "p": 0x50}
+
+
 def default_windows_key_state():
-    """Ctrl+Alt+Q via GetAsyncKeyState (Windows only, lazy import)."""
+    """Key-state probe via GetAsyncKeyState, or None where it cannot work.
+
+    ctypes (the project's Windows convention, as in tools/systemctl.py) rather
+    than pywin32, so arming the stop-hotkey costs no extra dependency. None is
+    returned rather than a never-true lambda: a silently-deaf poller is exactly
+    the failure mode an emergency stop must not have.
+    """
+    if sys.platform != "win32":
+        return None
     try:
-        import win32con
-        import win32api
-    except ImportError:
-        return lambda name: False
-    vk = {"ctrl": win32con.VK_CONTROL, "alt": win32con.VK_MENU,
-          "q": win32con.VK_Q, "s": win32con.VK_S}
+        import ctypes
+        user32 = ctypes.windll.user32
+    except Exception:
+        return None
 
     def state(name: str) -> bool:
+        vk = _VK.get((name or "").lower())
+        if vk is None:
+            return False
         try:
-            return bool(win32api.GetAsyncKeyState(vk[name.lower()]) & 0x8000)
+            return bool(user32.GetAsyncKeyState(vk) & 0x8000)
         except Exception:
             return False
     return state
+
+
+_HOTKEY_LOCK = threading.Lock()
+_HOTKEY: HotkeyStopper | None = None
+
+
+def start_emergency_hotkey(cfg=None) -> HotkeyStopper | None:
+    """Arm the global stop combo once per process (idempotent).
+
+    Called when the first computer-use session is created, so the poller costs
+    nothing until the agent can actually touch the desktop. Returns the stopper,
+    or None when disabled/unavailable (with the reason logged, never silent).
+    """
+    global _HOTKEY
+    cu = getattr(cfg, "computeruse", None) if cfg is not None else None
+    if not (getattr(cu, "hotkey_enabled", True) if cu is not None else True):
+        return None
+    combo = str(getattr(cu, "hotkey", "ctrl+alt+q") or "ctrl+alt+q").lower()
+    names = tuple(n.strip() for n in combo.replace(" ", "+").split("+") if n.strip())
+    unknown = [n for n in names if n not in _VK]
+    with _HOTKEY_LOCK:
+        if _HOTKEY is not None:
+            return _HOTKEY
+        if unknown:
+            log.warning("computer-use hotkey %r ignored — unsupported key(s): %s "
+                        "(available: %s)", combo, ",".join(unknown),
+                        ",".join(sorted(_VK)))
+            return None
+        probe = default_windows_key_state()
+        if probe is None:
+            log.warning("computer-use emergency-stop hotkey %s is NOT armed "
+                        "(no GetAsyncKeyState on %s) — use 'stop' or computer_stop",
+                        combo, sys.platform)
+            return None
+        _HOTKEY = HotkeyStopper(probe, combo=names)
+        _HOTKEY.start()
+        log.info("computer-use emergency stop armed: %s", combo)
+        return _HOTKEY
+
+
+def hotkey_state() -> dict:
+    """Introspection for /health and /cu status: is the stop combo live?"""
+    return {"armed": _HOTKEY is not None,
+            "combo": "+".join(_HOTKEY.combo) if _HOTKEY else "",
+            "fired": _HOTKEY.fired if _HOTKEY else 0}
+
+
+def stop_emergency_hotkey() -> None:
+    """Test/shutdown hook — retire the poller."""
+    global _HOTKEY
+    with _HOTKEY_LOCK:
+        if _HOTKEY is not None:
+            _HOTKEY.stop()
+            _HOTKEY = None
 
 
 # ------------------------------------------------------------------ timeout
@@ -121,15 +191,15 @@ def _with_timeout(fn, timeout: float):
     def _run():
         try:
             box["res"] = fn()
-        except Exception as e:
-            box["err"] = f"{type(e).__name__}: {e}"
+        except BaseException as e:
+            box["err"] = e          # keep the object — a str cannot be re-raised
     t = threading.Thread(target=_run, daemon=True, name="BeeCUAction")
     t.start()
     t.join(timeout)
     if t.is_alive():
         return None, True
     if "err" in box:
-        raise box["err"].__class__(box["err"])
+        raise box["err"]
     return box.get("res"), False
 
 
@@ -143,9 +213,10 @@ class ComputerUseSession:
                  cancel_event: threading.Event | None = None,
                  task_id: str = "", on_event=None,
                  screenshots: ScreenshotStore | None = None,
-                 vision=None):
+                 vision=None, action_timeout: float = DEFAULT_ACTION_TIMEOUT):
         self.desktop = desktop
         self.max_actions = max_actions
+        self.action_timeout = float(action_timeout or DEFAULT_ACTION_TIMEOUT)
         self.task_id = task_id
         self.on_event = on_event
         self.actions_taken = 0
@@ -154,7 +225,10 @@ class ComputerUseSession:
         self._lock = threading.RLock()
         self._last_rects: list[tuple] = []     # provenance from last observe
         self.log: list[dict] = []
-        self.screenshots = screenshots or ScreenshotStore()
+        # `screenshots or ScreenshotStore()` would drop a perfectly good store:
+        # an empty ScreenshotStore is falsy (it defines __len__).
+        self.screenshots = (screenshots if screenshots is not None
+                            else ScreenshotStore())
         # Phase 10: pluggable vision backend (vendor-neutral). A failing
         # backend degrades to structural — it never blocks the loop.
         self.vision = vision if vision is not None else make_vision()
@@ -283,15 +357,17 @@ class ComputerUseSession:
                 action.coordinate_source = action.coordinate_source or "window_rect"
 
         pre = snapshot(self.desktop)
+        # config is the ceiling: a model asking for a 300 s action still dies
+        # at computeruse.action_timeout rather than hanging the task.
+        limit = min(float(action.timeout or self.action_timeout), self.action_timeout)
         try:
-            _res, timed_out = _with_timeout(lambda: self._dispatch(action),
-                                            action.timeout)
+            _res, timed_out = _with_timeout(lambda: self._dispatch(action), limit)
         except Exception as e:
             return self._fail(action, t0, pre,
                               f"action failed: {type(e).__name__}: {e}")
         if timed_out:
             return self._fail(action, t0, pre,
-                              f"action timed out after {action.timeout:.0f}s (abandoned)")
+                              f"action timed out after {limit:.0f}s (abandoned)")
 
         with self._lock:
             self.actions_taken += 1

@@ -148,6 +148,78 @@ def get_system_stats() -> dict | None:
         "battery_pct": None if m.group(5) == "-1" else int(m.group(5)),
     }
 
+# ----------------------------------------------------------------- inventory
+# One CIM round-trip is ~4 s on this box, so the answer is cached for the life of
+# the process: hardware does not change underneath a running assistant.
+_HW_PS = (
+    "$ErrorActionPreference='SilentlyContinue';"
+    "$v=@(Get-CimInstance Win32_VideoController);"
+    "$cs=Get-CimInstance Win32_ComputerSystem;"
+    "[PSCustomObject]@{CPU=(Get-CimInstance Win32_Processor).Name;"
+    "GPU=@($v | ForEach-Object {[PSCustomObject]@{n=$_.Name;"
+    "gb=[math]::Round($_.AdapterRAM/1GB,1)}});"
+    "RAM_GB=[math]::Round(((Get-CimInstance Win32_PhysicalMemory |"
+    " Measure-Object Capacity -Sum).Sum/1GB),1);"
+    "OS=((Get-CimInstance Win32_OperatingSystem).Caption.Trim());"
+    "CS=($cs.Manufacturer.Trim() + ' ' + $cs.Model.Trim())}"
+    " | ConvertTo-Json -Compress -Depth 5"
+)
+_HW_CACHE: dict | None = None
+
+def get_hardware(refresh: bool = False) -> dict | None:
+    """Static machine inventory: {cpu, gpus[], vram_gb, ram_gb, os, machine}.
+
+    'What do you know about this machine's GPU' is answerable from the box itself;
+    until now it was not, so the assistant guessed or said it could not see
+    hardware. None when the CIM round-trip fails (non-Windows, blocked PS)."""
+    global _HW_CACHE
+    if _HW_CACHE is not None and not refresh:
+        return _HW_CACHE
+    import json
+    raw = _ps(_HW_PS)
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(d, dict):
+        return None
+    gpus = []
+    for g in (d.get("GPU") or []):
+        if isinstance(g, dict):
+            name = str(g.get("n") or "").strip()
+            if name:
+                gpus.append({"name": name, "vram_gb": g.get("gb") or 0})
+        elif str(g or "").strip():
+            gpus.append({"name": str(g).strip(), "vram_gb": 0})
+    hw = {
+        "cpu": str(d.get("CPU") or "").strip(),
+        "gpus": gpus,
+        "ram_gb": d.get("RAM_GB") or 0,
+        "os": str(d.get("OS") or "").strip(),
+        "machine": re.sub(r"\s+", " ", str(d.get("CS") or "")).strip(),
+    }
+    if not (hw["cpu"] or gpus or hw["os"]):
+        return None
+    _HW_CACHE = hw
+    return hw
+
+def format_hardware(h: dict) -> str:
+    parts = []
+    if h.get("machine"):
+        parts.append(h["machine"])
+    if h.get("cpu"):
+        parts.append(f"CPU: {h['cpu']}")
+    for g in h.get("gpus") or []:
+        gb = g.get("vram_gb") or 0
+        parts.append(f"GPU: {g['name']}" + (f" ({gb:g} GB VRAM)" if gb else ""))
+    if h.get("ram_gb"):
+        parts.append(f"RAM: {h['ram_gb']:g} GB")
+    if h.get("os"):
+        parts.append(h["os"])
+    return " · ".join(parts)
+
 def format_system_stats(s: dict) -> str:
     ram = f"RAM {s['ram_free_mb']:,} MB free of {s['ram_total_mb']:,} MB ({s['ram_pct']}% used)"
     bat = f"Battery {s['battery_pct']}%" if s["battery_pct"] is not None else "Power: AC/desktop"
@@ -249,6 +321,11 @@ def systemctl_tool(ctx, action: str, value: str = "") -> dict:
             if s is None:
                 return {"error": "system stats unavailable (non-Windows or CIM query failed)"}
             return {"result": format_system_stats(s)}
+        if a in ("hardware", "hw", "specs", "specs_summary", "device"):
+            h = get_hardware()
+            if h is None:
+                return {"error": "hardware inventory unavailable (non-Windows or CIM query failed)"}
+            return {"result": format_hardware(h)}
         if a in ("battery", "battery_level"):
             b = get_battery()
             if b is None:
@@ -270,18 +347,21 @@ def systemctl_tool(ctx, action: str, value: str = "") -> dict:
             return {"result": show_desktop()}
     except Exception as e:
         return {"error": str(e)}
-    return {"error": f"unknown action '{action}' (stats|battery|volume|brightness|lock|sleep|media|show_desktop)"}
+    return {"error": f"unknown action '{action}' (stats|hardware|battery|volume|brightness|lock|sleep|media|show_desktop)"}
 
 def systemctl_tools():
     return [
         T("systemctl",
-          "Control the PC (Windows): action=stats (CPU/RAM/disk/battery one-liner), battery, "
+          "Control the PC (Windows): action=stats (CPU/RAM/disk/battery one-liner), "
+          "hardware (fixed inventory — model, CPU, GPU/VRAM, RAM, OS: use for 'what GPU do I have', "
+          "'is this machine good for ML', 'what are my specs'), battery, "
           "volume (value: up|down|max|mute|unmute), brightness (value: 0-100), lock, sleep, "
           "media (value: playpause|next|prev), show_desktop. Use for 'lock my pc', 'volume up', "
           "'next track', 'battery', 'system stats', 'put pc to sleep'. Returns a short result string.",
           {"type": "object", "properties": {
-              "action": {"type": "string", "enum": ["stats", "battery", "volume", "brightness",
-                                                    "lock", "sleep", "media", "show_desktop"]},
+              "action": {"type": "string", "enum": ["stats", "hardware", "battery", "volume",
+                                                    "brightness", "lock", "sleep", "media",
+                                                    "show_desktop"]},
               "value": {"type": "string", "description": "action-dependent: volume dir, brightness 0-100, media key"}},
            "required": ["action"]},
           systemctl_tool),

@@ -7,8 +7,32 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+
+def _workspace_from_env() -> Path:
+    """BEE_WORKSPACE from the process env, else from .env, else the repo root.
+
+    This module is imported before `config.load_config()` runs `_load_dotenv()`,
+    so reading only os.environ split the workspace in two: cfg.workspace (and
+    with it memory/, automation/, the sandbox mount) followed a .env setting
+    while plans/, drafts/, codeout/ and the STT cache stayed at PROJECT_ROOT.
+    """
+    raw = os.environ.get("BEE_WORKSPACE")
+    if not raw:
+        dotenv = PROJECT_ROOT / ".env"
+        try:
+            for line in dotenv.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("BEE_WORKSPACE="):
+                    raw = line.split("=", 1)[1].strip().strip("'\"")
+                    break
+        except OSError:
+            pass
+    base = Path(raw).expanduser() if raw else PROJECT_ROOT
+    return base.resolve()
+
+
 # Workspace = where BEE reads/writes files and runs shell/code
-WORKSPACE = Path(os.environ.get("BEE_WORKSPACE", str(PROJECT_ROOT)))
+WORKSPACE = _workspace_from_env()
 
 MEMORY_DIR = PROJECT_ROOT / "memory"
 DIARY_DIR = MEMORY_DIR / "diary"

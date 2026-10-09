@@ -19,26 +19,27 @@ def memory_tools():
 
     def h_longterm(ctx, text: str, append: bool = True):
         from .. import paths
+        from ..memory import md
         t = str(text or "").strip()
         if not t:
             return {"error": "empty text"}
-        p = paths.LONGTERM_MD
-        if append and p.exists():
-            cur = p.read_text(encoding="utf-8").rstrip()
-            p.write_text(cur + f"\n\n- {t}\n", encoding="utf-8")
-        else:
-            p.write_text(f"# Long-term memory\n\n- {t}\n", encoding="utf-8")
-        return {"ok": True, "file": str(p)}
+        if not append:
+            paths.LONGTERM_MD.write_text("# Long-term memory\n", encoding="utf-8")
+        out = md.add_facts(paths.LONGTERM_MD, t)
+        return {"ok": True, "file": str(paths.LONGTERM_MD),
+                "added": out["added"], "updated": out["updated"],
+                "already_there": out["duplicates"]}
 
     def h_profile(ctx, text: str):
         from .. import paths
+        from ..memory import md
         t = str(text or "").strip()
         if not t:
             return {"error": "empty text"}
-        p = paths.PROFILE_MD
-        cur = p.read_text(encoding="utf-8") if p.exists() else ""
-        p.write_text(cur.rstrip() + f"\n- {t}\n", encoding="utf-8")
-        return {"ok": True, "file": str(p)}
+        out = md.add_facts(paths.PROFILE_MD, t)
+        return {"ok": True, "file": str(paths.PROFILE_MD),
+                "added": out["added"], "updated": out["updated"],
+                "already_there": out["duplicates"]}
 
     def h_search(ctx, query: str, k: int = 6):
         from ..memory import md

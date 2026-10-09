@@ -9,12 +9,16 @@ capability gate). No rule, no action. Rules are rate-limited
 (max_per_hour) so a flapping event source cannot turn BEE into a spam
 machine.
 
-Event SOURCES are optional adapters (timer/file-change are implemented;
-email/app/battery/network are schema-supported, with clean "not available"
-when the dependency is missing). A source publishes events; it never acts.
+Event SOURCES are adapters that publish events and NEVER act. Implemented
+end-to-end: timer, file-change, battery (Windows power API) and network
+(connectivity probe) — started in production by `start_sources()`.
+Email / app_event / device_state remain schema-only and report themselves as
+"unavailable" through `available_sources()`.
 """
 from __future__ import annotations
 
+import logging
+import re
 import threading
 import time
 import uuid
@@ -24,6 +28,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..events import EventBus as _SharedBus
+
+log = logging.getLogger("bee.events")
+
+# match-key shape for threshold rules: {"ram_free_mb<=": 1500}
+_CMP_KEY = re.compile(r"^(.+?)(<=|>=|<|>)$")
 
 EVENT_KINDS = {"timer", "calendar", "email", "file_change", "app_event",
                "battery", "network", "device_state"}
@@ -91,9 +100,35 @@ class ProactiveRule:
     external_authorized: bool = False
 
     def matches(self, ev: BusEvent) -> bool:
+        """match supports three key shapes:
+            {"name": "device.memory_low"}     the event name
+            {"ram_free_mb": 900}              exact payload field
+            {"ram_free_mb<=": 1500}           numeric comparison (<= >= < >)
+        Exact-only matching made threshold events (memory/disk pressure, whose
+        value differs every poll) practically unusable, so a rule could only
+        fire on a coincidental value.
+        """
         if ev.kind != self.kind:
             return False
         for k, v in self.match.items():
+            if k == "name":
+                if str(ev.name) != str(v):
+                    return False
+                continue
+            m = _CMP_KEY.match(k)
+            if m:
+                key, op = m.group(1), m.group(2)
+                raw = ev.payload.get(key)
+                if raw is None:
+                    return False
+                try:
+                    a, b = float(raw), float(v)
+                except (TypeError, ValueError):
+                    return False
+                ok = {"<=": a <= b, ">=": a >= b, "<": a < b, ">": a > b}[op]
+                if not ok:
+                    return False
+                continue
             if str(ev.payload.get(k, "")) != str(v):
                 return False
         return True
@@ -285,13 +320,306 @@ class FileChangeSource(EventSource):
 
 def available_sources() -> dict[str, str]:
     """Honest capability report (sources are adapters; missing deps = 'unavailable')."""
+    import sys
+    win = sys.platform == "win32"
     return {
         "timer": "built-in (thread)",
         "file_change": "built-in (polling, no dependency)",
         "calendar": "built-in (ICS files via JobTrigger kind=calendar)",
+        "battery": ("built-in (GetSystemPowerStatus via tools.systemctl)" if win
+                    else "unavailable (no power API on this platform)"),
+        "network": "built-in (TCP connectivity probe, no DNS)",
+        "app_event": ("built-in (foreground window + launch/close, via the "
+                      "computer-use desktop backend)" if win
+                      else "unavailable (no window enumeration on this platform)"),
         "email": "unavailable (no mail source wired)",
-        "app_event": "unavailable (platform adapter not implemented)",
-        "battery": "unavailable unless power API present",
-        "network": "unavailable (no probe wired)",
-        "device_state": "unavailable (platform adapter not implemented)",
+        "device_state": "built-in (memory + disk pressure via the native telemetry daemon)",
     }
+
+
+class _PollSource(EventSource):
+    """Shared poll loop: run `scan()` on an interval, never crash the loop."""
+    kind = "poll"
+
+    def __init__(self, interval_seconds: float, name: str = "BeePollSrc",
+                 sleep_fn: Callable[[float], None] = time.sleep):
+        self.interval = max(1.0, float(interval_seconds))
+        self._name = name
+        self._sleep = sleep_fn
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def scan(self, bus: EventBus) -> None:      # subclasses implement
+        raise NotImplementedError
+
+    def start(self, bus: EventBus) -> None:
+        if self._thread is not None:
+            return
+
+        def _run():
+            while not self._stop.is_set():
+                try:
+                    self.scan(bus)
+                except Exception as e:                 # a broken probe must not kill it
+                    log.debug("%s scan failed: %s", self.kind, e)
+                self._stop.wait(self.interval)
+        self._thread = threading.Thread(target=_run, daemon=True, name=self._name)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+class BatterySource(_PollSource):
+    """Edge-triggered power events: battery.low / battery.unplugged /
+    battery.charged / ac.restored.
+
+    Only transitions are published (a level poll every 60 s must not become a
+    notification storm). Reads via tools.systemctl.get_battery — the same
+    native path the fast paths use — with the reader injectable for tests.
+    """
+    kind = "battery"
+
+    def __init__(self, interval_seconds: float = 60.0, low_percent: int = 20,
+                 read_fn: Callable[[], tuple[int, int] | None] | None = None,
+                 **kw):
+        super().__init__(interval_seconds, name="BeeBatterySrc", **kw)
+        self.low_percent = int(low_percent)
+        self._read = read_fn
+        self._was_low = False
+        self._was_on_battery: bool | None = None
+
+    def _default_read(self):
+        from ..tools.systemctl import get_battery
+        return get_battery()
+
+    def scan(self, bus: EventBus) -> None:
+        read = self._read or self._default_read
+        got = read()
+        if not got:
+            return                       # desktop / no battery: nothing to report
+        pct, ac = int(got[0]), int(got[1])
+        on_battery = (ac == 0)
+        if self._was_on_battery is not None and on_battery != self._was_on_battery:
+            bus.publish(BusEvent(name=("battery.unplugged" if on_battery
+                                        else "battery.charged"),
+                                 kind="battery", payload={"percent": pct, "ac": ac},
+                                 source="battery"))
+        self._was_on_battery = on_battery
+        low = on_battery and pct <= self.low_percent
+        # hysteresis: re-arm only after climbing 5 points above the threshold
+        if low and not self._was_low:
+            bus.publish(BusEvent(name="battery.low", kind="battery",
+                                 payload={"percent": pct, "ac": ac,
+                                          "threshold": self.low_percent},
+                                 source="battery"))
+            self._was_low = True
+        elif not low and pct > self.low_percent + 5:
+            self._was_low = False
+        bus.publish(BusEvent(name="battery.level", kind="battery",
+                             payload={"percent": pct, "ac": ac},
+                             source="battery"))
+
+
+class NetworkSource(_PollSource):
+    """Edge-triggered connectivity events: network.down / network.restored.
+
+    Probes by TCP-connecting to public resolvers on port 53 — no DNS lookup, so
+    a DNS outage is correctly reported as down, and nothing is fetched.
+    """
+    kind = "network"
+    DEFAULT_TARGETS = (("1.1.1.1", 53), ("8.8.8.8", 53), ("223.5.5.5", 53))
+
+    def __init__(self, interval_seconds: float = 30.0, targets=None,
+                 probe_fn: Callable[[], bool] | None = None, **kw):
+        super().__init__(interval_seconds, name="BeeNetworkSrc", **kw)
+        self.targets = tuple(targets or self.DEFAULT_TARGETS)
+        self._probe = probe_fn
+        self._up: bool | None = None
+
+    def _default_probe(self) -> bool:
+        import socket
+        for host, port in self.targets:
+            try:
+                with socket.create_connection((host, port), timeout=2.0):
+                    return True
+            except OSError:
+                continue
+        return False
+
+    def scan(self, bus: EventBus) -> None:
+        up = (self._probe or self._default_probe)()
+        if self._up is not None and up != self._up:
+            bus.publish(BusEvent(name=("network.restored" if up else "network.down"),
+                                 kind="network", payload={"up": up},
+                                 source="network"))
+        self._up = up
+
+
+class AppEventSource(_PollSource):
+    """Foreground-window and running-app transitions.
+
+    Reads through the SAME desktop abstraction computer use uses, so the
+    platform boundary is `make_desktop()` (Windows today, mocked in tests) and
+    no new dependency appears. Emits app.focused / app.launched / app.closed —
+    events only: turning one into an action still requires a user-authorized
+    proactive rule that passes the default-deny policy.
+    """
+    kind = "app_event"
+
+    def __init__(self, desktop=None, interval_seconds: float = 10.0,
+                 cfg=None, **kw):
+        super().__init__(interval_seconds, name="BeeAppSrc", **kw)
+        self._desktop = desktop
+        self._cfg = cfg
+        self._seen: set[str] = set()
+        self._active: str | None = None
+        self._primed = False
+
+    def _read(self):
+        d = self._desktop
+        if d is None:
+            from ..computeruse.desktop import make_desktop
+            d = make_desktop(self._cfg)
+            self._desktop = d
+        wins = d.list_windows()
+        aw = d.active_window()
+        return wins, (aw.title if aw else "")
+
+    def scan(self, bus: EventBus) -> None:
+        wins, active = self._read()
+        titles = {w.title for w in wins if w.title}
+        if not self._primed:
+            # first sample only establishes the baseline — no launch storm
+            self._seen, self._active, self._primed = titles, active, True
+            return
+        if active and active != self._active:
+            bus.publish(BusEvent(name="app.focused", kind="app_event",
+                                 payload={"title": active[:200]}, source="app_event"))
+            self._active = active
+        for t in sorted(titles - self._seen):
+            bus.publish(BusEvent(name="app.launched", kind="app_event",
+                                 payload={"title": t[:200]}, source="app_event"))
+        for t in sorted(self._seen - titles):
+            bus.publish(BusEvent(name="app.closed", kind="app_event",
+                                 payload={"title": t[:200]}, source="app_event"))
+        self._seen = titles
+
+
+class DeviceSource(_PollSource):
+    """Memory / disk pressure transitions — this machine's documented failure
+    mode (a killed Ollama session hoarding ~4 GB, or a disk down to a few GB,
+    stalls everything while BEE looks healthy).
+
+    Edge-triggered with hysteresis: one event per crossing, re-arming only after
+    a clear recovery (25% headroom), so a value oscillating on the threshold
+    cannot become a notification storm. Reads through tools.systemctl, i.e. the
+    native telemetry daemon first and one CIM round-trip as fallback.
+    """
+    kind = "device_state"
+
+    def __init__(self, interval_seconds: float = 60.0, mem_low_mb: int = 1500,
+                 disk_low_gb: float = 4.0, read_fn: Callable[[], dict | None] | None = None,
+                 **kw):
+        super().__init__(interval_seconds, name="BeeDeviceSrc", **kw)
+        self.mem_low_mb = int(mem_low_mb)
+        self.disk_low_gb = float(disk_low_gb)
+        self._read = read_fn
+        self._low_mem = False
+        self._low_disk = False
+
+    def _default_read(self):
+        from ..tools.systemctl import get_system_stats
+        return get_system_stats()
+
+    def _pub(self, bus: EventBus, name: str, **payload) -> None:
+        bus.publish(BusEvent(name=name, kind="device_state", payload=payload,
+                             source="device_state"))
+
+    def scan(self, bus: EventBus) -> None:
+        st = (self._read or self._default_read)()
+        if not st:
+            return
+        free = st.get("ram_free_mb")
+        if free is not None:
+            free = int(free)
+            if not self._low_mem and free <= self.mem_low_mb:
+                self._low_mem = True
+                self._pub(bus, "device.memory_low", ram_free_mb=free,
+                          threshold_mb=self.mem_low_mb)
+            elif self._low_mem and free >= int(self.mem_low_mb * 1.25):
+                self._low_mem = False
+                self._pub(bus, "device.memory_ok", ram_free_mb=free)
+        disk = st.get("disk_free_gb")
+        if disk is not None:
+            disk = float(disk)
+            if not self._low_disk and disk <= self.disk_low_gb:
+                self._low_disk = True
+                self._pub(bus, "device.disk_low", disk_free_gb=disk,
+                          threshold_gb=self.disk_low_gb)
+            elif self._low_disk and disk >= self.disk_low_gb * 1.25:
+                self._low_disk = False
+                self._pub(bus, "device.disk_ok", disk_free_gb=disk)
+
+
+def start_sources(bus: EventBus, cfg=None) -> list[EventSource]:
+    """Start the event sources that actually work on this machine.
+
+    This is the production entry point — before it existed, Timer/FileChange
+    sources were implemented and tested but NOTHING ever started them, so the
+    proactive layer could only fire from events published inside tests.
+    """
+    auto = getattr(cfg, "automation", None) if cfg is not None else None
+    started: list[EventSource] = []
+    if not (getattr(auto, "events_enabled", True) if auto is not None else True):
+        log.info("event sources disabled (automation.events_enabled=false)")
+        return started
+    tick = TimerSource(interval_seconds=float(getattr(auto, "event_tick_seconds", 60.0)
+                                              if auto is not None else 60.0),
+                       name="bee-tick")
+    tick.start(bus)
+    started.append(tick)
+    battery = BatterySource(
+        interval_seconds=float(getattr(auto, "battery_poll_seconds", 60.0)
+                               if auto is not None else 60.0),
+        low_percent=int(getattr(auto, "battery_low_percent", 20)
+                        if auto is not None else 20))
+    try:
+        battery.start(bus)
+        started.append(battery)
+    except Exception as e:
+        log.info("battery source unavailable: %s", e)
+    network = NetworkSource(
+        interval_seconds=float(getattr(auto, "network_poll_seconds", 30.0)
+                               if auto is not None else 30.0))
+    network.start(bus)
+    started.append(network)
+    watch = str(getattr(auto, "file_watch_dir", "") or "") if auto is not None else ""
+    if watch and Path(watch).exists():
+        fs = FileChangeSource(watch)
+        fs.start(bus)
+        started.append(fs)
+    if bool(getattr(auto, "app_events", True)) if auto is not None else True:
+        try:
+            app = AppEventSource(
+                interval_seconds=float(getattr(auto, "app_poll_seconds", 10.0)
+                                       if auto is not None else 10.0),
+                cfg=cfg)
+            app.scan(bus)                      # prime the baseline before starting
+            app.start(bus)
+            started.append(app)
+        except Exception as e:
+            log.info("app_event source unavailable on this platform: %s", str(e)[:120])
+    if bool(getattr(auto, "device_events", True)) if auto is not None else True:
+        dev = DeviceSource(
+            interval_seconds=float(getattr(auto, "device_poll_seconds", 60.0)
+                                   if auto is not None else 60.0),
+            mem_low_mb=int(getattr(auto, "memory_low_mb", 1500)
+                           if auto is not None else 1500),
+            disk_low_gb=float(getattr(auto, "disk_low_gb", 4.0)
+                              if auto is not None else 4.0))
+        dev.start(bus)
+        started.append(dev)
+    log.info("event sources started: %s",
+             ", ".join(sorted({s.kind for s in started})))
+    return started

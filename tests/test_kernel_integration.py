@@ -120,13 +120,16 @@ def test_1_simple_local_request(tmp_path):
 
 
 def test_2_tool_call(tmp_path):
+    # factorial(6) deliberately: a single function call with NO operator, which
+    # the deterministic tier declines (it requires an operator), so this still
+    # exercises the real LLM -> tool -> verify path.
     k, client, _ = make_kernel(tmp_path, [
-        tc("c1", "calculator", {"expression": "2*21"}),
-        "The result is 42.",
+        tc("c1", "calculator", {"expression": "factorial(6)"}),
+        "The result is 720.",
     ])
-    r = k.run("Use the calculator to compute 2 times 21.", session_id="i2")
+    r = k.run("Use the calculator to compute factorial(6).", session_id="i2")
     assert r.ok and r.task.state == TaskState.COMPLETED
-    assert "42" in r.output
+    assert "720" in r.output
     tools = [e.data.get("tool") for e in _events(k, AgentEventKind.TOOL_COMPLETED)]
     assert "calculator" in tools
     assert len(_events(k, AgentEventKind.TOOL_STARTED)) == 1
@@ -296,12 +299,13 @@ def test_10_repl_stop_word_semantics(tmp_path):
 
 def test_11_events_full_sequence(tmp_path):
     k, client, _ = make_kernel(tmp_path, [
-        tc("c1", "calculator", {"expression": "6*7"}),
-        "It is 42.",
+        tc("c1", "calculator", {"expression": "factorial(6)"}),
+        "It is 720.",
     ])
-    # 'Use the calculator...' forces the LLM/tool path (bare 'What is 6*7?'
-    # would be answered by the deterministic tier — no tool events)
-    k.run("Use the calculator tool to compute 6 times 7.", session_id="i11")
+    # factorial(6) has no operator, so the deterministic tier declines it and the
+    # tool path runs. (Prose-wrapped arithmetic like "compute 6 times 7" is now
+    # answered by the det tier — see test_prose_wrapped_math_is_answered_... .)
+    k.run("Use the calculator to compute factorial(6).", session_id="i11")
     kinds = [e.kind for e in k.events.log]
     seq = [k for k in kinds if k in {AgentEventKind.USER_MESSAGE, AgentEventKind.TASK_CREATED,
                                      AgentEventKind.PLAN_CREATED, AgentEventKind.TOOL_STARTED,
@@ -319,3 +323,461 @@ def test_11_events_full_sequence(tmp_path):
     # order sanity: plan before tool, verification before completion
     assert seq.index(AgentEventKind.PLAN_CREATED) < seq.index(AgentEventKind.TOOL_STARTED)
     assert seq.index(AgentEventKind.VERIFICATION_COMPLETED) < seq.index(AgentEventKind.TASK_COMPLETED)
+
+
+# ---------------- instant tiers must see the raw utterance ------------------
+# The kernel prepends the session context block to the text it sends the MODEL.
+# That augmented string used to be what routing and the fast paths judged, so
+# any bare follow-up in an ongoing conversation lost its 0 ms handler.
+
+def test_bare_math_stays_deterministic_mid_session(tmp_path):
+    k, client, _ctx = make_kernel(tmp_path, ["I can plan, draft, summarize and run code."])
+    k.run("Summarize your capabilities in one line.", session_id="s1")
+    calls_before = len(client.calls)
+    r = k.run("1234 + 5678", session_id="s1")
+    assert r.model == "deterministic", f"a model answered the math: {r.model}"
+    assert "6912" in r.output
+    assert len(client.calls) == calls_before, \
+        "an LLM round-trip was spent on a question the det tier answers in 0 ms"
+
+
+def test_fastpath_still_matches_mid_session(tmp_path):
+    k, client, _ctx = make_kernel(tmp_path, ["earlier turn"])
+    k.run("Remind me to file the taxes tomorrow.", session_id="s2")
+    calls_before = len(client.calls)
+    r = k.run("what time is it", session_id="s2")
+    assert len(client.calls) == calls_before, "the fast path was bypassed by session context"
+    assert r.output and r.model in ("deterministic", "fastpath") or "fast" in str(r.model)
+
+
+def test_cloud_prefix_override_still_wins_over_fastpath_mid_session(tmp_path):
+    """Explicit intent must survive the same refactor: route_text carries the
+    'cloud:' form and the explicit tier beats the fast paths."""
+    k, client, _ctx = make_kernel(tmp_path, ["[fake]", "[fake]", "[fake]", "[fake]"])
+    r = k.run("cloud: what time is it", session_id="s3")
+    assert r.model != "deterministic", "explicit engine choice must not be pre-empted"
+
+
+def test_followup_classifier_separates_commands_from_nudges():
+    """The merge rule is '≤4 words looks like a follow-up' — which also caught
+    complete requests. Nudges must still merge; commands must not."""
+    from bee.kernel.session import AgentSession
+    s = AgentSession(id="cls")
+    s.active_task_text = "Remind me to file the taxes"
+    for nudge in ["Tomorrow.", "At 6pm instead", "actually make it Friday", "that one"]:
+        assert s.resolve_followup(nudge)[0] == "continue", nudge
+    for cmd in ["1234 + 5678", "25*40/100", "5 plus 5", "what time is it",
+                "open chrome", "hi"]:
+        d, txt = s.resolve_followup(cmd)
+        assert d == "new" and txt == cmd, f"{cmd!r} merged as {d}: {txt!r}"
+
+
+# ------------------------------------------- narrated calls & meta-rambles (A27)
+RAMBLE = ("It seems like there might have been an error or misunderstanding as no "
+          "function calls were provided for execution based on the initial request. "
+          "The available functions are: system_health, file_read, shell.")
+NARRATION = ("To execute the specified Git command, I will use a computer_command "
+             "function call to run `git reset --hard HEAD~1` in the workspace.")
+
+
+def test_narrated_tool_call_is_nudged_not_shipped(tmp_path):
+    """Seven eval tasks ended as a sentence ABOUT a call ("I will use a
+    computer_command function call…"). That is neither an action nor an answer,
+    so the loop must send it back once instead of returning it to the user."""
+    k, client, ctx = make_kernel(tmp_path, [NARRATION, "Nothing ran; here is why."])
+    res = k.run("run git reset --hard HEAD~1 and tell me what happened")
+    second_call_msgs = client.calls[1][1]
+    assert any("described an action instead of performing it" in str(m.get("content"))
+               for m in second_call_msgs), second_call_msgs[-1]
+    assert res.output != NARRATION
+    assert "function call" not in res.output.lower()
+
+
+def test_meta_ramble_never_becomes_the_answer(tmp_path, monkeypatch):
+    """'no function calls were provided / the available functions are…' is the
+    model answering its own system prompt. The final pass runs with tools
+    disabled and the request restated."""
+    _no_fastpath(monkeypatch)
+    k, client, ctx = make_kernel(tmp_path,
+                                    [RAMBLE, "The workspace has 12 top-level entries."])
+    res = k.run("List the top-level entries of the workspace. How many are directories?")
+    assert "12 top-level entries" in res.output, res.output
+    last = client.calls[-1]
+    assert last[2].get("tools") is None, "final pass must not offer tools again"
+    prompt = " ".join(str(m.get("content")) for m in last[1])
+    assert "Do not mention tools, functions, permissions" in prompt or \
+           "Answer that request now" in prompt, prompt[-400:]
+    assert "top-level entries" in prompt        # the user's request is restated
+
+
+def _no_fastpath(monkeypatch):
+    """These two tests aim at the loop's wrap-up logic. Listing the workspace is
+    now answered in pure Python (A31) before any model call, so the fastpath tier
+    has to be off for the scripted model answers to be reached at all."""
+    from bee.agent import fastpaths
+    monkeypatch.setattr(fastpaths, "match", lambda text: None)
+
+
+def test_honest_answer_without_tools_is_left_alone(tmp_path):
+    """The ramble detector must not add a second LLM call to a normal answer."""
+    k, client, ctx = make_kernel(tmp_path, ["The notes folder holds 3 files."])
+    res = k.run("roughly how many files are in my notes folder?")
+    assert res.output == "The notes folder holds 3 files."
+    assert len(client.calls) == 1, [c[0] for c in client.calls]
+
+
+def test_answering_about_the_tool_surface_is_not_treated_as_a_ramble(tmp_path):
+    """The detector must not 'fix' a legitimate answer: someone asking what BEE
+    can do SHOULD get a sentence containing 'available functions'."""
+    k, client, ctx = make_kernel(tmp_path, [RAMBLE])
+    res = k.run("Which tools and functions do you have available?")
+    assert res.output == RAMBLE, res.output
+    assert len(client.calls) == 1, "no extra no-tools pass on a legitimate answer"
+
+
+def test_a_repeated_unverified_action_claim_is_not_delivered_as_success(tmp_path):
+    """The live model did this: 16 harmless tool calls, then 'I executed the shell
+    command git reset --hard HEAD~1'. Verification failed, it repeated the claim,
+    and the loop handed the user a confident falsehood with ok=True. Now the
+    answer carries an explicit warning and the task is not reported as success."""
+    lie = ("I executed the shell command 'git reset --hard HEAD~1' in the workspace.")
+    k, client, ctx = make_kernel(tmp_path, [lie] * 8)
+    res = k.run("run git reset --hard HEAD~1 and report exactly what happened")
+    assert "could not verify" in res.output, res.output
+    assert res.verify == "fail", res.verify
+    assert res.ok is False and res.error == "unverified action claim", (res.ok, res.error)
+
+
+def test_a_verified_answer_is_still_delivered_clean(tmp_path, monkeypatch):
+    _no_fastpath(monkeypatch)
+    k, client, ctx = make_kernel(tmp_path, ["The workspace holds 12 entries."])
+    res = k.run("how many entries are in the workspace root?")
+    assert res.output == "The workspace holds 12 entries.", res.output
+    assert res.ok is True and not res.error, (res.ok, res.error)
+
+
+# ------------------------------------ the wrap pass can ramble too (A33)
+def test_a_wrap_pass_that_still_rambles_becomes_an_honest_fallback(tmp_path, monkeypatch):
+    """math_sieve on the live box: 39.9 s, tools=0, and the shipped answer was
+    `I'm ready to provide the response now. Please let me know how I can assist
+    you further with the available functions…`. The wrap pass rambled as well, and
+    nothing re-checked its text, so the user got a offer to help."""
+    _no_fastpath(monkeypatch)
+    k, client, ctx = make_kernel(tmp_path, [RAMBLE] * 10)
+    res = k.run("How many prime numbers are there between 1 and 100? "
+                "Answer with the number and the method.")
+    assert "available functions" not in res.output.lower(), res.output
+    assert "could not finish" in res.output, res.output
+    assert res.ok is False and res.error == "no answer after wrap", (res.ok, res.error)
+
+
+def test_the_fallback_quotes_what_a_tool_really_returned(tmp_path, monkeypatch):
+    """'Ran out of steps' alone throws away the work already done. The last real
+    tool result is evidence, so it is reported — labelled as unfinished, not as
+    the answer."""
+    _no_fastpath(monkeypatch)
+    (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
+    k, client, ctx = make_kernel(
+        tmp_path, [tc("c1", "file_list", {"path": "."})] + [RAMBLE] * 10)
+    res = k.run("List the workspace files and tell me how many there are, then "
+                "compute the prime count below 100.")
+    assert "notes.txt" in res.output, res.output
+    assert "last thing a tool actually returned" in res.output, res.output
+    assert "available functions" not in res.output.lower(), res.output
+    assert res.ok is False and res.error == "no answer after wrap", (res.ok, res.error)
+    assert res.retried is False, "an exhausted budget must not be re-burned"
+
+
+def test_an_answer_that_only_rambles_once_is_still_wrapped_normally(tmp_path, monkeypatch):
+    """The fix must not turn a recoverable ramble into a declared failure: one
+    ramble, then a real answer from the no-tools pass, is a success."""
+    _no_fastpath(monkeypatch)
+    k, client, ctx = make_kernel(tmp_path, [RAMBLE, "There are 25 primes below 100."])
+    res = k.run("How many prime numbers are there between 1 and 100?")
+    assert res.output == "There are 25 primes below 100.", res.output
+    assert res.ok is True and not res.error, (res.ok, res.error)
+
+
+def test_an_instruction_that_names_a_tool_is_not_a_question_about_tools(tmp_path, monkeypatch):
+    """plan_complex, live: '…Use the planner tool.' answered with 'None of the
+    provided functions seem to be used…' and that was shipped, because the
+    exemption for legitimate 'what tools do you have' answers keyed off the mere
+    word 'tool' appearing anywhere in the task."""
+    _no_fastpath(monkeypatch)
+    k, client, ctx = make_kernel(tmp_path, [RAMBLE] * 10)
+    res = k.run("Plan (do not execute) how you would analyze a 50MB CSV sales file: "
+                "loading, cleaning, top-10 products by revenue. Use the planner tool.")
+    assert "provided functions" not in res.output.lower(), res.output
+    assert res.ok is False and res.error == "no answer after wrap", (res.ok, res.error)
+
+
+DSA_LIE = ("It seems like there might have been an error or misunderstanding as I "
+           "didn't receive any prior context to work with for the functions provided "
+           "earlier. Since no specific function call is mentioned, I can't provide "
+           "details on what action was intended.")
+
+
+def test_ramble_detector_covers_the_phrasings_the_live_model_actually_used():
+    """dsa_lis shipped exactly this paragraph as its 'answer' on the last run: the
+    existing shapes all required a particular word order, and the 3B keeps
+    inventing new ones. Detection costs one extra LLM call; missing it costs the
+    user a 10-second non-answer."""
+    from bee.agent.loop import _META_RAMBLE_RE as R
+    for text in (DSA_LIE,
+                 "no function calls were provided for execution",
+                 "The available functions are: shell, file_read",
+                 "the functions provided earlier are not relevant",
+                 "Since no specific function call is mentioned",
+                 "without any tool calls I cannot proceed",
+                 "the last message did not contain any information to proceed with a "
+                 "function call",
+                 "If you intended for me to perform a specific action using one of these "
+                 "functions, please provide more details",
+                 "let me know if you need more details about the functions"):
+        assert R.search(text), text
+    for text in ("Use pandas to load the CSV, then group by product.",
+                 "The merge and quick sorts are correct on reversed input.",
+                 "There are 25 primes below 100.",
+                 "I ran the command and it printed 3 files.",
+                 # a real report about a tool must not be mistaken for plumbing talk
+                 "The tool call failed with a timeout after 30 seconds.",
+                 "I could not proceed because the file is missing."):
+        assert not R.search(text), text
+
+
+def _allowing_kernel(tmp_path, script, monkeypatch):
+    """A kernel that grants every permission, so a test can observe the LOOP's own
+    breakers rather than the guard's."""
+    from bee.agent.context import Context
+    from bee.config import load_config
+    from bee.kernel import AgentKernel
+    _no_fastpath(monkeypatch)
+    cfg = load_config()
+    cfg.cloud.enabled = False
+    client = ScriptedClient(script)
+    ctx = Context(cfg, workspace=tmp_path, client=client, guard_on=True,
+                  guard_mode="cli", episodes_on=False, rag_on=False,
+                  cancel_event=threading.Event())
+    k = AgentKernel(ctx, approver=lambda t, a, r: True,
+                    sessions_dir=tmp_path / "s", receipts_path=tmp_path / "r.jsonl")
+    ctx.kernel = k
+    return k, client
+
+
+def test_a_failing_command_is_stopped_even_when_the_arguments_change(tmp_path, monkeypatch):
+    """dsa_gcd_lcm spent 48 tool calls on one task: a 3B model that re-runs broken
+    code with one character changed defeats the exact-arguments breaker, and a
+    command that runs and returns a traceback is not an `error` payload, so the
+    per-tool failure breaker never counted it either."""
+    script = []
+    for i in range(9):
+        script.append(tc(f"c{i}", "code_run", {
+            "code": "open('runs.txt','a').write('x')\nimport sys\n"
+                    f"sys.exit(3)  # attempt {i}"}))
+    script.append("The snippet fails with exit code 3; I stopped retrying.")
+    k, client = _allowing_kernel(tmp_path, script, monkeypatch)
+    k.run("run this python snippet and tell me the exit status")
+    runs = ((tmp_path / "runs.txt").read_text(encoding="utf-8")
+            if (tmp_path / "runs.txt").exists() else "")
+    assert len(runs) == 3, f"the breaker must stop at 3 failing attempts, ran {len(runs)}"
+    seen = " ".join(str(m.get("content")) for _, msgs, _ in client.calls for m in msgs)
+    assert "has failed 3x" in seen, seen[-400:]
+
+
+def test_a_tool_called_endlessly_is_not_run_again(tmp_path, monkeypatch):
+    """Same loop, different symptom: six SUCCESSFUL calls of one tool with
+    ever-changing arguments is still a loop. The first breach is a nudge that
+    skips execution without counting as a refusal (a legitimate 25-step task may
+    call one tool six times); the second is a hard stop."""
+    script = []
+    for i in range(10):
+        script.append(tc(f"c{i}", "code_run", {
+            "code": f"open('runs.txt','a').write('x')\nprint({i})  # variant {i}"}))
+    script.append("Done.")
+    k, client = _allowing_kernel(tmp_path, script, monkeypatch)
+    k.run("count things with this snippet, trying several variants")
+    runs = ((tmp_path / "runs.txt").read_text(encoding="utf-8")
+            if (tmp_path / "runs.txt").exists() else "")
+    assert len(runs) == 6, f"expected the attempt cap at 6 real runs, got {len(runs)}"
+    seen = " ".join(str(m.get("content")) for _, msgs, _ in client.calls for m in msgs)
+    assert "has been called 6x" in seen, seen[-500:]
+
+
+PLAN_STEPS = ("1. Load the CSV with pandas.read_csv(chunksize=100000)\n"
+              "2. Clean it with df.dropna() and dtype fixes\n"
+              "3. Aggregate revenue per product with groupby\n"
+              "4. Write the summary report")
+
+
+def test_a_plan_the_prose_dropped_is_relayed_from_the_planner(tmp_path, monkeypatch):
+    _no_fastpath(monkeypatch)
+    """plan_complex, live: the planner ran (tools=1) and produced named steps, and
+    the answer handed to the user was 'we would need to load the data, which may
+    take some time'. A paraphrased plan is not a plan — the artifact is relayed."""
+    k, client, ctx = make_kernel(tmp_path, [
+        tc("c1", "planner", {"task": "analyze a 50MB CSV sales file"}),
+        PLAN_STEPS,
+        "To analyze the file we would need to load the data, which may take time.",
+    ])
+    res = k.run("Plan (do not execute) how you would analyze a 50MB CSV sales file. "
+                "Use the planner tool.")
+    assert "pandas.read_csv" in res.output, res.output
+    assert "Plan as produced" in res.output, res.output
+
+
+def test_a_plan_the_model_already_relayed_is_not_duplicated(tmp_path, monkeypatch):
+    _no_fastpath(monkeypatch)
+    k, client, ctx = make_kernel(tmp_path, [
+        tc("c1", "planner", {"task": "analyze a 50MB CSV sales file"}),
+        PLAN_STEPS, PLAN_STEPS,
+    ])
+    res = k.run("Plan how you would analyze a 50MB CSV sales file, step by step.")
+    assert res.output.count("pandas.read_csv") == 1, res.output
+
+
+def test_a_non_plan_request_is_not_appended_with_plan_text(tmp_path, monkeypatch):
+    _no_fastpath(monkeypatch)
+    """The relay is for requests that asked for a plan; otherwise a stray planner
+    call would bolt a numbered list onto an unrelated answer."""
+    k, client, ctx = make_kernel(tmp_path, [
+        tc("c1", "planner", {"task": "look at the csv"}),
+        PLAN_STEPS,
+        "The sales file is 50 MB and has three columns.",
+    ])
+    res = k.run("what is in the sales file?")
+    assert "Plan as produced" not in res.output, res.output
+
+
+SHOW_CODE = ("Here is the computation:\n\n```python\nimport math\n"
+             "a, b = 84, 147\ng = math.gcd(a, b)\nl = a * b // g\n"
+             "print(g, l)\n```\n\nSo the values are 21 and 588.")
+
+
+def test_code_the_model_showed_but_never_ran_is_executed_and_reported(tmp_path, monkeypatch):
+    """dsa_gcd_lcm / dsa_lis / dsa_graph, live: tools=0 and an answer that DESCRIBES
+    a snippet. The number in it is the model's arithmetic, not a computation. The
+    block it presented now runs through the normal authorization path and its real
+    stdout is what the user sees."""
+    k, client = _allowing_kernel(tmp_path, [SHOW_CODE], monkeypatch)
+    res = k.run("Compute gcd and lcm of 84 and 147 with a short Python snippet. "
+                "Show both values.")
+    assert "I ran it; it prints" in res.output, res.output
+    assert "21 588" in res.output, res.output
+    assert res.tool_calls == 1, res.tool_calls
+
+
+def test_a_refused_snippet_is_flagged_unverified_instead_of_silent(tmp_path, monkeypatch):
+    """When permission is refused the answer must not pretend the computation
+    happened — the number stays labelled unverified."""
+    from bee import guard as guard_mod
+
+    def deny(tool, args, is_exec, mode, approver=None):
+        return False, "deny", "user is away and this is not pre-approved"
+    monkeypatch.setattr(guard_mod, "check", deny)
+    k, client = _allowing_kernel(tmp_path, [SHOW_CODE], monkeypatch)
+    res = k.run("Compute gcd and lcm of 84 and 147 with a short Python snippet.")
+    assert "unverified" in res.output, res.output
+    assert "I ran it; it prints" not in res.output, res.output
+
+
+def test_a_snippet_that_errors_is_not_passed_off_as_an_answer(tmp_path, monkeypatch):
+    k, client = _allowing_kernel(tmp_path, [
+        "The answer is here:\n\n```python\nprint(1/0)\n```\n\nThat prints 4.",
+        "The answer is here:\n\n```python\nprint(1/0)\n```\n\nThat prints 4."],
+        monkeypatch)
+    res = k.run("compute the value using python code please")
+    assert "it failed" in res.output and "unverified" in res.output, res.output
+
+
+def test_a_task_that_already_ran_python_is_not_executed_twice(tmp_path, monkeypatch):
+    k, client = _allowing_kernel(tmp_path, [
+        tc("c1", "code_run", {"code": "print(4)"}),
+        "It printed 4.\n\n```python\nprint(1/0)\n```"], monkeypatch)
+    res = k.run("compute the value using python code please")
+    assert "I ran it; it prints" not in res.output, res.output
+    assert "it failed" not in res.output, res.output
+
+
+def test_a_model_that_ignores_the_do_not_repeat_instruction_is_cut_off(tmp_path):
+    """plan_complex, live: told 'Do NOT run it again - use the cached result', the
+    3B asked for the SAME planner call 21 more times. Each repeat was returned as a
+    success, so no breaker counted it and the whole 24-iteration budget went to
+    round-trips that could not add anything."""
+    call = tc("c1", "file_list", {"path": "."})
+    k, client, ctx = make_kernel(tmp_path, [call] * 20 + ["The workspace has 1 entry."])
+    res = k.run("list the workspace files, then tell me the count")
+    obs = [o for o in res.task.observations if o.tool == "file_list"]
+    assert len(obs) <= 3, [str(o.result_text)[:60] for o in obs]
+    assert res.iterations <= 5, res.iterations
+    assert len(client.calls) <= 6, len(client.calls)
+    assert any("Tools are closed" in str(o.result_text) for o in obs), obs
+
+
+def test_a_repeated_planner_call_does_not_erase_the_plan(tmp_path):
+    """The repeat of a planner call returns the cached-note dict, whose 'plan' key is
+    empty — capturing it unconditionally overwrote the real plan with '' and the
+    relay had nothing to show."""
+    call = tc("c1", "planner", {"task": "analyze a 50MB CSV sales file"})
+    k, client, ctx = make_kernel(tmp_path, [
+        call, PLAN_STEPS, call, call,
+        "I would load the data and then group it.",
+        "I would load the data and then group it.",
+    ])
+    res = k.run("Plan how you would analyze a 50MB CSV sales file. Use the planner tool.")
+    assert "pandas.read_csv" in res.output, res.output
+
+
+def test_malformed_arguments_are_reported_once_not_twice(tmp_path, monkeypatch):
+    """Live probe: the ToolBus already phrases this as 'bad arguments for scheduler:
+    …', and the loop wrapped the caught TypeError in the same words, so the model and
+    the receipts saw 'bad arguments for scheduler: bad arguments for scheduler: …'."""
+    k, client = _allowing_kernel(tmp_path, [
+        tc("c1", "file_list", {"bogus": 1}), "That call was malformed."], monkeypatch)
+    res = k.run("list the files")
+    text = " ".join(str(o.result_text or "") for o in res.task.observations)
+    assert "bad arguments for" in text, [str(o.result_text)[:120] for o in res.task.observations]
+    assert text.count("bad arguments for") == 1, text[:300]
+
+
+def test_code_volunteered_for_a_value_question_is_run_too(tmp_path, monkeypatch):
+    """math_sieve, live: 'How many prime numbers are between 1 and 100?' answered with
+    a fenced `def count_primes_up_to…` block and no number at all. A34e's trigger
+    looked for the word 'python' in the request, and the request never said it — but
+    showing code in answer to a value question is the same unverified claim."""
+    ans = ("Here is how to count them:\n\n```python\n"
+           "def c(n):\n    return sum(1 for x in range(2, n + 1)\n"
+           "                   if all(x % d for d in range(2, x)))\n"
+           "print(c(100))\n```\n\nThere are quite a few.")
+    k, client = _allowing_kernel(tmp_path, [ans, ans], monkeypatch)
+    res = k.run("How many prime numbers are there between 1 and 100?")
+    assert "I ran it; it prints" in res.output, res.output
+    assert "25" in res.output, res.output
+
+
+def test_grounded_fallback_does_not_quote_a_refusal_as_evidence():
+    """plan_complex, live: the 'honest' fallback quoted the guard's own budget
+    notice — 'The last thing a tool actually returned was: {"blocked": true,
+    "reason": "Too many actions were refused…"}'. A refusal is the guard talking,
+    not a fact about the world."""
+    from bee.agent.loop import _grounded_fallback
+    msgs = [{"role": "tool",
+             "content": '{"blocked": true, "reason": "Too many actions were refused"}'},
+            {"role": "tool",
+             "content": '{"path": ".", "entries": ["f\\tnotes.txt\\t12"]}'},
+            {"role": "tool", "content": "action not allowed"}]
+    out = _grounded_fallback(msgs, 3)
+    assert "notes.txt" in out, out
+    assert "Too many actions" not in out and "not allowed" not in out, out
+    only_refusals = _grounded_fallback(
+        [{"role": "tool", "content": '{"blocked": true}'},
+         {"role": "tool", "content": '{"error": "nope"}'}], 2)
+    assert "could not finish this" in only_refusals, only_refusals
+    assert "blocked" not in only_refusals, only_refusals
+    # the repeat breaker's own note is plumbing, not evidence (live: plan_complex's
+    # 'honest' answer quoted it as 'the last thing a tool actually returned')
+    loop_notes = _grounded_fallback(
+        [{"role": "tool", "content": '{"output": "4\\n"}'},
+         {"role": "tool", "content": '{"note": "You already ran this exact call '
+                                     'earlier in this task.", "cached_result": "x"}'}], 4)
+    assert "You already ran" not in loop_notes, loop_notes
+    assert "4" in loop_notes, loop_notes

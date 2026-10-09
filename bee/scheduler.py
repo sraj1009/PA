@@ -84,6 +84,20 @@ def rebuild_vectors(ctx) -> dict:
         return {"ok": False, "reason": str(e)}
 
 
+def flush_memory_index(ctx) -> dict:
+    """Index whatever memory changed since the last flush.
+
+    The full rebuild runs every 12 h, which meant a fact the user stated minutes
+    ago was not findable semantically for the rest of the day. This is the cheap
+    incremental path: it embeds only the files marked dirty and keeps the queue on
+    disk, so an unreachable embedder retries rather than loses the work."""
+    try:
+        from .memory.search import flush_dirty
+        return flush_dirty(ctx)
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
+
+
 def maybe_train_router(ctx) -> dict:
     """Self-learning: retrain the ML route classifier when enough new episodes exist.
 
@@ -218,6 +232,28 @@ def _cron_time(cron: str) -> str:
         return "03:00"
 
 
+# The maintenance jobs this module owns. A test pins that this list matches the
+# specs actually registered, so the disable path can never pause a stale set.
+_SYSTEM_JOB_IDS = ("nightly_consolidate", "vector_rebuild", "memory_index_flush",
+                   "router_retrain", "teach_back", "sft_build", "log_rotation",
+                   "alert_scan", "skill_gate", "model_gate")
+
+
+def _set_system_jobs_enabled(worker, job_ids, enabled: bool) -> None:
+    """Flip the persisted SYSTEM maintenance jobs to match scheduler.enabled.
+
+    Only jobs this module owns (id + owner == "system") are touched — a
+    user-created job with a colliding id is never modified.
+    """
+    for jid in job_ids:
+        job = worker.store.load_job(jid)
+        if job is not None and job.owner == "system" and job.enabled != enabled:
+            job.enabled = enabled
+            worker.store.save_job(job)
+            log.info("%s durable job %s", "paused" if not enabled else "resumed",
+                     jid)
+
+
 def _register_nightly_jobs(worker, cfg) -> None:
     """Register maintenance work as DURABLE FUNCTION JOBS (idempotent by
     stable id). This is real, persisted work — never a no-op: each job runs
@@ -225,6 +261,12 @@ def _register_nightly_jobs(worker, cfg) -> None:
     failure notification. Schedules derive from the existing scheduler
     config, so an existing setup keeps its behavior."""
     from .automation.models import PENDING, Job, JobTrigger
+    if not getattr(getattr(cfg, "scheduler", None), "enabled", True):
+        # The switch must stop REAL work — including the jobs an earlier run of
+        # this build already persisted, which would otherwise keep firing.
+        _set_system_jobs_enabled(worker, _SYSTEM_JOB_IDS, enabled=False)
+        log.info("nightly maintenance disabled (scheduler.enabled=false)")
+        return
     tz = cfg.automation.default_timezone or "Asia/Kolkata"
     nightly = _cron_time(cfg.scheduler.consolidate_cron)
 
@@ -240,6 +282,9 @@ def _register_nightly_jobs(worker, cfg) -> None:
         ("vector_rebuild", "vector index rebuild (12h)",
          JobTrigger(kind="interval", every_seconds=12 * 3600),
          {"type": "function", "fn": "bee.scheduler.rebuild_vectors"}, 1800.0),
+        ("memory_index_flush", "index memory written since the last flush (5 min)",
+         JobTrigger(kind="interval", every_seconds=300),
+         {"type": "function", "fn": "bee.scheduler.flush_memory_index"}, 600.0),
         ("router_retrain", "ML router retrain (only if new episodes)",
          JobTrigger(kind="daily", time=_plus(30)),
          {"type": "function", "fn": "bee.scheduler.maybe_train_router"}, 1800.0),
@@ -263,7 +308,14 @@ def _register_nightly_jobs(worker, cfg) -> None:
          {"type": "function", "fn": "bee.evals.model_gate"}, 7200.0),
     ]
     for jid, desc, trigger, action, max_rt in specs:
-        if worker.store.load_job(jid) is not None:
+        existing = worker.store.load_job(jid)
+        if existing is not None:
+            # config is the authority for SYSTEM jobs: an scheduler.enabled that
+            # went false and comes back true un-pauses exactly what it paused
+            if existing.owner == "system" and not existing.enabled:
+                existing.enabled = True
+                worker.store.save_job(existing)
+                log.info("re-enabled durable job %s", jid)
             continue
         job = Job(id=jid, owner="system", description=desc, action=action,
                   trigger=trigger, timezone=tz, enabled=True,
@@ -312,6 +364,16 @@ def start_automation(ctx, cfg, kernel=None):
     _register_nightly_jobs(worker, cfg)
     ctx.automation_worker = worker
     worker.start()
+    # Start the event sources (heartbeat + battery + network, plus file watch
+    # when configured). Before this, sources existed only as classes: nothing
+    # in the production path ever started one, so proactive rules could fire
+    # solely from events published inside tests.
+    try:
+        from .automation.events import start_sources
+        worker.event_sources = start_sources(worker.bus, cfg)
+    except Exception as e:
+        worker.event_sources = []
+        log.warning("event sources not started: %s", e)
     log.info("automation started (store=%s, %d jobs)", store.dir, len(worker.jobs()))
     return worker
 

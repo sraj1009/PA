@@ -63,4 +63,4 @@ def help_text() -> str:
 
 
 # self-registration (import order: registry must exist first)
-from . import plan, draft, summarize, code, think, welcome  # noqa: E402,F401
+from . import plan, draft, summarize, code, think, welcome, remind  # noqa: E402,F401

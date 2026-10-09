@@ -34,6 +34,48 @@ description: {description}
 - (pitfalls, VRAM/time limits, edge cases)
 """
 
+_PLACEHOLDER_NAMES = {
+    "skill", "skills", "name", "new-skill", "new-skill-name", "skill-name",
+    "my-skill", "some-skill", "todo", "tbd", "test", "xxx", "x", "untitled",
+}
+_PLACEHOLDER_BODY = re.compile(r"^<?[\w .,-]{0,60}>?$")   # "<fill this in>"
+
+
+def _validate_skill(name: str, content: str, script: str) -> str:
+    """Reject a hallucinated skill BEFORE it reaches the disk.
+
+    The nightly `skill_gate` already refuses to SHIP a junk candidate, but it
+    runs after the write — so a 3B model that emitted `skill_save(name=
+    "new_skill_name", content="<full_markdown_content…>")` left a directory in
+    the user's capability library that `/skills` lists forever. Creating a skill
+    is cheap; a bad one is not free. Returns '' when the call is acceptable."""
+    clean = re.sub(r"[^A-Za-z0-9._-]+", "-", str(name or "").strip()).strip("-.").lower()
+    # compare in one canonical spelling: `_` is legal in a name, so
+    # 'new_skill_name' and 'new-skill-name' must both be recognised as placeholders
+    key = re.sub(r"[._]+", "-", clean)
+    if len(clean) < 2:
+        return "skill name must be at least 2 characters of a real name"
+    if len(clean) > 48:
+        return f"skill name is too long ({len(clean)} chars) — name the procedure, not the sentence"
+    if key in _PLACEHOLDER_NAMES or re.fullmatch(r"(.)\1{1,}", key):
+        return (f"{clean!r} is a placeholder, not a skill name — give the procedure "
+                f"a specific name (e.g. 'pandas_csv_top_n_revenue')")
+    body = str(content or "").strip()
+    if body:
+        if len(body) < 40 or _PLACEHOLDER_BODY.match(body):
+            return ("SKILL.md content looks like an unfilled template — write the real "
+                    "steps: a 'description:' line, '## How' with concrete commands, and "
+                    "'## Gotchas'")
+        if not re.search(r"(?im)^\s*description\s*:", body):
+            return "SKILL.md content must include a 'description:' line"
+    if script:
+        try:
+            compile(str(script), "<skill script>", "exec")
+        except SyntaxError as e:
+            return f"script.py does not compile: {e.msg} (line {e.lineno})"
+    return ""
+
+
 def skill_tools():
     def h_list(ctx):
         out = []
@@ -77,6 +119,9 @@ def skill_tools():
             d = _skill_dir(name)
         except ValueError as e:
             return {"error": str(e)}
+        bad = _validate_skill(name, content, script)
+        if bad:
+            return {"error": bad}
         d.mkdir(parents=True, exist_ok=True)
         md = d / "SKILL.md"
         if content:

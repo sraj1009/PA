@@ -169,6 +169,8 @@ def model_quality_gate(ctx, candidate: str | None = None, margin: int | None = N
       {"ok": True,  "skipped": ...}      nothing to do (no candidate configured)
     """
     mg = getattr(ctx.cfg, "model_gate", None)
+    if mg is not None and not getattr(mg, "enabled", True):
+        return {"ok": True, "skipped": "model_gate.enabled=false (config)"}
     candidate = candidate or (getattr(mg, "candidate", "") if mg else "")
     if not candidate:
         return {"ok": True, "skipped": "no candidate configured (config.yaml: model_gate.candidate)"}

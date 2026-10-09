@@ -14,6 +14,26 @@ from .. import paths
 from . import rotate as _rotate
 
 _lock = threading.Lock()
+_enabled: bool | None = None
+
+
+def _monitor_enabled() -> bool:
+    """Honour monitor.enabled — documented as the metrics-stream + dashboard
+    switch, but read by no code until now. Resolved lazily and cached, because
+    `record()` is on the hot path and must not re-read config per event."""
+    global _enabled
+    if _enabled is None:
+        try:
+            from ..config import load_config
+            _enabled = bool(load_config().monitor.enabled)
+        except Exception:
+            _enabled = True     # a broken config must not lose telemetry
+    return _enabled
+
+
+def reset_enabled_cache_for_tests(value: bool | None = None) -> None:
+    global _enabled
+    _enabled = value
 
 
 def _scrub(value):
@@ -33,6 +53,8 @@ def _scrub(value):
 
 
 def record(event: str, **data) -> None:
+    if not _monitor_enabled():
+        return
     try:
         row = {"ts": round(time.time(), 3), "event": event,
                **{k: _scrub(v) for k, v in data.items()}}

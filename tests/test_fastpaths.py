@@ -213,3 +213,262 @@ def test_ask_engine_non_interactive_defaults_hybrid(monkeypatch):
     import pathlib
     monkeypatch.setattr(engines, "settings_file", lambda: pathlib.Path("/tmp") / "bee_test_engine.json")
     assert engines.ask_engine() == "hybrid"
+
+
+# ------------------------------------------------------- spoken reminders (A24)
+# "remind me to X in 20 min" must be answered by the deterministic tier: the
+# same durable job /remind creates, no model call, and no provider required at
+# the moment it fires.
+def test_reminder_phrases_route_to_the_instant_tier():
+    _h("remind", "remind me to stretch in 20 min")
+    _h("remind", "remind me to call the bank tomorrow 9am")
+    _h("remind", "don't forget to submit the expense friday 4pm")
+    _h("remind", "set a reminder to pay rent on 12 Oct")
+    _h("remind_list", "what are my reminders")
+    _h("remind_list", "do I have any reminders?")
+    _h("remind_cancel_last", "cancel my last reminder")
+    _h("remind_cancel_all", "cancel all my reminders")
+
+
+def test_reminder_without_a_time_declines_instead_of_inventing_one(ctx):
+    """'Remind me what my passport number is' is a question, not a reminder. The
+    fast path must fall through to the model rather than schedule a guess."""
+    for phrase in ("remind me what my passport number is",
+                   "remind me later about that"):
+        hit = fastpaths.match(phrase)
+        assert hit is not None, phrase
+        assert hit[0].handle(ctx, hit[1]) is None, f"{phrase!r} must decline"
+
+
+def _attach_worker(ctx, tmp_path, clock_at):
+    import pathlib
+    import sys
+    from datetime import timezone
+    sys.path.insert(0, str(pathlib.Path(__file__).parent))
+    from test_automation import FakeClock
+    from bee.automation.store import JobStore
+    from bee.automation.worker import JobWorker
+    w = JobWorker(ctx, None, JobStore(tmp_path / "automation"),
+                  clock=FakeClock(clock_at))
+    ctx.automation_worker = w
+    return w
+
+
+def test_spoken_reminder_creates_a_durable_job_end_to_end(ctx, tmp_path):
+    from datetime import datetime, timedelta, timezone
+    tz = timezone(timedelta(hours=5, minutes=30))
+    w = _attach_worker(ctx, tmp_path, datetime(2026, 10, 8, 19, 5, tzinfo=tz))
+
+    res = run_agent(ctx, "remind me to stretch in 20 minutes")
+    assert res.ok and res.model == "deterministic", (res.model, res.output)
+    assert res.route_source == "fastpath", res.route_source
+    assert "Reminder set" in res.output and "stretch" in res.output
+    jobs = [j for j in w.jobs() if j.owner == "reminder"]
+    assert len(jobs) == 1
+    # 19:25 IST, stored canonically in UTC — measured from the worker's clock
+    assert jobs[0].next_run == "2026-10-08T13:55:00+00:00", jobs[0].next_run
+    assert jobs[0].action["type"] == "notify" and jobs[0].action["critical"] is True
+
+
+def test_spoken_reminder_list_and_cancel_share_the_store(ctx, tmp_path):
+    from datetime import datetime, timedelta, timezone
+    tz = timezone(timedelta(hours=5, minutes=30))
+    w = _attach_worker(ctx, tmp_path, datetime(2026, 10, 8, 9, 0, tzinfo=tz))
+    run_agent(ctx, "remind me to water the plants at 18:00")
+    run_agent(ctx, "remind me to stretch in 45 minutes")
+
+    listing = run_agent(ctx, "what are my reminders")
+    assert listing.ok and "when (local)" in listing.output
+    assert len([j for j in w.jobs() if j.owner == "reminder"]) == 2
+
+    gone = run_agent(ctx, "cancel all my reminders")
+    assert gone.ok and "Cancelled" in gone.output
+    assert not [j for j in w.jobs()
+                if j.owner == "reminder" and j.state == "pending"]
+
+
+def test_reminder_fastpath_and_slash_command_agree(ctx, tmp_path):
+    """One implementation: the same words through either surface produce the same
+    instant, so /remind list can show (and cancel) a spoken reminder."""
+    from datetime import datetime, timedelta, timezone
+    from bee import commands as reg
+    tz = timezone(timedelta(hours=5, minutes=30))
+    w = _attach_worker(ctx, tmp_path, datetime(2026, 10, 8, 19, 5, tzinfo=tz))
+    spoken = run_agent(ctx, "remind me to call the bank tomorrow 9am")
+    typed = reg.run(ctx, "/remind call the bank tomorrow 9am")
+    assert spoken.ok and "Reminder set" in typed
+    rows = [j for j in w.jobs() if j.owner == "reminder"]
+    assert len(rows) == 2
+    assert rows[0].next_run == rows[1].next_run == "2026-10-09T03:30:00+00:00"
+    # and the spoken listing sees both
+    listing = reg.run(ctx, "/remind list")
+    assert "call the bank" in listing
+
+
+# ------------------------------------------------ folder listing (A31)
+def test_folder_listing_phrasings_route_to_the_instant_tier():
+    for p in ("list the files in the workspace",
+              "what files are in the workspace",
+              "show me the folders in src",
+              "list the top-level entries of the workspace",
+              "how many directories are in the project"):
+        _h("files_list", p)
+
+
+def test_folder_listing_declines_when_the_question_is_not_about_folders(ctx):
+    """'What is in the oven' must not be answered with a directory listing."""
+    for phrase in ("what is in the oven", "what is in the box"):
+        hit = fastpaths.match(phrase)
+        assert hit is not None and hit[0].name == "files_list", phrase
+        assert hit[0].handle(ctx, hit[1]) is None, f"{phrase!r} must decline"
+
+
+def test_folder_listing_answers_with_real_entries_and_counts(ctx, tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "config.yaml").write_text("a: 1\n", encoding="utf-8")
+    res = run_agent(ctx, "List the top-level entries of the workspace. "
+                         "How many of them are directories? Give the count.")
+    assert res.ok and res.model == "deterministic", (res.model, res.output)
+    assert res.route_source == "fastpath"
+    assert res.tool_calls == 1, "the listing really used the tool"
+    assert "config.yaml" in res.output
+    assert "1 directory" in res.output, res.output
+    assert "1 file" in res.output, res.output
+
+
+def test_folder_listing_reports_a_bad_path_honestly(ctx):
+    hit = fastpaths.match("show me the files in no_such_dir_here")
+    out = hit[0].handle(ctx, hit[1])
+    assert out.tool == "file_list" and out.args["path"] == "no_such_dir_here"
+    assert "Could not list it" in out.reply({"error": "not found: no_such_dir_here"})
+
+
+# ------------------------------------------------ machine specs (A32)
+def test_spec_phrasings_route_to_the_instant_tier():
+    for p in ("what are my specs", "what's my gpu", "what is my hardware",
+              "what are the machine specs", "which cpu is in this laptop",
+              "what gpu do i have", "what is the ram", "what are my computer specs"):
+        _h("specs", p)
+
+
+def test_spec_fastpath_declines_questions_that_are_not_about_this_box():
+    """"What hardware do I need to run llama" is a purchase question; 'what is
+    the spec of the RTX 3050' is a product question. Answering either with this
+    laptop's inventory would be a non-answer."""
+    for p in ("what hardware do i need to run llama",
+              "what is the spec of the rtx 3050",
+              "what is memory in python",
+              "what is a gpu",
+              "how much ram is free"):
+        hit = fastpaths.match(p)
+        assert (hit is None or hit[0].name != "specs"), f"{p!r} -> {hit[0].name if hit else None}"
+
+
+def test_spec_fastpath_answers_from_the_inventory(ctx, monkeypatch):
+    from bee.tools import systemctl
+    monkeypatch.setattr(systemctl, "_HW_CACHE", {
+        "cpu": "12th Gen Intel(R) Core(TM) i5-12450H",
+        "gpus": [{"name": "NVIDIA GeForce RTX 3050 Laptop GPU", "vram_gb": 4}],
+        "ram_gb": 16, "os": "Microsoft Windows 11 Home", "machine": "HP Victus"})
+    res = run_agent(ctx, "what are my specs")
+    assert res.route_source == "fastpath", res.route_source
+    assert "RTX 3050 Laptop GPU (4 GB VRAM)" in res.output, res.output
+    assert "RAM: 16 GB" in res.output, res.output
+    monkeypatch.setattr(systemctl, "_HW_CACHE", None)
+
+
+def test_spec_fastpath_falls_through_when_inventory_is_unavailable(ctx, monkeypatch):
+    """Non-Windows or a blocked CIM query must not produce a fake spec sheet."""
+    from bee.tools import systemctl
+    monkeypatch.setattr(systemctl, "_HW_CACHE", None)
+    monkeypatch.setattr(systemctl, "_ps", lambda expr: "")
+    hit = fastpaths.match("what are my specs")
+    assert hit is not None and hit[0].handle(ctx, hit[1]) is None
+
+
+# ------------------------------------------------ pasted code (A34)
+DSA_SORT = ("Run python: from bee.dsa import SORTS; data=list(range(50,0,-1)); "
+            "print([n for n,f in SORTS.items() if f(data)==sorted(data)]) — list "
+            "which sorts are correct on reversed input.")
+
+
+def test_pasted_code_routes_to_the_instant_tier():
+    _h("run_code", "run python: print(2+2)")
+    _h("run_code", "Run the following Python snippet: import math; print(math.gcd(84, 147))")
+    _h("run_code", DSA_SORT)                       # 190 chars: needs the per-path ceiling
+    for p in ("run python scripts every morning",
+              "run the tests",
+              "execute my plan for friday"):
+        hit = fastpaths.match(p)
+        assert hit is None or hit[0].name != "run_code", p
+
+
+def test_pasted_code_runs_and_reports_real_output(ctx, tmp_path):
+    """The eval asked for exactly this twice and the model answered by WRITING code
+    (with a typo in the module name) or by burning 15 tool calls on variants."""
+    res = run_agent(ctx, "run python: print(sum(range(10)))")
+    assert res.route_source == "fastpath", res.route_source
+    assert res.output.strip() == "45", res.output
+    assert res.tool_calls == 1, res.tool_calls
+
+
+def test_pasted_code_keeps_the_trailing_prose_out_of_the_snippet():
+    """The eval's own sentence: 'Run python: <snippet> — list which sorts are
+    correct on reversed input.' The instruction after the dash is prose; leaving it
+    inside the snippet produced a SyntaxError on the first live run."""
+    hit = fastpaths.match(DSA_SORT)
+    assert hit is not None and hit[0].name == "run_code"
+    code = hit[0].handle(None, hit[1]).args["code"]
+    assert "list which sorts" not in code and "—" not in code, code
+    assert code.startswith("from bee.dsa import SORTS"), code
+
+
+def test_pasted_code_with_a_trailing_request_still_runs(ctx):
+    res = run_agent(ctx, "run python: print('sorted ok') — and tell me what it says")
+    assert res.output.strip() == "sorted ok", res.output
+
+
+def test_a_failing_snippet_is_reported_as_failing(ctx):
+    res = run_agent(ctx, "run python: raise ValueError('boom')")
+    out = (res.output or "").lower()
+    assert "exit" in out or "valueerror" in out, res.output
+    assert "45" not in res.output
+    assert res.ok is True                      # the run itself succeeded: it failed honestly
+
+
+def test_empty_snippet_is_not_a_command(ctx):
+    assert fastpaths.match("run python:") is None
+    assert fastpaths.match("run the following python code:") is None
+
+
+def test_long_prose_still_does_not_match_a_spoken_command_path():
+    """The 120-char ceiling was global before; the per-path `max_len` must not
+    quietly open every path to paragraphs."""
+    long_prose = ("I have been thinking about how we should structure the quarterly review "
+                  "meeting, and I would like your advice on the agenda, the participants, "
+                  "and the follow-up actions we should track.")
+    assert len(long_prose) > 120
+    assert fastpaths.match(long_prose) is None
+
+
+def test_docs_do_not_stale():
+    """README and STATUS both still said '39 handlers' after the catalog grew to
+    45 (reminders, folder listings, machine specs). Nothing in the repo read those
+    numbers, so the drift was invisible — the same docs-claim-a-mechanism class as
+    A22/A25. Historical entries in TECHNICAL_DEBT.md are left alone on purpose:
+    they record the count as of that fix."""
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    n = len(fastpaths.FASTPATHS)
+    claims = {
+        "README.md": r"catalog of (\d+) pure-Python handlers|"
+                     r"catalog \((\d+) pure-Python handlers\)",
+        "docs/STATUS.md": r"Fast-path catalog \((\d+) handlers",
+    }
+    for rel, pattern in claims.items():
+        txt = (root / rel).read_text(encoding="utf-8")
+        found = [int(g) for m in re.finditer(pattern, txt) for g in m.groups() if g]
+        assert found, f"{rel}: no fast-path count found — the wording changed"
+        for got in found:
+            assert got == n, f"{rel} claims {got} handlers, the catalog has {n}"

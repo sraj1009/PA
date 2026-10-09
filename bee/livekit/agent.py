@@ -283,6 +283,10 @@ def run(cfg, room: str | None = None) -> int:
                 await agent_session.say(reply)
 
     async def entrypoint(ctx: JobContext) -> None:
+        # the worker runs in its own process (spawned by livekit's CLI), so it
+        # never passes through bee.cli.main() — configure logging here too
+        from ..cli import setup_logging
+        setup_logging()
         agent = BeeAgent()
         await ctx.connect()
         await AgentSession(start_agent=agent, stt=stt, tts=tts).start(agent=agent, room=ctx.room)

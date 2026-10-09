@@ -198,3 +198,48 @@ def test_skill_create_tool_bumps_version(env):
     # listing carries the version/status
     lst = {s["name"]: s for s in tools["skill_list"](ctx)["skills"]}
     assert lst["via-tool"]["version"] == 2 and lst["via-tool"]["status"] == "candidate"
+
+
+# ------------------------- refusing a hallucinated skill before it hits disk (A30)
+def test_placeholder_skill_is_rejected_and_nothing_is_written(env):
+    """A 3B model called skill_create(name="new_skill_name",
+    content="<full_markdown_content_with_a_description_line_and_sections>") and
+    the tool wrote it. The nightly gate refuses to SHIP such a candidate, but it
+    runs after the write — so the user's capability library kept a junk folder
+    that `/skills` lists forever. Validation belongs at the chokepoint."""
+    from bee.tools.skills import skill_tools
+    tools = {t.name: t.handler for t in skill_tools()}
+    ctx = SimpleNamespace()
+    for bad in ("new_skill_name", "new-skill", "skill_name", "my_skill", "todo"):
+        r = tools["skill_create"](ctx, name=bad, description="d", content=GOOD_SKILL)
+        assert "error" in r and "placeholder" in r["error"], (bad, r)
+    # too short / degenerate names are refused on those grounds instead
+    for bad in ("x", "…", "  "):
+        r = tools["skill_create"](ctx, name=bad, description="d", content=GOOD_SKILL)
+        assert "error" in r, (bad, r)
+    assert list(env["skills"].iterdir()) == [], "a rejected call must create no directory"
+
+
+def test_unfilled_template_content_and_broken_script_are_rejected(env):
+    from bee.tools.skills import skill_tools
+    tools = {t.name: t.handler for t in skill_tools()}
+    ctx = SimpleNamespace()
+    r = tools["skill_create"](ctx, name="some_procedure", description="d",
+                              content="<full_markdown_content_with_a_description>")
+    assert "error" in r and "template" in r["error"], r
+    assert not (env["skills"] / "some_procedure").exists()
+    r2 = tools["skill_create"](ctx, name="another_procedure", description="d",
+                               content=GOOD_SKILL, script="def (")
+    assert "error" in r2 and "compile" in r2["error"], r2
+    assert not (env["skills"] / "another_procedure").exists()
+
+
+def test_real_skill_names_still_save_under_both_spellings(env):
+    from bee.tools.skills import skill_tools
+    tools = {t.name: t.handler for t in skill_tools()}
+    ctx = SimpleNamespace()
+    for good in ("pandas_csv_top_n_revenue", "docker-cleanup", "playwright_pdf.2"):
+        r = tools["skill_create"](ctx, name=good, description="real procedure",
+                                  content=GOOD_SKILL)
+        assert r.get("ok") and r["status"] == "candidate", (good, r)
+        assert (env["skills"] / good / "SKILL.md").exists()

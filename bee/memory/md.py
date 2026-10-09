@@ -21,20 +21,117 @@ def diary_add(message: str, model: str = "", escalated: bool = False) -> Path:
     extra = f" [model={model}{'|cloud' if escalated else ''}]" if model else ""
     with p.open("a", encoding="utf-8") as f:
         f.write(f"\n## {datetime.now():%H:%M:%S}{extra}\n{message}\n")
+    # Queued, not embedded here: the write path must never block on Ollama, and
+    # without this a fact stayed semantically unfindable until the 12 h rebuild.
+    from . import search as _search
+    _search.mark_dirty(p)
     return p
 
 
+def add_facts(path: Path, text: str) -> dict:
+    """Write durable facts (profile.md / longterm.md) without duplicating them.
+
+    Both writers used to do `file.write(old + '\\n- ' + text)` and the model was
+    handed multi-line blobs, so the user's profile accumulated the same section
+    nine times, structural junk as facts ('- ## Personal Preferences and
+    Settings'), the assistant's own task chatter ('- Completed task. Remember to
+    save and review the progress in your profile.'), and three contradicting
+    '- Hardware: …' lines. Those duplicate bullets are what drowned the real
+    answer in the recall measurement — four copies of the software list ranked
+    above the one line that says what the project is."""
+    lines = []
+    for raw in (text or "").splitlines():
+        c = _clean_fact(raw)
+        # '## Personal Preferences and Settings' is structure the model echoed,
+        # not a fact — but '## Time zone: UTC+5.5' still is one.
+        if raw.strip().startswith("#") and ":" not in c:
+            continue
+        if c and not _SELF_TALK.search(c) \
+                and c.lower() not in [x.lower() for x in lines]:
+            lines.append(c)
+    if not lines:
+        return {"added": 0, "duplicates": 0, "updated": 0, "file": str(path)}
+    rows = (path.read_text(encoding="utf-8").splitlines() if path.exists() else
+            [_HEADERS.get(path.stem, f"# {path.stem.replace('_', ' ').title()}")])
+    added = dupes = updated = 0
+    for c in lines:
+        # Compare the FACT, not the line: promotions carry a '[source: model: run
+        # 3]' tag that changes every time, so three promotions of one fact were
+        # three distinct bullets.
+        key = _finger(_fact_core(c))
+        bullet = next((i for i, r in enumerate(rows)
+                       if _finger(_fact_core(_clean_fact(r))) == key), None)
+        if bullet is not None:
+            rows[bullet] = f"- {c}"           # keep the freshest provenance
+            dupes += 1
+            continue
+        subj = _subject(c)
+        clash = None
+        if subj:
+            clash = next((i for i, r in enumerate(rows)
+                          if r.strip().startswith("-")
+                          and _subject(_fact_core(_clean_fact(r))) == subj), None)
+        if clash is not None:                     # same subject, new value: update
+            rows[clash] = f"- {c}"
+            updated += 1
+        else:
+            rows.append(f"- {c}")
+            added += 1
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("\n".join(rows).rstrip() + "\n", encoding="utf-8")
+    tmp.replace(path)
+    from . import search as _search
+    _search.mark_dirty(path)
+    return {"added": added, "duplicates": dupes, "updated": updated, "file": str(path)}
+
+
+_HEADERS = {"profile": "# User profile", "longterm": "# Long-term memory"}
+
+
+def _fact_core(s: str) -> str:
+    """The fact without its provenance tag: 'BEE runs locally [source: model]'
+    and 'BEE runs locally [source: user]' are one fact, stated once."""
+    return re.sub(r"\s*\[source:[^\]]*\]\s*$", "", s or "").strip()
+
+
+def _clean_fact(raw: str) -> str:
+    s = re.sub(r"^(?:[-*•]\s*)+", "", (raw or "").strip())
+    s = re.sub(r"^#+\s*", "", s).strip()
+    return re.sub(r"\s+", " ", s).strip(" .\t")[:300]
+
+
+# The assistant's own workflow commentary, mistaken for facts about the user.
+# 'Completed' and 'Finished' are only rejected when they talk about a task, so
+# the real fact 'Completed the data migration on 3 Oct' still saves.
+_SELF_TALK = re.compile(
+    r"^(?:completed|finished)\b[^\n]{0,60}\b(?:all\s+)?tasks?\b"
+    r"|^(?:next steps?|remember to|task is complete|ready to (?:relax|for next)"
+    r"|i will|i am going to|i just)\b", re.I)
+
+
+def _finger(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
+def _subject(s: str) -> str:
+    """'Hardware: Windows, RTX 3050' -> 'hardware'. '' when not a keyed fact."""
+    m = re.match(r"([A-Za-z][A-Za-z0-9 /().+-]{1,28}?):\s+\S", s or "")
+    return _finger(m.group(1)) if m else ""
+
+
 def chunk_md(p: Path) -> list[tuple[str, str]]:
-    """(source, chunk) pairs — chunked at ~400 chars on blank lines."""
+    """(source, chunk) pairs — chunked at ~400 chars on blank lines.
+
+    Logs are dropped PER PARAGRAPH, before the ~400-char merge: filtering the
+    merged chunk instead lets one transcript block drag a genuine neighbouring
+    note out of memory with it."""
     if not p.exists():
         return []
     txt = p.read_text(encoding="utf-8", errors="ignore")
-    paras = re.split(r"\n\s*\n", txt)
+    paras = [pp.strip() for pp in re.split(r"\n\s*\n", txt)
+             if pp.strip() and not is_transcript(pp)]
     chunks, cur = [], ""
     for para in paras:
-        para = para.strip()
-        if not para:
-            continue
         if len(cur) + len(para) + 2 > 400 and cur:
             chunks.append(cur)
             cur = para
@@ -43,6 +140,21 @@ def chunk_md(p: Path) -> list[tuple[str, str]]:
     if cur:
         chunks.append(cur)
     return [(str(p), c) for c in chunks if c]
+
+
+# A diary block written by the agent loop is a LOG of one exchange:
+# "## 21:41:16 [model=local]\ntask: …\nresult: …". Those blocks are not facts —
+# and because they quote the question, they embed very close to the next time the
+# user asks the same thing. With ~1,300 of them per day they crowded the actual
+# profile facts out of both keyword and vector recall, so the assistant answered
+# "I don't have anything stored" while quoting its own past failures at itself.
+# Genuine diary notes (`## 09:12:03` + "note (fast path): …") have no [model= tag
+# and stay indexed.
+TRANSCRIPT_RE = re.compile(r"^##\s*\d{1,2}:\d{2}(?::\d{2})?\s*\[model=", re.M)
+
+
+def is_transcript(chunk: str) -> bool:
+    return bool(TRANSCRIPT_RE.search(chunk or ""))
 
 
 def all_chunks() -> list[tuple[str, str]]:

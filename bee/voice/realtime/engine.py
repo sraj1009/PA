@@ -32,6 +32,8 @@ exponential backoff; step_frame() itself never raises.
 """
 from __future__ import annotations
 
+
+from ...brain.verifier import _CLAIM_RE as CLAIM_RE
 import logging
 import re
 import threading
@@ -91,6 +93,9 @@ class VoiceEngine:
         self._task_result: dict | None = None
         self._splitter = SentenceSplitter()
         self._tts_started = False
+        self._answer_text = ""     # accumulated answer, for the claim check
+        self._hold = False         # speaking held until the verifier decides
+        self._held: list[str] = []
         # lifecycle
         self._stop_event = threading.Event()
         self._backoff = 0.5
@@ -354,6 +359,9 @@ class VoiceEngine:
         self._task_result = None
         self._splitter = SentenceSplitter()
         self._tts_started = False
+        self._answer_text = ""     # accumulated answer, for the claim check
+        self._hold = False         # speaking held until the verifier decides
+        self._held: list[str] = []
         self._set_state(VoiceState.THINKING)
         self._emit({"type": "task_start", "text": text})
         self._worker = threading.Thread(target=self._task_worker, args=(text,),
@@ -382,6 +390,18 @@ class VoiceEngine:
             }
         finally:
             self._flush_splitter()
+            if self._hold:
+                # The stream asserted an action and verification never cleared
+                # it (no verify event, or it came too late). Speak the kernel's
+                # FINAL answer instead — that one is the verified text, and it is
+                # exactly what the screen shows.
+                self._held.clear()
+                self._hold = False
+                out = ((self._task_result or {}).get("output") or "").strip()
+                if out:
+                    for s in self._split_all(out):
+                        if not self._speak_sentence(s):
+                            break
             self._fully_fed = True
             self._task_done.set()
 
@@ -390,6 +410,8 @@ class VoiceEngine:
         if t == "token":
             self._on_token(ev.get("text", ""))
             return
+        if t == "verify":
+            self._on_verify(ev)
         self._emit(ev)     # tool_start / tool_result / verify / route / ...
 
     def _on_token(self, text: str) -> None:
@@ -397,37 +419,67 @@ class VoiceEngine:
             return
         if self.state not in (VoiceState.THINKING, VoiceState.SPEAKING):
             return                     # interrupted / cancelled — stop audio
+        self._answer_text += text
+        if not self._hold and CLAIM_RE.search(self._answer_text):
+            # Spoken words cannot be unsaid. An answer that asserts a completed
+            # action ("I executed git reset --hard…") is held until the verifier
+            # has checked it against the tool receipts; everything else keeps
+            # streaming with no added latency.
+            self._hold = True
         sentences = self._splitter.add(text)
         for s in sentences:
-            if self.state not in (VoiceState.THINKING, VoiceState.SPEAKING):
+            if self._hold:
+                self._held.append(s)
+                continue
+            self._speak_sentence(s)
+
+    def _speak_sentence(self, s: str) -> bool:
+        if self.state not in (VoiceState.THINKING, VoiceState.SPEAKING):
+            return False
+        try:
+            if self.state == VoiceState.THINKING:
+                self.tts.begin()
+                self._tts_started = True
+                try:
+                    self._set_state(VoiceState.SPEAKING)
+                except Exception:
+                    pass     # barge-in flipped the state first — tts.stop()
+                             # already dropped the queue, feeds below no-op
+            self.tts.feed(s)
+            return True
+        except Exception as e:
+            self._fail(f"TTS streaming failure: {e}")
+            return False
+
+    def _release_held(self) -> None:
+        held, self._held = self._held, []
+        self._hold = False
+        for s in held:
+            if not self._speak_sentence(s):
                 return
-            try:
-                if self.state == VoiceState.THINKING:
-                    self.tts.begin()
-                    self._tts_started = True
-                    try:
-                        self._set_state(VoiceState.SPEAKING)
-                    except Exception:
-                        pass     # barge-in flipped the state first — tts.stop()
-                                 # already dropped the queue, feeds below no-op
-                self.tts.feed(s)
-            except Exception as e:
-                self._fail(f"TTS streaming failure: {e}")
-                return
+
+    def _on_verify(self, ev: dict) -> None:
+        """Resolve a held answer once the verifier has judged it."""
+        if not self._hold:
+            return
+        if ev.get("verdict") == "fail":
+            self._held.clear()          # the claim was rejected — never say it
+            self._hold = False
+            self._answer_text = ""      # the corrected answer may stream freely
+            # A sentence the splitter had not yet broken out is still sitting in
+            # ITS buffer — without resetting that, the rejected text resurfaces in
+            # the next flush and gets spoken anyway (found by test).
+            self._splitter = SentenceSplitter()
+        else:
+            self._release_held()
 
     def _flush_splitter(self) -> None:
         tail = self._splitter.flush()
-        if not tail:
-            return
-        if self.state not in (VoiceState.THINKING, VoiceState.SPEAKING):
-            return
-        try:
-            if self.state == VoiceState.THINKING and not self._tts_started:
-                self.tts.begin()
-                self._tts_started = True
-            self.tts.feed(tail)
-        except Exception:
-            pass
+        if tail:
+            if self._hold:
+                self._held.append(tail)
+            else:
+                self._speak_sentence(tail)
 
     @staticmethod
     def _split_all(text: str) -> list[str]:

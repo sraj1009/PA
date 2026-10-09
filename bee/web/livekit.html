@@ -109,7 +109,22 @@ $("join").onclick = async () => {
   } catch (e) { statusEl.textContent = "✗ " + e.message; $("join").disabled = false; }
 };
 
-$("leave").onclick = async () => { if (room) { try { await room.disconnect(); } catch(e){} } };
+$("leave").onclick = async () => {
+  if (!room) return;
+  let failed = null;
+  try {
+    await room.disconnect();
+  } catch (e) {
+    failed = e;                      // the microphone may still be open
+  }
+  room = null;
+  $("live").classList.remove("on");
+  setBadge("offline", "#ff5566");
+  $("join").disabled = false;
+  statusEl.textContent = failed
+    ? "⚠ left with an error — check the Windows mic indicator: " + failed
+    : "left the room — mic released";
+};
 
 async function connect(url, token) {
   room = new LivekitRoom();
@@ -167,7 +182,11 @@ async function pollState() {
     $("stateLine").innerHTML = line;
     if (s.last_reply) $("transcript").innerHTML =
       `<span style="color:var(--dim)">last reply:</span> ${esc(s.last_reply)}`;
-  } catch(e) {}
+  } catch (e) {
+    // never swallow: a frozen "BEE · speaking" line is a stale-state lie
+    statusEl.textContent = "✗ state poll failed: " + e;
+    $("stateLine").innerHTML = 'BEE · <b>no state</b> (state poll failed)';
+  }
   setTimeout(pollState, 900);
 }
 function esc(t) { const d = document.createElement("i"); d.textContent = t; return d.innerHTML; }

@@ -28,6 +28,8 @@ from __future__ import annotations
 import json
 import sys
 import threading
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -417,3 +419,203 @@ def test_12_kernel_integration_open_chrome(tmp_path):
             .read_text(encoding="utf-8").splitlines()]
     cu = [row for row in rows if row["tool"] == "computer_window"]
     assert cu and cu[0].get("verification") in ("pass", "unverified")
+
+
+# ---------------- emergency-stop wiring (audit 2026-10-08) ------------------
+# STATUS.md listed three stop mechanisms, but the Ctrl+Alt+Q poller was only
+# ever constructed inside tests — nothing in bee/ instantiated it — and
+# computeruse.action_timeout / screenshot_retention_minutes / screenshot_save /
+# hotkey / hotkey_enabled were read by no code path at all.
+
+def test_17_creating_a_session_arms_the_hotkey_and_reads_config(monkeypatch, tmp_path):
+    from bee.computeruse import tools as cu_tools
+    armed: list = []
+    monkeypatch.setattr(cu_tools, "start_emergency_hotkey",
+                        lambda cfg: armed.append(cfg))
+    ctx = make_ctx(tmp_path)
+    s = cu_tools._get_session(ctx)
+    assert armed == [ctx.cfg], "desktop control must arm the LLM-independent stop"
+    cu = ctx.cfg.computeruse
+    assert s.action_timeout == float(cu.action_timeout)
+    assert s.screenshots.max_age == pytest.approx(cu.screenshot_retention_minutes * 60)
+    assert s.screenshots.save_dir is None      # screenshot_save defaults False
+
+
+def test_18_screenshot_save_and_retention_reach_the_store(monkeypatch, tmp_path):
+    from bee.computeruse import tools as cu_tools
+    monkeypatch.setattr(cu_tools, "start_emergency_hotkey", lambda cfg: None)
+    ctx = make_ctx(tmp_path)
+    ctx.cfg.computeruse.screenshot_save = True
+    ctx.cfg.computeruse.screenshot_retention_minutes = 2.0
+    s = cu_tools._get_session(ctx)
+    assert s.screenshots.save_dir is not None
+    assert s.screenshots.max_age == 120.0
+
+
+def test_19_config_action_timeout_is_the_ceiling(monkeypatch):
+    from bee.computeruse import session as cu_session
+    seen: list[float] = []
+
+    def fake_timeout(fn, timeout):
+        seen.append(timeout)
+        fn()
+        return None, False
+
+    monkeypatch.setattr(cu_session, "_with_timeout", fake_timeout)
+    md = MockDesktop()
+    md.add_window("Program Manager", "Progman", (0, 0, 100, 100))
+    s = make_session(md, action_timeout=2.0)
+    out = s.execute(ComputerAction(action="screenshot", timeout=30.0))
+    assert seen == [2.0], f"a model asking for 30s must be capped by config: {seen}"
+    assert out["executed"]
+
+
+def test_20_hotkey_starts_once_is_introspectable_and_stops(monkeypatch):
+    from bee.computeruse import session as cu_session
+    cu_session.stop_emergency_hotkey()
+    monkeypatch.setattr(cu_session, "default_windows_key_state",
+                        lambda: (lambda name: False))
+    cfg = load_config()
+    cfg.computeruse.hotkey_enabled = True
+    a = cu_session.start_emergency_hotkey(cfg)
+    b = cu_session.start_emergency_hotkey(cfg)
+    assert a is not None and a is b, "one poller per process"
+    st = cu_session.hotkey_state()
+    assert st["armed"] and st["combo"] == cfg.computeruse.hotkey
+    assert tuple(a.combo) == tuple(k.strip() for k in cfg.computeruse.hotkey.split("+"))
+    cu_session.stop_emergency_hotkey()
+    assert not cu_session.hotkey_state()["armed"]
+
+
+def test_21_hotkey_disabled_by_config_never_starts(monkeypatch):
+    from bee.computeruse import session as cu_session
+    cu_session.stop_emergency_hotkey()
+    started: list = []
+    monkeypatch.setattr(cu_session, "default_windows_key_state",
+                        lambda: (lambda name: False))
+    monkeypatch.setattr(cu_session.HotkeyStopper, "start",
+                        lambda self: started.append(self))
+    cfg = load_config()
+    cfg.computeruse.hotkey_enabled = False
+    assert cu_session.start_emergency_hotkey(cfg) is None
+    assert started == []
+
+
+def test_22_unavailable_key_backend_is_reported_not_silent(monkeypatch, caplog):
+    """A deaf poller is the one failure an emergency stop must never hide."""
+    import logging
+    from bee.computeruse import session as cu_session
+    cu_session.stop_emergency_hotkey()
+    monkeypatch.setattr(cu_session, "default_windows_key_state", lambda: None)
+    with caplog.at_level(logging.WARNING, logger="bee.computeruse"):
+        assert cu_session.start_emergency_hotkey(load_config()) is None
+    assert "NOT armed" in caplog.text
+
+
+def test_23_unknown_hotkey_key_is_refused_with_a_reason(monkeypatch, caplog):
+    import logging
+    from bee.computeruse import session as cu_session
+    cu_session.stop_emergency_hotkey()
+    monkeypatch.setattr(cu_session, "default_windows_key_state",
+                        lambda: (lambda name: False))
+    cfg = load_config()
+    cfg.computeruse.hotkey = "ctrl+alt+f13"
+    with caplog.at_level(logging.WARNING, logger="bee.computeruse"):
+        assert cu_session.start_emergency_hotkey(cfg) is None
+    assert "unsupported key" in caplog.text
+    assert not cu_session.hotkey_state()["armed"]
+
+
+def test_24_kernel_releases_task_scoped_sessions(tmp_path, monkeypatch):
+    """A long-lived Context must not accumulate one session (and one provenance
+    + budget state) per task."""
+    from bee.agent.context import Context
+    from bee.kernel import AgentKernel, TaskState
+    from bee.computeruse import session as cu_session
+    from test_kernel_integration import ScriptedClient, tc
+    monkeypatch.setattr(cu_session, "default_windows_key_state",
+                        lambda: (lambda name: False))
+
+    cfg = load_config()
+    cfg.cloud.enabled = False
+    cfg.workspace = tmp_path
+    client = ScriptedClient([
+        tc("c1", "computer_window",
+           {"action": "open_application", "target": "chrome",
+            "expected": {"window_exists": "Chrome"}}),
+        "Chrome is open.",
+    ])
+    ctx = Context(cfg, workspace=tmp_path, client=client, guard_on=True,
+                  guard_mode="unattended", episodes_on=False, rag_on=False,
+                  cancel_event=threading.Event())
+    kernel = AgentKernel(ctx, approver=lambda *a: True,
+                         sessions_dir=tmp_path / "sessions",
+                         receipts_path=tmp_path / "receipts.jsonl")
+    ctx.kernel = kernel
+    md = MockDesktop()
+    md.add_window("Program Manager", "Progman", (0, 0, 1920, 1080))
+    md.map_app("chrome", "Google Chrome")
+    ctx.computeruse_desktop = md
+
+    before = cu_session.active_sessions()
+    r = kernel.run("Open the Chrome browser window and confirm it is visible.",
+                   session_id="cu-prune")
+    assert r.ok and r.task.state == TaskState.COMPLETED
+    assert getattr(ctx, "cu_sessions", {}) == {}, "task-scoped session must be dropped"
+    assert cu_session.active_sessions() == before, "stopped sessions must leave the registry"
+
+
+# ------------------------------------- foreground window on the real backend --
+class _FakeWin32:
+    def __init__(self, handle=0, title="x", cls="c", rect=(0, 0, 10, 10), alive=True):
+        self._h, self._t, self._c, self._r, self._alive = handle, title, cls, rect, alive
+
+    def GetForegroundWindow(self):
+        return self._h
+
+    def IsWindow(self, h):
+        return bool(h) and self._alive
+
+    def GetWindowText(self, h):
+        return self._t
+
+    def GetClassName(self, h):
+        return self._c
+
+    def GetWindowRect(self, h):
+        return self._r
+
+
+def test_active_window_resolves_the_handle_directly(monkeypatch):
+    """The old version searched list_windows() (which drops untitled windows),
+    so a real foreground window with an empty title reported active=None and the
+    active_window verification claimed failure where there was none."""
+    import sys
+    from bee.computeruse import desktop as D
+    monkeypatch.setitem(sys.modules, "win32gui", _FakeWin32(handle=1234, title=""))
+    w = D.WindowsDesktop().active_window()
+    assert w is not None, "an untitled foreground window must still resolve"
+    assert w.active and w.title == ""
+
+
+def test_active_window_is_none_only_when_truly_unknown(monkeypatch):
+    import sys
+    from bee.computeruse import desktop as D
+    monkeypatch.setitem(sys.modules, "win32gui", _FakeWin32(handle=0))
+    assert D.WindowsDesktop().active_window() is None, \
+        "a non-interactive session must report unknown, not guess a window"
+
+
+def test_active_window_falls_back_when_the_api_raises(monkeypatch):
+    import sys
+    from bee.computeruse import WindowInfo, desktop as D
+
+    class Boom:
+        def GetForegroundWindow(self):
+            raise RuntimeError("no win32 here")
+
+    monkeypatch.setitem(sys.modules, "win32gui", Boom())
+    d = D.WindowsDesktop()
+    d.list_windows = lambda: [WindowInfo(title="Notepad", cls="N", x=0, y=0, w=9, h=9,
+                                          active=True)]
+    assert d.active_window().title == "Notepad"

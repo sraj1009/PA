@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
 import subprocess
 import sys
 
@@ -365,7 +367,12 @@ def _repl(cfg):
                     if not rules:
                         p.info("  (no proactive rules — ask me to add one; each requires your authorization)")
                     for r in rules:
-                        p.info(f"  rule {r.id} ({r.kind}) {'on' if r.enabled else 'off'}: {r.description or r.action.get('message') or r.action.get('task')}")
+                        # who authored it and what it does: a rule the model
+                        # created is not the same authorization as one the user
+                        # typed, and an `agent_task` rule runs unattended later
+                        p.info(f"  rule {r.id} ({r.kind}) {'on' if r.enabled else 'off'}"
+                               f" [{r.action.get('type') or '?'} by {r.created_by}]:"
+                               f" {r.description or r.action.get('message') or r.action.get('task')}")
                     p.info("  /auto read = mark notifications read · /jobs manages jobs")
                 elif arg == "read":
                     p.info(f"  marked {w.mark_notifications_read()} notification(s) read")
@@ -510,9 +517,11 @@ def _repl(cfg):
             if result.ok and cfg.voice.enabled and cfg.voice.speak:
                 try:
                     from .voice import speak as _speak
-                    _speak.speak(result.output, cfg)
-                except Exception:
-                    pass
+                    if not _speak.speak(result.output, cfg):
+                        log.info("TTS produced no audio — backend missing or "
+                                 "playback failed (see /tts voices)")
+                except Exception as e:
+                    log.warning("TTS raised: %s: %s", type(e).__name__, e)
             meta = f"model={result.model} iters={result.iterations} tools={result.tool_calls}"
             if result.escalated:
                 meta = "(escalated to cloud) " + meta
@@ -591,6 +600,16 @@ def _web(cfg, host: str, port: int):
 
 
 # ------------------------------------------------------------------ realtime
+# Engine state -> the face vocabulary the web /face page animates on. The
+# LiveKit agent already pushes these; the LOCAL realtime engine did not, so the
+# face sat on "idle" during /voice sessions (a test-pinned gap, not a guess).
+FACE_STATE = {
+    "IDLE": "idle", "LISTENING": "listening", "PROCESSING": "listening",
+    "THINKING": "thinking", "SPEAKING": "speaking",
+    "INTERRUPTED": "listening", "ERROR": "error",
+}
+
+
 def _realtime(cfg, livekit: bool = False, always_on: bool = False) -> int:
     """Phase 4: true realtime conversational voice.
 
@@ -623,6 +642,8 @@ def _realtime(cfg, livekit: bool = False, always_on: bool = False) -> int:
         max_utterance_ms=vc.rt_max_utterance_ms,
         partial_stt=vc.rt_partial_stt,
         partial_every_ms=vc.rt_partial_every_ms,
+        partial_min_growth=vc.rt_partial_min_growth,
+        barge_in=vc.rt_barge_in,
         conversation=vc.rt_conversation,
         wake_ack=vc.rt_wake_ack,
         stt_timeout=vc.rt_stt_timeout,
@@ -639,16 +660,35 @@ def _realtime(cfg, livekit: bool = False, always_on: bool = False) -> int:
         transport = MicTransport(sample_rate=vc.sample_rate)
         sink_note = "speakers"
 
+    try:
+        from .livekit import state as face_bridge
+    except Exception:
+        face_bridge = None
+    shown = {"state": "idle"}
+
+    def _face(to, **kw):
+        """Push the face state (best-effort: no web UI must never break voice)."""
+        if face_bridge is None:
+            return
+        shown["state"] = to
+        try:
+            face_bridge.set_state(to, engine=engine, **kw)
+        except Exception:
+            pass
+
     def on_event(ev):
         t = ev.get("type")
         if t == "state":
             print(f"  [voice] {ev.get('from')} -> {ev.get('to')}")
+            _face(FACE_STATE.get(str(ev.get("to")), "idle"))
         elif t == "partial":
             print(f"  · {ev.get('text')}")
         elif t == "transcript":
             print(f"  you> {ev.get('text')}")
+            _face(shown["state"], last_user=str(ev.get("text") or ""))
         elif t == "reply":
             print(f"  BEE> (spoken) {str(ev.get('text'))[:200]}")
+            _face("speaking", last_reply=str(ev.get("text") or ""))
         elif t == "barge_in":
             print("  [voice] barge-in: TTS stopped, task cancelled")
         elif t == "wake":
@@ -669,7 +709,8 @@ def _realtime(cfg, livekit: bool = False, always_on: bool = False) -> int:
     print(f"\n  REALTIME VOICE — engine {engine} · STT faster-whisper {vc.model}"
           f" · TTS streaming -> {sink_note}")
     print(f"  wake word: {eng_cfg.wake_word!r} · always-on: {always_on}"
-          f" · barge-in: ON · Ctrl-C to stop\n")
+          f" · barge-in: {'ON' if eng_cfg.barge_in else 'OFF (rt_barge_in: false)'}"
+          f" · Ctrl-C to stop\n")
     try:
         eng.run()
     finally:
@@ -800,6 +841,41 @@ def _full(cfg, host: str, port: int, room: "str | None"):
             print(f"  [full] {label} stopped")
 
 
+# Third-party loggers that would otherwise drown BEE's own diagnostics.
+log = logging.getLogger("bee.cli")
+_QUIET_LOGGERS = ("httpx", "httpcore", "h11", "urllib3", "openai", "litellm",
+                  "LiteLLM",
+                  "lancedb", "LanceDB", "numba", "faster_whisper", "livekit",
+                  "watchfiles", "uvicorn.access")
+
+
+def setup_logging(level: str = "") -> None:
+    """Install the app-wide log handler, once, on every BEE surface.
+
+    Before this existed no handler was attached anywhere: root fell back to
+    Python's last-resort handler (WARNING+ only), so the INFO/DEBUG lines that
+    explain a TTS backend fallback, a refused router artifact or why a fast
+    path declined were discarded on the floor. Output goes to stderr so the
+    REPL/web answer stream on stdout stays clean.
+
+    Level precedence: explicit argument > BEE_LOG_LEVEL > INFO.
+    """
+    wanted = (level or os.environ.get("BEE_LOG_LEVEL", "INFO")).strip().upper()
+    lvl = getattr(logging, wanted, logging.INFO)
+    root = logging.getLogger()
+    if getattr(root, "_bee_configured", False):
+        root.setLevel(lvl)
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(name)s: %(message)s", "%H:%M:%S"))
+    root.addHandler(handler)
+    root.setLevel(lvl)
+    for noisy in _QUIET_LOGGERS:
+        logging.getLogger(noisy).setLevel(max(logging.WARNING, lvl))
+    root._bee_configured = True
+
+
 def main(argv=None):
     # Windows consoles default to cp1252 — force UTF-8 so symbols never crash the CLI
     for _s in (sys.stdout, sys.stderr):
@@ -818,7 +894,11 @@ def main(argv=None):
     ap.add_argument("--room", default=None, help="LiveKit room name (livekit mode)")
     ap.add_argument("--always-on", action="store_true",
                     help="realtime: skip the wake word (always listening)")
+    ap.add_argument("--log-level", default="", metavar="LEVEL",
+                    help="diagnostic stream level (DEBUG|INFO|WARNING); "
+                         "default INFO, or BEE_LOG_LEVEL")
     args = ap.parse_args(argv)
+    setup_logging(args.log_level)
 
     if args.mode == "setup":
         _setup()

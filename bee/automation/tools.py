@@ -105,7 +105,15 @@ def automation_job(ctx, op: str = "list", **kw):
                                  action=action,
                                  description=kw.get("description") or "",
                                  max_per_hour=int(kw.get("max_per_hour") or 6),
-                                 created_by="user")     # explicit authorization
+                                 # Provenance is a fact, not a courtesy: the
+                                 # field's documented meaning is "explicit user
+                                 # authorization", and a rule the MODEL composed
+                                 # does not qualify even when the user approved
+                                 # the tool call. The approval lives in the
+                                 # permission receipt; stamping "user" here made
+                                 # a model-authored deferred action look
+                                 # human-authorized in the record and in /auto.
+                                 created_by="model")
             w.policy.add_rule(rule)
             w.store.save_rules(w.policy.rules)
             return {"created": rule.id, "rule": rule.to_dict()}

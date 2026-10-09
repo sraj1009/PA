@@ -95,6 +95,89 @@ def _normalize_expr(c: str) -> str:
     return re.sub(r"\s+", " ", c).strip()
 
 
+# Words that frame a computation without being part of it. Stripped only AFTER
+# expression normalization, and only when a compute intent verb is present, so
+# any leftover prose makes the residue invalid and the task falls back to the
+# model — the safe direction is always "don't answer".
+# Deliberately excludes every name eval_safe allows (sum/min/max/len/sqrt/...)
+# so a real expression is never gutted by the strip.
+_MATH_INTENT = re.compile(
+    r"\b(?:calculat\w*|compute|evaluat\w*|solve|what(?:'s|\s+(?:is|was|are))|"
+    r"how\s+much\s+(?:is|are)|result\s+of|find\s+(?:the\s+)?(?:value|result|answer)|"
+    r"work\s+out|evaluate)\b", re.I)
+_MATH_NOISE = re.compile(
+    r"\b(?:use|using|the|a|an|tool|tools|function|functions|calculator|calc|to|"
+    r"given|below|following|expression|equation|then|than|give|tell|me|my|us|"
+    r"report|returns?|provide|show|display|output|final|last|correct|right|"
+    r"number|value|result|answer|equation|is|are|equal|equals|what|which|"
+    r"and|or|of|it|that|this|these|those|with|without|for|as|in|on|at|by|"
+    r"please|just|only|now|today|one|single|short|brief|line|step|steps|"
+    r"working|solution|question|task)\b[\s:;,]*",
+    re.I)
+_HAS_NUM = re.compile(r"\d")
+
+
+def _residue_is_math(c: str) -> bool:
+    """True when the residue is arithmetic whose only names are math functions.
+
+    The routing guard `_EXPR` deliberately allows digits/operators only (so prose
+    can never match), which is too strict for `sqrt(144)`-style expressions that
+    eval_safe DOES support. So the residue is validated structurally instead:
+    parse it, reject anything but math names/calls/operators, and let eval_safe
+    remain the execution guard.
+    """
+    import ast
+    try:
+        from ..tools.base import _ALLOWED_FUNCS
+    except Exception:
+        return False
+    allowed = set(_ALLOWED_FUNCS)
+    try:
+        tree = ast.parse(c, mode="eval")
+    except (SyntaxError, ValueError):
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Attribute, ast.Lambda, ast.Starred, ast.NamedExpr,
+                             ast.SetComp, ast.ListComp, ast.DictComp, ast.GeneratorExp)):
+            return False
+        if isinstance(node, ast.Constant) and not isinstance(node.value, (int, float, complex, bool)):
+            return False
+        if isinstance(node, ast.Name) and node.id not in allowed:
+            return False
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name) or node.func.id not in allowed:
+                return False
+            if node.keywords:
+                return False
+        if isinstance(node, ast.JoinedStr) or isinstance(node, ast.FormattedValue):
+            return False
+    return True
+
+
+def _embedded_expr(t: str) -> str | None:
+    """Extract the arithmetic from a prose-wrapped ask: 'Use the calculator tool
+    to compute 12 * 14 + 8 and give the final number.'
+
+    A small model answers these inconsistently (it said 'none of the provided
+    functions are for a calculator' and then computed the number itself), yet the
+    value is fully determined — so it belongs to the deterministic tier.
+    Conservative by construction: requires an intent verb, and the residue after
+    stripping framing words must be pure math, else None (the model keeps the
+    task). Any leftover prose — 'and email it to bob' — fails the residue test."""
+    if not _MATH_INTENT.search(t):
+        return None
+    residue = _MATH_NOISE.sub(" ", t)
+    residue = _MATH_INTENT.sub(" ", residue)          # the framing verb is noise too
+    residue = re.sub(r"[\$\t]", " ", residue)
+    residue = re.sub(r"\s+", " ", residue).strip(" .,;:!?-\t")
+    if not residue or len(residue) > 120:
+        return None
+    c = _normalize_expr(residue)
+    if not (c and _HAS_OP.search(c) and len(_HAS_NUM.findall(c)) >= 2):
+        return None
+    return c if _residue_is_math(c) else None
+
+
 def math_expr(task: str) -> str | None:
     """Extract a safe arithmetic expression from pure or lightly-phrased math asks.
 
@@ -117,7 +200,7 @@ def math_expr(task: str) -> str | None:
         c = _normalize_expr(cand)
         if c and _EXPR.match(c) and _HAS_OP.search(c):
             return c
-    return None
+    return _embedded_expr(t)
 
 def strip_cloud_prefix(task: str) -> str:
     return CLOUD_PREFIX.sub("", task).strip()

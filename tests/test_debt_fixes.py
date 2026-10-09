@@ -132,3 +132,61 @@ def test_n4_stale_cancel_event_does_not_poison_new_task(tmp_path):
     assert r is not None and not r.cancelled
     # and the event is clean for whatever comes next
     assert not ctx.cancel_event.is_set()
+
+
+def test_repeated_denials_lock_tools_instead_of_burning_the_budget(tmp_path):
+    """Loop breaker gap: the exact-args breakers never match when a small model
+    re-requests the same denied tool with slightly different arguments (eval: 6
+    automation_job asks, 12 of 25 iterations wasted). Per-tool denial counting
+    must short-circuit and then lock, so the remaining budget goes to an answer."""
+    import json
+    from test_kernel_integration import make_kernel, tc
+
+    script = [tc(f"c{i}", "automation_job",
+                 {"op": "create", "note": f"attempt {i}"}) for i in range(6)]
+    script.append("I could not create that job without your approval.")
+    k, client, _ctx = make_kernel(tmp_path, script,
+                                  approver=lambda *a: False)
+    r = k.run("Create a daily automation job for me", session_id="lock1")
+    assert r.ok
+    rows = [json.loads(l) for l in (tmp_path / "receipts.jsonl").read_text(
+        encoding="utf-8").splitlines()]
+    aj = [x for x in rows if x["tool"] == "automation_job"]
+    assert len(aj) >= 3, f"expected the model to retry and be short-circuited: {aj}"
+    reasons = " | ".join(str(x.get("result", "")) for x in aj)
+    assert "stop calling it" in reasons or "no more tools" in reasons, \
+        f"the denial breaker never fired: {reasons[:300]}"
+    # no attempt may have executed
+    assert all("blocked" in str(x.get("result", "")) for x in aj)
+
+
+def test_repeated_tool_failures_lock_without_punishing_good_work(tmp_path):
+    """Retrying one failing call with reworded arguments used to burn the whole
+    budget (the exact-args breaker only). Failures are now counted per tool."""
+    from test_kernel_integration import make_kernel, tc
+    script = [tc(f"c{i}", "file_read", {"path": f"missing{i}.txt"}) for i in range(5)]
+    script.append("Those files do not exist.")
+    k, _client, _ctx = make_kernel(tmp_path, script)
+    results: list = []
+    k.run("Read missing0..4 and tell me what is in them", session_id="faillock",
+          on_event=lambda e: results.append(e) if e.get("type") == "tool_result" else None)
+    real = [e for e in results if "not found" in str(e.get("preview"))]
+    locked = [e for e in results if "has failed" in str(e.get("preview"))]
+    assert len(real) == 3, f"expected exactly 3 executions before the lock: {len(real)}"
+    assert locked, f"the failure breaker never fired: {[e.get('preview') for e in results]}"
+    assert len(real) + len(locked) == len(results)
+
+
+def test_successive_different_tool_calls_are_not_locked(tmp_path):
+    from test_kernel_integration import make_kernel, tc
+    (tmp_path / "a.txt").write_text("A")
+    (tmp_path / "b.txt").write_text("B")
+    (tmp_path / "c.txt").write_text("C")
+    script = [tc("c1", "file_read", {"path": "a.txt"}),
+              tc("c2", "file_read", {"path": "b.txt"}),
+              tc("c3", "file_read", {"path": "c.txt"}),
+              "Read all three."]
+    k, client, _ctx = make_kernel(tmp_path, script)
+    r = k.run("Read a.txt, b.txt and c.txt and tell me their contents", session_id="okflow")
+    assert r.ok
+    assert len(client.calls) == 4, "legitimate multi-step tool use must not be locked"

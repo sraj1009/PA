@@ -211,8 +211,8 @@ Changes made during this audit (all covered by tests):
 | Provider failures | **GREEN** | `llm` ok=False rows with `error_kind`; `provider_failures` aggregate in `stats()` |
 | Dashboards | **GREEN** | `monitor/health.py` (endpoint), `monitor/dashboard.py` (HTML), Go native telemetry daemon (127.0.0.1:8790) |
 | No sensitive content in telemetry | **GREEN** | Single chokepoint redaction (`_scrub`) — structurally, no new call site can leak; kernel telemetry receives only ids/enums/durations |
-| Retention | **YELLOW** | `metrics.jsonl` and episode/diary files have **no rotation or size caps (M13)** — long-running installs grow unbounded; the Go daemon's metrics history is capped, the JSONL streams are not |
-| Alerting | **RED** | There is no alerting. Failures are observable in files/endpoints but nothing pings the user proactively beyond in-app notifications (jobs notify in the store; there is no OS-level notification path) |
+| Retention | **GREEN** | M13 closed: every JSONL stream is size-capped with rotation at its write chokepoint (`monitor/rotate.py`, nightly `log_rotation` job) — metrics 5 MB/2 backups, audit 2 MB/2, receipts 2 MB/2, episodes 5 MB/1, executions 2 MB/2; notifications capped at 500. See §"Sensitive data retention" |
+| Alerting | **GREEN (single-user, local)** | `monitor/alerts.py`: threshold scan (provider failures, verify failures, permission denials, metrics size) with per-key cooldowns, plus OS toasts via `os_notify` (msg.exe → PowerShell balloon → `notify-send`/osascript). Job failures/misses, rule-authorized proactive events and **reminders** (`critical` notify jobs, A24b) all reach the desktop. Verified live: a due reminder produced exactly one toast with `os_notify` returning True |
 
 ## 8. Testing
 
@@ -406,9 +406,11 @@ personal use today:
    (checklist #12): tag untrusted spans, strip imperative patterns before
    prompt assembly, and require ASK capabilities for any action whose
    triggering context contained untrusted content.
-6. **OS-level notifications + alerting** (checklist #16): Windows toast on
-   job failure/proactive events; threshold alerts on `stats()` (provider
-   failure rate, verify-fail rate).
+6. ~~**OS-level notifications + alerting** (checklist #16)~~ — **DONE**:
+   `monitor/alerts.py` toasts on job failure/miss, rule-authorized proactive
+   events and `critical` reminders (A24b), and scans `stats()` thresholds
+   (provider-failure rate, verify-fail rate, permission denials, metrics size)
+   with per-key cooldowns. Registered as the nightly `alert_scan` job.
 7. **J2 skill marketplace discipline** — versioning + eval gate before a
    teach-back skill ships (golden distillation already exists).
 8. **M14 config precedence doc + single-resolution test matrix** (finishes

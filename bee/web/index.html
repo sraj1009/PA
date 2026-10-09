@@ -53,6 +53,7 @@
     <textarea id="task" placeholder="Give BEE a task…  (Enter = send, Shift+Enter = newline)"></textarea>
     <button class="rec" id="mic" title="Record voice command">🎙</button>
     <button class="primary" id="send">Send</button>
+    <button class="rec" id="stop" title="Stop the running task (Esc)" disabled>⏹ Stop</button>
   </div>
   <div class="hint">Voice: click 🎙, speak, stop — BEE transcribes locally (faster-whisper) and replies. "cloud:" prefix forces the cloud model.</div>
 </main>
@@ -120,6 +121,15 @@ loadEngine();
 
 async function send(task) {
   if (!task.trim()) return;
+  setBusy(true);
+  try {
+  await sendInner(task);
+  } finally {
+    setBusy(false);          // a thrown fetch must not leave Stop stuck armed
+  }
+}
+
+async function sendInner(task) {
   add('user', task);
   const d = add('bee', 'thinking…');
   d.classList.add('busy');
@@ -155,6 +165,22 @@ document.getElementById('send').onclick = () => { send(taskEl.value); taskEl.val
 taskEl.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(taskEl.value); taskEl.value=''; }
 });
+
+// ---- mid-task stop: the route exists server-side, this is the user's handle
+const stopBtn = document.getElementById('stop');
+let busy = false;
+function setBusy(v) { busy = v; stopBtn.disabled = !v; }
+async function stopTask() {
+  if (!busy) return;
+  try {
+    const r = await authedFetch('/cancel', {method: 'POST'});
+    const j = await r.json();
+    add('tool', j.running ? '⏹ stop sent — cancelling the active task'
+                          : '⏹ stop sent (no task was running)');
+  } catch (e) { add('err', '✗ stop failed: ' + e); }
+}
+stopBtn.onclick = stopTask;
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && busy) stopTask(); });
 
 // voice recording
 let mediaRec = null, chunks = [];

@@ -23,13 +23,28 @@ import threading
 
 from ..tools.base import T
 from .action import CLIPBOARD_VERBS, INPUT_VERBS, OBSERVE_VERBS, WINDOW_VERBS
-from .session import (ComputerUseSession, DEFAULT_MAX_ACTIONS,
-                      computeruse_emergency_stop)
+from .privacy import ScreenshotStore
+from .session import (ComputerUseSession, DEFAULT_ACTION_TIMEOUT,
+                      DEFAULT_MAX_ACTIONS, computeruse_emergency_stop,
+                      start_emergency_hotkey)
 
 _EXPECTED_DESC = ("Expected result to verify after the action: one of "
                   "{\"window_exists\": \"<title>\"}, {\"active_window\": \"<title>\"}, "
                   "{\"screen_changed\": true}, {\"clipboard_changed\": true}, "
                   "{\"clipboard_contains\": \"<value>\"}. Omit to leave unverified.")
+
+
+def _screenshot_store(cu_cfg) -> ScreenshotStore:
+    """Build the bounded screenshot store from computeruse.screenshot_* —
+    keys that existed in config but were never read by any code path."""
+    from .. import paths
+    save = bool(getattr(cu_cfg, "screenshot_save", False))
+    retention = getattr(cu_cfg, "screenshot_retention_minutes", None)
+    # 0 is a meaningful setting here (keep nothing), so no `or` fallback.
+    max_age = 5.0 if retention is None else max(0.0, float(retention))
+    return ScreenshotStore(
+        max_age_minutes=max_age,
+        save_dir=(paths.WORKSPACE / "temp" / "computeruse") if save else None)
 
 
 def _get_session(ctx) -> ComputerUseSession:
@@ -47,9 +62,26 @@ def _get_session(ctx) -> ComputerUseSession:
         if desktop is None:
             desktop = make_desktop(cfg)      # raises DesktopError if unsupported
             ctx.computeruse_desktop = desktop
-        max_actions = getattr(cu_cfg, "max_actions", DEFAULT_MAX_ACTIONS) or DEFAULT_MAX_ACTIONS
+        # max_actions 0 is a real kill-switch (no actions allowed), so only a
+        # missing value falls back; action_timeout 0 would abort every action,
+        # so a non-positive timeout falls back to the default.
+        raw_max = getattr(cu_cfg, "max_actions", None)
+        max_actions = DEFAULT_MAX_ACTIONS if raw_max is None else max(0, int(raw_max))
+        raw_to = getattr(cu_cfg, "action_timeout", None)
+        try:
+            action_timeout = float(raw_to)   # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            action_timeout = 0.0
+        if action_timeout <= 0:
+            action_timeout = DEFAULT_ACTION_TIMEOUT
+        # The stop combo must not depend on the model doing anything, so arm it
+        # the moment desktop control becomes possible (idempotent, opt-out via
+        # computeruse.hotkey_enabled).
+        start_emergency_hotkey(cfg)
         store[tid] = ComputerUseSession(
-            desktop, max_actions=int(max_actions),
+            desktop, max_actions=max_actions,
+            action_timeout=action_timeout,
+            screenshots=_screenshot_store(cu_cfg),
             cancel_event=getattr(ctx, "cancel_event", None), task_id=tid)
     return store[tid]
 

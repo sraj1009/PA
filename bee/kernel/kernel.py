@@ -21,6 +21,7 @@ event, which run_agent honors between iterations and before each tool call.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -46,6 +47,98 @@ def _emit(bus: EventBus, kind: AgentEventKind, session_id: str, task_id: str, **
     bus.emit(AgentEvent(kind=kind, session_id=session_id, task_id=task_id, data=data))
 
 
+def _src_label(src) -> str:
+    """Friendly name for where a memory hit came from.
+
+    The hybrid index stores absolute paths, so the raw label was
+    `[from C:\\Users\\…\\memory\\profile.md]` — the user's folder layout read back
+    to them (and during evals, a temp directory path)."""
+    s = str(src or "").lower().replace("\\", "/")
+    for key, label in (("profile", "profile memory"), ("longterm", "long-term memory"),
+                       ("system.md", "system memory"), ("diary", "my diary"),
+                       ("lessons", "lessons learned"), ("store.json", "structured memory")):
+        if key in s:
+            return label
+    return (s.rsplit("/", 1)[-1] or "memory")
+
+
+_QUERY_STOP = {
+    "the", "and", "for", "with", "that", "this", "these", "those", "then", "than",
+    "you", "your", "yours", "are", "was", "were", "have", "has", "had", "not", "but",
+    "about", "what", "when", "where", "which", "who", "whom", "from", "into", "onto",
+    "tell", "know", "remember", "recall", "show", "give", "please", "me", "my", "mine",
+    "our", "us", "him", "her", "his", "them", "they", "their", "any", "some", "more",
+    "most", "much", "many", "did", "does", "doing", "can", "could", "should", "would",
+    "will", "all", "everything", "anything", "something", "nothing", "each", "other",
+}
+
+
+def _qwords(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]{3,}", (text or "").lower())
+            if w not in _QUERY_STOP}
+
+
+def _best_lines(text: str, query: str, limit: int = 2, fallback: bool = True) -> list[str]:
+    """The bullets inside a memory chunk that actually answer this query.
+
+    A chunk is ~400 chars of merged bullets; quoting the whole block meant the
+    user got unrelated bullets alongside the one they asked for, and the line
+    that mattered was cut off mid-word by the character cap. With fallback off a
+    hit that matches nothing contributes nothing, so a near-duplicate chunk
+    cannot refill the answer with noise. Stopwords are dropped because 'and'
+    scored the diary noise higher than the spec line the user asked about."""
+    words = _qwords(query)
+    cand = [ln.strip().strip("-*•\t ").strip() for ln in (text or "").splitlines()]
+    cand = [ln for ln in cand if ln and not ln.startswith("#")]
+    if not words or not cand:
+        return cand[:limit]
+
+    def _score(ln):
+        # Compact compare, not token set: the memory says 'Time zone' and the
+        # user asks about 'timezone'; it says 'GPU' and they ask about 'gpu'.
+        return sum(1 for w in words if w in re.sub(r"[^a-z0-9]+", "", ln.lower()))
+
+    ranked = [ln for _, ln in sorted(enumerate(cand), key=lambda p: (-_score(p[1]), p[0]))
+              if _score(ln) > 0]
+    return (ranked or cand)[:limit] if fallback else ranked[:limit]
+
+
+def _hw_conflict(stored: list[str], hw: dict) -> str:
+    """Warn when a stored spec contradicts the machine standing in front of us.
+
+    profile.md says 'NVIDIA RTX 3050 8 GB'; the CIM query reports 4 GB. Quoting
+    the note as fact while the hardware disagrees is the same class of defect the
+    verifier chases for action claims — a confident answer nothing backs up."""
+    if not hw:
+        return ""
+    vrams = {int(g.get("vram_gb") or 0) for g in hw.get("gpus") or [] if g.get("vram_gb")}
+    if not vrams:
+        return ""
+    families = {m for name in (g.get("name", "") for g in hw.get("gpus") or [])
+                for m in re.findall(r"\d{3,}", name)}
+    for ln in stored:
+        nums = [int(n) for n in re.findall(r"(\d+)\s*GB", ln, re.I)]
+        if not nums or not any(f and f in ln for f in families):
+            continue
+        if not set(nums) & vrams:
+            return (f"Heads up: what I have stored says {nums[0]} GB, but this machine "
+                    f"currently reports {max(vrams)} GB — the note may be out of date.")
+    return ""
+
+
+def _hardware_note(req) -> tuple[str, dict]:
+    """Live inventory for a recall about the box itself ('' / {} if not one)."""
+    from .memory_commands import is_hardware_query
+    if not is_hardware_query(f"{req.query} {req.text}"):
+        return "", {}
+    try:
+        from ..tools.systemctl import format_hardware, get_hardware
+        h = get_hardware()
+    except Exception:
+        return "", {}
+    return (format_hardware(h), h) if h else ("", {})
+
+
 class AgentKernel:
     def __init__(self, ctx, approver=None, sessions_dir=None, receipts_path=None,
                  policy: RetryPolicy | None = None, bus: ToolBus | None = None,
@@ -56,9 +149,13 @@ class AgentKernel:
         self.sessions_dir = Path(sessions_dir) if sessions_dir else (paths.PROJECT_ROOT / "memory" / "sessions")
         self.receipts = ReceiptLog(receipts_path if receipts_path else
                                    paths.PROJECT_ROOT / "memory" / "receipts.jsonl")
-        self.policy = policy or RetryPolicy(max_attempts=max_attempts)
-        self.bus = bus or ToolBus().from_default()
-        self.events = events or EventBus()
+        # `x or Default()` is the wrong idiom for injected collaborators: an
+        # intentionally empty ToolBus/EventBus is falsy (__len__) and would be
+        # silently replaced by the full default bus — i.e. a caller's lockdown
+        # ignored. Injected objects are honored whenever they are not None.
+        self.policy = policy if policy is not None else RetryPolicy(max_attempts=max_attempts)
+        self.bus = bus if bus is not None else ToolBus().from_default()
+        self.events = events if events is not None else EventBus()
         # Structured telemetry (audit 2026-10-06): agent_task terminal rows
         # (latency/retries/verification) + permission decisions, into the
         # metrics stream. Best-effort — a monitor failure never breaks the
@@ -70,8 +167,10 @@ class AgentKernel:
             pass
         # temporal.schedule resolves the durable worker lazily (automation
         # starts after the kernel exists) — one scheduling architecture only
-        self.memory = memory or MemoryStack(structured_path=memory_store_path,
-                                            worker_ref=lambda: getattr(self.ctx, "automation_worker", None))
+        self.memory = (memory if memory is not None else
+                       MemoryStack(structured_path=memory_store_path,
+                                   worker_ref=lambda: getattr(self.ctx, "automation_worker", None),
+                                   ctx_ref=lambda: self.ctx))
         self._tasks: dict[str, Task] = {}
         self.last_task: Task | None = None
         self._active_task: Task | None = None
@@ -290,11 +389,23 @@ class AgentKernel:
         self.ctx.current_task_id = task.id
         try:
             return self._execute_loop(task, session_id, exec_text, model, bridge, _approver,
-                                       start, session, on_token, max_iters=max_iters)
+                                      start, session, on_token, max_iters=max_iters,
+                                      # Instant-tier input: what the user actually
+                                      # typed. Only when this turn IS a merged
+                                      # follow-up ("Remind me X" -> "Tomorrow.")
+                                      # does the merged text drive the tiers.
+                                      raw_text=(text if (resolved or "").strip()
+                                                == (text or "").strip() else resolved))
         finally:
             self.gate.store.end_task(task.id)   # task-scoped grants die with the task
             self.ctx.current_task_id = ""
             self._active_task = None
+            # Computer-use sessions are task-scoped too (provenance + action
+            # budget); dropping the ref here also releases them from the
+            # emergency-stop registry, which is a weak map.
+            _cu = getattr(self.ctx, "cu_sessions", None)
+            if _cu:
+                _cu.pop(task.id, None)
             # J1: only a terminal task clears its checkpoint — a process
             # crash (no finally) is exactly what leaves one behind
             if task.state in (TaskState.COMPLETED, TaskState.FAILED,
@@ -398,7 +509,8 @@ class AgentKernel:
 
     def _execute_loop(self, task, session_id, exec_text, model, bridge, _approver,
                       start, session, on_token=None,
-                      max_iters: int | None = None) -> "TaskResult":
+                      max_iters: int | None = None,
+                      raw_text: str = "") -> "TaskResult":
         result = None
         attempts = 0
         while True:
@@ -409,7 +521,11 @@ class AgentKernel:
             transition(task, TaskState.EXECUTING)
             attempt_start = len(task.observations)
             self._write_checkpoint(task)          # J1: resumable from here
+            # exec_text carries the session context for the MODEL; resolved is what
+            # the user actually typed — passed so the instant tiers judge the utterance
+            # itself, not the context-augmented prompt.
             result = run_agent(self.ctx, exec_text, on_event=bridge, model=model,
+                               route_text=raw_text or exec_text,
                                on_ask=_approver, on_token=on_token,
                                **({"max_iters": max_iters} if max_iters else {}))
             attempt_obs = task.observations[attempt_start:]
@@ -433,8 +549,13 @@ class AgentKernel:
                                                 and result.error != "cancelled")
             if not failed:
                 break
-            kind = FailureKind.VERIFICATION if vres.verdict == "fail" else \
-                self.policy.classify(result.error or "tool failed")
+            kind = self.policy.classify(result.error or "tool failed")
+            if vres.verdict == "fail" and kind != FailureKind.UNRECOVERABLE:
+                kind = FailureKind.VERIFICATION
+            # 'no answer after wrap' stays UNRECOVERABLE even though verification
+            # failed: the attempt already spent the full tool budget plus a
+            # tools-disabled answer pass. A second attempt re-burns all of it for
+            # the same honest failure (measured 39.9 s -> 80 s on the eval box).
             # a blind retry is only allowed when NO action of this attempt was
             # destructive/state-changing
             destructive = any(self.policy.is_destructive(o.tool, o.args) for o in attempt_obs)
@@ -603,13 +724,95 @@ class AgentKernel:
                 response = f"Remembered: {req.text}" + (f"  (saved under '{req.key}')" if req.key else "")
             elif req.kind == "recall":
                 items = mem.recall(req.query, k=5)
+                hw, hw_data = _hardware_note(req)
+                stored = []
                 if items:
                     session.last_memory_id = items[0].id
                     lines = [f"- {i.content[:160]}  [source: {i.source}, confidence {i.confidence:.2f}]"
                              for i in items]
                     response = f"Here's what I remember about {req.query or 'it'}:\n" + "\n".join(lines)
+                    stored = [i.content for i in items]
                 else:
-                    response = f"I don't have anything stored about '{req.query}' yet."
+                    # The structured store is not the whole memory. Facts the user
+                    # stated months ago live in profile.md / longterm.md and reach
+                    # them through the hybrid index — answering "I don't have
+                    # anything stored" there was a plain wrong answer to
+                    # "Remember my GPU?".
+                    hits = []
+                    try:
+                        hits = self.memory.semantic.search(req.query, k=12) or []
+                    except Exception:
+                        hits = []
+                    hits = [h for h in hits if str(h.get("text") or "").strip()]
+                    # Never quote the assistant's own past transcripts back as
+                    # fact: a diary chunk that records a previous WRONG answer
+                    # ("result: I'm sorry, but I don't have specific information
+                    # about the machine's hardware…") would otherwise be served as
+                    # the answer, turning one old failure into a permanent lie.
+                    transcript = re.compile(r"^##\s*\d{1,2}:\d{2}(:\d{2})?\s*\[model=", re.M)
+                    real = [h for h in hits if not transcript.search(str(h.get("text") or ""))]
+                    if real:
+                        hits = real
+                    else:
+                        hits = []
+
+                    def _rank(h):
+                        # The diary is the assistant's OWN transcript — it contains
+                        # every past question and every past wrong answer. Left
+                        # unranked, "Remember my GPU?" quoted a previous failed
+                        # reply back as fact. Authoritative stores come first.
+                        s = str(h.get("source") or "").lower()
+                        if "profile" in s or "longterm" in s or "system.md" in s:
+                            return 0
+                        if "diary" in s:
+                            return 2
+                        return 1
+
+                    # Source authority first, then literal overlap within a
+                    # bucket: hybrid search returned the 'Software & Tools'
+                    # section for 'what do you remember about this project' while
+                    # longterm.md — which does say what the project is — sat at
+                    # equal rank ahead of nothing.
+                    qwords = _qwords(req.query)
+
+                    def _overlap(h):
+                        compact = re.sub(r"[^a-z0-9]+", "",
+                                         str(h.get("text") or "").lower())
+                        return sum(1 for w in qwords if w in compact)
+
+                    hits.sort(key=lambda h: (_rank(h), -_overlap(h)))
+                    authoritative = [h for h in hits if _rank(h) < 2]
+                    if authoritative:
+                        hits = authoritative
+                    hits = hits[:3]
+                    lines, shown = [], set()
+
+                    def _collect(pool, **kw):
+                        for h in pool:
+                            txt = str(h.get("text") or "").strip()
+                            for ln in _best_lines(txt, req.query, **kw):
+                                fp = re.sub(r"[^a-z0-9]+", "", ln.lower())[:120]
+                                if not ln or fp in shown:
+                                    continue
+                                shown.add(fp)
+                                stored.append(ln)
+                                lines.append(
+                                    f"- {ln[:300]}  [from {_src_label(h.get('source'))}]")
+
+                    if hits:
+                        _collect(hits, fallback=False)
+                        if not lines:
+                            _collect(hits[:1])     # nothing matched any word
+                    if lines:
+                        response = (f"Here's what I remember about {req.query or 'it'}:\n"
+                                    + "\n".join(lines))
+                    else:
+                        response = f"I don't have anything stored about '{req.query}' yet."
+                if hw:
+                    response += f"\n\nBut this machine, as I read it right now: {hw}"
+                    warn = _hw_conflict(stored, hw_data)
+                    if warn:
+                        response += "\n" + warn
                 ok = True  # an honest 'I don't remember' IS the correct result
             else:  # forget
                 target = session.last_memory_id if req.last else None

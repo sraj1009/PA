@@ -254,10 +254,30 @@ class WindowsDesktop:
         return out
 
     def active_window(self) -> WindowInfo | None:
-        for w in self.list_windows():
-            if w.active:
-                return w
-        return None
+        """Resolve the foreground window from its handle directly.
+
+        The old version searched list_windows() for a window flagged active —
+        but that list drops every untitled window, so a real foreground window
+        with an empty title (common for Electron/overlay apps) reported
+        "active: null", and the `active_window` verification strategy then
+        reported a FAILED match when the truth is that it never saw the window.
+        GetForegroundWindow() == 0 (a non-interactive session) still returns
+        None: unknown is honest, a guess would be a false success."""
+        import win32gui
+        try:
+            h = win32gui.GetForegroundWindow()
+            if not h or not win32gui.IsWindow(h):
+                return None
+            title = win32gui.GetWindowText(h) or ""
+            l, t, r, b = win32gui.GetWindowRect(h)
+            return WindowInfo(title=title, cls=win32gui.GetClassName(h) or "",
+                              x=l, y=t, w=max(1, r - l), h=max(1, b - t),
+                              active=True)
+        except Exception:
+            for w in self.list_windows():     # last resort: the enumerated flag
+                if w.active:
+                    return w
+            return None
 
     def _find_hwnd(self, title: str):
         import win32gui

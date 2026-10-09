@@ -18,9 +18,11 @@ from .action import (ComputerAction, VERBS, WINDOW_VERBS, INPUT_VERBS,
 from .desktop import (Desktop, DesktopError, MockDesktop, WindowInfo,
                       WindowsDesktop, make_desktop)
 from .privacy import ScreenshotStore, redact_entry
-from .session import (ComputerUseSession, DEFAULT_MAX_ACTIONS, HotkeyStopper,
-                      active_sessions, computeruse_emergency_stop,
-                      default_windows_key_state)
+from .session import (ComputerUseSession, DEFAULT_ACTION_TIMEOUT,
+                      DEFAULT_MAX_ACTIONS, HotkeyStopper, active_sessions,
+                      computeruse_emergency_stop, default_windows_key_state,
+                      hotkey_state, start_emergency_hotkey,
+                      stop_emergency_hotkey)
 from .tools import computeruse_tools
 from .verify import Verification, snapshot, verify_action
 from .vision import Element, StructuralVision, VisionBackend, make_vision
@@ -30,8 +32,9 @@ __all__ = [
     "CLIPBOARD_VERBS", "is_credential_target", "Desktop", "DesktopError",
     "MockDesktop", "WindowInfo", "WindowsDesktop", "make_desktop",
     "ScreenshotStore", "redact_entry", "ComputerUseSession",
-    "DEFAULT_MAX_ACTIONS", "HotkeyStopper", "active_sessions",
-    "computeruse_emergency_stop", "default_windows_key_state",
+    "DEFAULT_MAX_ACTIONS", "DEFAULT_ACTION_TIMEOUT", "HotkeyStopper",
+    "active_sessions", "computeruse_emergency_stop", "default_windows_key_state",
+    "hotkey_state", "start_emergency_hotkey", "stop_emergency_hotkey",
     "computeruse_tools", "Verification", "snapshot", "verify_action",
     "Element", "StructuralVision", "VisionBackend", "make_vision",
 ]

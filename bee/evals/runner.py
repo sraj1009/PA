@@ -21,7 +21,10 @@ Task schema (evals/tasks.yaml):
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +32,41 @@ import yaml
 
 from .. import paths
 from ..agent.loop import AgentResult
+
+
+@contextmanager
+def _isolated_memory():
+    """Run the suite against a COPY of the user's memory, not the original.
+
+    The eval writes: `memory_write` stores a fact, the remember/recall paths
+    append to profile/longterm, and the kernel persists sessions + receipts.
+    Pointed at the real tree, every `/eval` left rows behind — seven copies of
+    one eval fragment ("Neovim. Use the profile memory tool.") ended up in
+    memory/store.json as user facts. A copy keeps the recall tasks honest (their
+    premise is still in the data the run reads) while discarding what the run
+    created."""
+    keys = ("MEMORY_DIR", "DIARY_DIR", "LESSONS_DIR", "VECTOR_DIR",
+            "PROFILE_MD", "LONGTERM_MD", "SYSTEM_MD")
+    saved = {k: getattr(paths, k) for k in keys}
+    tmp = Path(tempfile.mkdtemp(prefix="bee_eval_memory_"))
+    try:
+        root = tmp / "memory"
+        try:
+            shutil.copytree(saved["MEMORY_DIR"], root)
+        except Exception:
+            root.mkdir(parents=True, exist_ok=True)
+        paths.MEMORY_DIR = root
+        paths.DIARY_DIR = root / "diary"
+        paths.LESSONS_DIR = root / "lessons"
+        paths.VECTOR_DIR = root / "vectors"
+        paths.PROFILE_MD = root / "profile.md"
+        paths.LONGTERM_MD = root / "longterm.md"
+        paths.SYSTEM_MD = root / "system.md"
+        yield root
+    finally:
+        for k, v in saved.items():
+            setattr(paths, k, v)
+        shutil.rmtree(tmp, ignore_errors=True)
 
 # model output may contain emoji — redirected Windows consoles default to
 # cp1252 and would crash the run; force UTF-8 with replacement fallback
@@ -97,17 +135,33 @@ def _should_skip(t: dict, ctx) -> bool:
 
 
 def run_suite(ctx, model: str | None = None, only: "str | list[str] | None" = None) -> list[dict]:
+    """Public entry: the whole run happens against an isolated copy of memory."""
+    with _isolated_memory():
+        return _run_suite(ctx, model=model, only=only)
+
+
+def _run_suite(ctx, model: str | None = None, only: "str | list[str] | None" = None) -> list[dict]:
     """only: substring match (str) or explicit id list (list) — for batched runs.
 
     Audit item 1: tasks run through the SAME AgentKernel as interactive use
     (capability gate, task state, receipts, verification, telemetry) — the
     eval now measures what the user actually gets. A fresh session id per
-    task/rep keeps follow-up resolution from leaking across tasks."""
+    task/rep keeps follow-up resolution from leaking across tasks.
+
+    The kernel is built HERE rather than reused: it resolves its memory store,
+    sessions and receipts at construction time, and inside `_isolated_memory()`
+    those must point at the copy. The caller's own kernel is put back after."""
     kernel = getattr(ctx, "kernel", None)
-    if kernel is None:
-        from ..kernel import AgentKernel
-        kernel = AgentKernel(ctx, approver=lambda t, a, r: False)
+    from ..kernel import AgentKernel
+    ctx.kernel = AgentKernel(ctx, approver=lambda t, a, r: False)
+    try:
+        return _run_tasks(ctx, model, only)
+    finally:
         ctx.kernel = kernel
+
+
+def _run_tasks(ctx, model, only) -> list[dict]:
+    kernel = ctx.kernel
     tasks = load_tasks()
     results = []
     print(f"\n== BEE eval suite — {len(tasks)} tasks ==")

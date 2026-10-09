@@ -132,3 +132,23 @@ clap:
   cooldown: 1.5
   retrigger_ratio: 0.55    # hysteresis: audio must drop below 55% of threshold to re-arm
   warmup_s: 1.5            # mic calibration window
+
+# Proactive event sources (bee/automation/events.py -> start_sources).
+# These publish EVENTS only — an event can never cause an action unless a
+# user-authorized proactive rule matches it (default-deny, rate-limited).
+# Every key here is read by start_sources; adding one without wiring it there
+# is the dead-switch defect the 2026-10-08 audit recorded.
+automation:
+  enabled: true                # false = no durable jobs at all
+  events_enabled: true         # false = no polling event sources
+  event_tick_seconds: 60       # heartbeat rules can match
+  battery_poll_seconds: 60     # battery.low / unplugged / charged
+  battery_low_percent: 20      # fires at/below this while on battery
+  network_poll_seconds: 30     # network.down / network.restored (TCP, no DNS)
+  app_events: true             # app.focused / app.launched / app.closed (Windows)
+  app_poll_seconds: 10
+  file_watch_dir: ""           # set a path to enable file.changed polling
+  device_events: true          # device.memory_low / disk_low transitions
+  device_poll_seconds: 60
+  memory_low_mb: 1500          # warn below this free RAM (this box stalls under ~1.5 GB)
+  disk_low_gb: 4               # warn below this free space on the system drive

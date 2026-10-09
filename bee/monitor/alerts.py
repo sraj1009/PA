@@ -3,7 +3,11 @@
 Two pieces:
 
   os_notify(title, text) — best-effort desktop toast, no dependencies:
-      Windows: msg.com (built into Windows 10/11)
+      Windows: msg.exe when present (Windows Server), else the Shell
+               NotifyIcon balloon — msg.exe is NOT installed on desktop
+               Windows 10/11, so relying on it alone means no toast ever
+               appears there. Balloon text passes via env vars, never
+               interpolated into the script.
       Linux:   notify-send · macOS: osascript
       Fails quiet (log + return False) — alerting must never break the agent.
       Text is REDACTED and truncated before display: a toast must never
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -68,27 +73,73 @@ def _mark_fired(key: str) -> None:
 _run = subprocess.run    # module-level for test injection
 
 
+# Shell NotifyIcon balloon — works on every Windows 10/11 build. The title and
+# text travel through ENV VARS, never as interpolated script text, so a message
+# containing quotes/`$()` can't alter the command (alert text is model-derived).
+_WIN_TOAST_PS = r"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$n = New-Object System.Windows.Forms.NotifyIcon
+$n.Icon  = [System.Drawing.SystemIcons]::Information
+$n.BalloonTipIcon  = 'Info'
+$n.BalloonTipTitle = $env:BEE_TOAST_TITLE
+$n.BalloonTipText  = $env:BEE_TOAST_TEXT
+$n.Visible = $true
+$n.ShowBalloonTip(6000)
+Start-Sleep -Seconds 7
+$n.Dispose()
+"""
+
+
+def _win_toast(title: str, text: str) -> bool:
+    env = dict(os.environ, BEE_TOAST_TITLE=title, BEE_TOAST_TEXT=text)
+    try:
+        r = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                  _WIN_TOAST_PS], capture_output=True, timeout=25, env=env,
+                 creationflags=0x08000000)          # CREATE_NO_WINDOW
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.info("windows toast unavailable: %s", e)
+        return False
+    if r.returncode != 0:
+        log.info("windows toast exited %s: %s", r.returncode,
+                 (r.stderr or b"").decode("utf-8", "replace")[:160])
+    return r.returncode == 0
+
+
 def os_notify(title: str, text: str) -> bool:
-    """Best-effort desktop toast. Returns True if the notifier ran clean.
-    Never raises; never shows secrets (redacted + truncated)."""
+    """Best-effort desktop toast. Returns True only if the notifier actually
+    succeeded. Never raises; never shows secrets (redacted + truncated).
+
+    Windows: `msg.exe` ships with Windows SERVER only, so a desktop build used
+    to fall through to nothing at all (and the old code still returned True
+    without reading the exit status, which is why every alert looked delivered).
+    Now: msg.exe first when present, Shell balloon otherwise.
+    """
     try:
         msg = f"{title}: {text}"
         s, _n = privacy.redact(msg)
         s = " ".join(s.split())[:MAX_TOAST_LEN]
+        t, _n2 = privacy.redact(title)
+        t = " ".join(str(t).split())[:80]
         if sys.platform.startswith("win"):
-            _run(["msg", "*", "0", s], capture_output=True, timeout=5,
-                 creationflags=0x08000000)          # CREATE_NO_WINDOW
-            return True
+            try:
+                r = _run(["msg", "*", "0", s], capture_output=True, timeout=5,
+                         creationflags=0x08000000)
+                if r.returncode == 0:
+                    return True
+            except FileNotFoundError:
+                pass           # no msg.exe on desktop builds -> balloon
+            return _win_toast(t, s)
         if sys.platform == "darwin":
             safe = s.replace('"', "'")
-            _run(["osascript", "-e",
-                  f'display notification "{safe}" with title "{title}"'],
-                 capture_output=True, timeout=5)
-            return True
-        _run(["notify-send", title, s], capture_output=True, timeout=5)
-        return True
+            r = _run(["osascript", "-e",
+                      f'display notification "{safe}" with title "{t}"'],
+                     capture_output=True, timeout=5)
+            return r.returncode == 0
+        r = _run(["notify-send", t, s], capture_output=True, timeout=5)
+        return r.returncode == 0
     except Exception as e:
-        log.debug("os_notify failed (continuing): %s", e)
+        log.warning("os_notify failed (continuing): %s", e)
         return False
 
 

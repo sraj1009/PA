@@ -141,6 +141,61 @@ def test_stats_no_battery(monkeypatch):
     assert "AC/desktop" in systemctl.format_system_stats(s)
 
 
+def test_hardware_inventory_parses_cim_json(monkeypatch):
+    """'What GPU do I have' had no answer anywhere in the product — stats reports
+    load, not identity. One CIM round-trip gives the fixed inventory, with VRAM
+    per adapter (summing AdapterRAM across both GPUs claimed 6 GB for a 4 GB
+    card)."""
+    monkeypatch.setattr(systemctl, "_HW_CACHE", None)
+    monkeypatch.setattr(
+        systemctl, "_ps",
+        lambda expr: ('{"CPU":"12th Gen Intel(R) Core(TM) i5-12450H",'
+                      '"GPU":[{"n":"NVIDIA GeForce RTX 3050 Laptop GPU","gb":4},'
+                      '{"n":"Intel(R) UHD Graphics","gb":2}],'
+                      '"RAM_GB":16,"OS":"Microsoft Windows 11 Home",'
+                      '"CS":"HP Victus by HP  15-fa1xxx"}'))
+    h = systemctl.get_hardware()
+    assert [g["name"] for g in h["gpus"]] == ["NVIDIA GeForce RTX 3050 Laptop GPU",
+                                              "Intel(R) UHD Graphics"]
+    assert h["gpus"][0]["vram_gb"] == 4 and h["ram_gb"] == 16
+    assert h["machine"] == "HP Victus by HP 15-fa1xxx"
+    txt = systemctl.format_hardware(h)
+    assert "RTX 3050 Laptop GPU (4 GB VRAM)" in txt, txt
+    assert "UHD Graphics (2 GB VRAM)" in txt, txt
+    assert "RAM: 16 GB" in txt, txt
+
+
+def test_hardware_inventory_failures_decline(monkeypatch):
+    monkeypatch.setattr(systemctl, "_HW_CACHE", None)
+    for bad in ("", "not json", "[]", "{}"):
+        monkeypatch.setattr(systemctl, "_ps", lambda expr, b=bad: b)
+        assert systemctl.get_hardware(refresh=True) is None, bad
+
+
+def test_hardware_is_cached_for_the_process(monkeypatch):
+    calls = []
+
+    def fake_ps(expr):
+        calls.append(expr)
+        return '{"CPU":"X","GPU":[{"n":"Y","gb":4}],"RAM_GB":8,"OS":"W","CS":"M"}'
+
+    monkeypatch.setattr(systemctl, "_HW_CACHE", None)
+    monkeypatch.setattr(systemctl, "_ps", fake_ps)
+    systemctl.get_hardware()
+    systemctl.get_hardware()
+    assert len(calls) == 1, calls          # a live CIM round-trip costs ~3.5 s
+
+
+def test_systemctl_tool_exposes_hardware(monkeypatch):
+    monkeypatch.setattr(systemctl, "_HW_CACHE", {
+        "cpu": "i5-12450H", "gpus": [{"name": "RTX 3050 Laptop GPU", "vram_gb": 4}],
+        "ram_gb": 16, "os": "Windows 11", "machine": "HP Victus"})
+    r = systemctl.systemctl_tool(None, "hardware")
+    assert "RTX 3050 Laptop GPU" in r["result"], r
+    enum = systemctl.systemctl_tools()[0].parameters["properties"]["action"]["enum"]
+    assert "hardware" in enum, enum
+
+
 def test_keybd_recording(monkeypatch):
     presses = []
     monkeypatch.setattr(systemctl, "_keybd", lambda vk, n=1: presses.append((vk, n)) or True)

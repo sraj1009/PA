@@ -11,6 +11,7 @@ Configuration (config.yaml voice: / REPL /tts):
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -79,15 +80,116 @@ def _pyttsx3_speak(text: str, rate: int = 190, voice: str = "") -> bool:
     return True
 
 
+def _wav_bytes(pcm: bytes, rate: int, channels: int = 1, width: int = 2) -> bytes:
+    """Wrap raw PCM in a WAV container (winsound only understands WAV)."""
+    import io
+    import wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(width)
+        w.setframerate(rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+def _decode_to_wav(path: Path) -> bytes | None:
+    """Decode any container (mp3 included) to self-contained WAV bytes.
+
+    The size fields must be EXACT: winsound's SND_MEMORY buffer cannot be
+    sized from a streamed (0xFFFFFFFF) header, so the ffmpeg fallback writes a
+    seekable file rather than piping to stdout.
+    """
+    try:
+        import av
+    except ImportError:
+        av = None
+    if av is not None:
+        try:
+            with av.open(str(path)) as cont:
+                streams = cont.streams.audio
+                if not streams:
+                    return None
+                stream = streams[0]
+                rate = stream.rate or 22050
+                res = av.AudioResampler(format="s16", layout="mono", rate=rate)
+                chunks: list[bytes] = []
+                for frame in cont.decode(stream):      # AudioStream is not iterable
+                    for out in res.resample(frame):
+                        chunks.append(out.tobytes())
+                for out in res.resample(None):         # flush the resampler tail
+                    chunks.append(out.tobytes())
+                if chunks:
+                    return _wav_bytes(b"".join(chunks), rate)
+        except Exception as e:
+            log.info("pyav decode failed (%s) — trying ffmpeg", str(e)[:120])
+    import shutil
+    ff = shutil.which("ffmpeg")
+    if not ff:
+        return None
+    fd, tmp = tempfile.mkstemp(prefix="bee_tts_", suffix=".wav")
+    os.close(fd)
+    wav = Path(tmp)
+    try:
+        r = subprocess.run([ff, "-v", "error", "-i", str(path), "-y",
+                            "-f", "wav", "-acodec", "pcm_s16le", "-ac", "1",
+                            str(wav)], capture_output=True, timeout=120)
+        if r.returncode != 0 or not wav.exists() or wav.stat().st_size < 44:
+            log.info("ffmpeg decode failed: %s",
+                     (r.stderr or b"").decode("utf-8", "replace")[:120])
+            return None
+        return wav.read_bytes()
+    except Exception as e:
+        log.info("ffmpeg decode failed: %s", e)
+        return None
+    finally:
+        wav.unlink(missing_ok=True)
+
+
+def _play_media(path: Path) -> bool:
+    """Play an audio file on the default output device.
+
+    The previous Windows path used System.Windows.Media.SoundPlayer, which only
+    decodes WAV — an edge-tts MP3 "played" successfully while staying silent.
+    """
+    if sys.platform != "win32":
+        import shutil
+        for player in ("mpg123", "ffplay", "aplay"):
+            if shutil.which(player):
+                args = ([player, str(path)] if player != "ffplay"
+                        else ["ffplay", "-nodisp", "-autoexit", str(path)])
+                try:
+                    p = subprocess.run(args, capture_output=True, timeout=120)
+                    if p.returncode == 0:
+                        return True
+                except Exception as e:
+                    log.info("%s failed: %s", player, e)
+        return False
+    try:
+        import winsound
+        wav = _decode_to_wav(path)
+        if not wav:
+            log.info("no MP3 decoder available (install PyAV or put ffmpeg on PATH)")
+            return False
+        winsound.PlaySound(wav, winsound.SND_MEMORY)
+        return True
+    except Exception as e:
+        log.info("winsound playback failed: %s", e)
+        return False
+
+
 def _edge_tts_speak(text: str, key: str = "", voice: str = "en-US-AndrewMultilingualNeural",
                     rate: int = 190) -> bool:
-    if not key:
-        return False
+    """Synthesize with edge-tts and play it. `key` is accepted for config
+    compatibility — edge-tts itself is a free network service and needs none,
+    so gating this on an Azure key only cost the neural voice for no reason."""
     try:
         import edge_tts
     except ImportError:
         return False
-    out = Path(tempfile.gettempdir()) / "bee_tts.mp3"
+    fd, tmp = tempfile.mkstemp(prefix="bee_tts_", suffix=".mp3")
+    os.close(fd)
+    out = Path(tmp)
 
     async def gen():
         import asyncio
@@ -99,21 +201,12 @@ def _edge_tts_speak(text: str, key: str = "", voice: str = "en-US-AndrewMultilin
         asyncio.run(gen())
     except Exception as e:
         log.info("edge-tts failed: %s", e)
+        out.unlink(missing_ok=True)
         return False
-    # play mp3
-    if sys.platform == "win32":
-        p = subprocess.run(["powershell", "-NoProfile", "-Command",
-                            f"Add-Type -AssemblyName PresentationCore; "
-                            f"(New-Object Media.SoundPlayer '{out}').PlaySync()"],
-                           capture_output=True, timeout=60)
-        return p.returncode == 0
-    else:
-        for player in ("mpg123", "ffplay", "aplay"):
-            if __import__("shutil").which(player):
-                args = [player, str(out)] if player != "ffplay" else ["ffplay", "-nodisp", "-autoexit", str(out)]
-                p = subprocess.run(args, capture_output=True, timeout=120)
-                return p.returncode == 0
-    return False
+    try:
+        return _play_media(out)
+    finally:
+        out.unlink(missing_ok=True)
 
 
 def speak(text: str, cfg) -> bool:

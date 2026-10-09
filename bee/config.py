@@ -236,6 +236,21 @@ class AutomationCfg:
     max_parallel: int = 2                # global job concurrency cap
     miss_grace_seconds: int = 900        # one-time jobs catch up if missed by <= 15 min
     default_timezone: str = "Asia/Kolkata"
+    # Event sources (bee/automation/events.py -> start_sources). Each of these
+    # is READ by that function — adding a key here without wiring it there is
+    # exactly the dead-switch defect class the 2026-10-08 audit recorded.
+    events_enabled: bool = True          # false = no polling sources at all
+    event_tick_seconds: float = 60.0     # heartbeat that proactive rules can match
+    battery_poll_seconds: float = 60.0
+    battery_low_percent: int = 20        # battery.low fires at/below this while unplugged
+    network_poll_seconds: float = 30.0
+    app_events: bool = True            # foreground-window + launch/close events
+    app_poll_seconds: float = 10.0
+    device_events: bool = True         # memory/disk pressure transitions
+    device_poll_seconds: float = 60.0
+    memory_low_mb: int = 1500          # device.memory_low at/below this free RAM
+    disk_low_gb: float = 4.0           # device.disk_low at/below this free disk
+    file_watch_dir: str = ""             # empty = file-change source off
 
 
 @dataclass
@@ -335,6 +350,11 @@ class Config:
             "max_tokens": self.ollama.max_tokens,
             "temperature": self.ollama.temperature,
             "timeout": self.ollama.timeout,
+            # num_ctx belongs to the Ollama server options, so it applies to ANY
+            # local model (an explicit "qwen3:4b" or the ollama-cloud "x:cloud"
+            # override). Omitting it here let client.py fall back to its own
+            # hardcoded 8192 and silently ignore the configured value.
+            "num_ctx": self.ollama.num_ctx,
             "cloud": False,
         }
 

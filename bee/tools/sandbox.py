@@ -132,7 +132,8 @@ def sandbox_tools():
                 cpu_fallback = True
             note = "\n[sandbox: GPU not available in this Docker setup - ran on CPU]" \
                 if (want_gpu and cpu_fallback) else ""
-            return envelope(command, r.returncode, (r.stdout or "") + note, r.stderr or "")
+            return envelope(command, r.returncode, (r.stdout or "") + note,
+                            r.stderr or "", limit=int(cfg.max_output or 0) or None)
         except subprocess.TimeoutExpired:
             return envelope(command, 124, error=f"timeout after {timeout}s")
         except Exception as e:

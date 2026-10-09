@@ -163,3 +163,245 @@ def test_file_change_source_end_to_end(tmp_path):
     src.stop()
     assert fired, "file changes must reach the policy"
     assert len(fired) <= 4, "the rule's rate limit must bound notification spam"
+
+
+# ------------------------- real event sources (2026-10-08 fix pass) ----------
+# Battery / network were schema-only, and NOTHING started any source in
+# production — so the proactive layer could only ever fire from events
+# published inside tests.
+
+from bee.automation.events import (BatterySource, NetworkSource,  # noqa: E402
+                                   available_sources, start_sources)
+
+
+class CollectBus:
+    def __init__(self):
+        self.events = []
+
+    def publish(self, ev):
+        self.events.append(ev)
+
+    def names(self):
+        return [e.name for e in self.events]
+
+
+def test_battery_reports_only_transitions():
+    bus = CollectBus()
+    seq = [(70, 1), (40, 0), (18, 0), (15, 0), (15, 1), (90, 1)]
+    src = BatterySource(interval_seconds=1.0, low_percent=20,
+                        read_fn=lambda: seq.pop(0) if seq else None)
+    for _ in range(6):
+        src.scan(bus)
+    # unplugged at 40 -> transition; crossing 20 -> battery.low exactly once;
+    # repeated 15% must NOT re-fire; plugging in -> battery.charged
+    transitions = [n for n in bus.names() if n != "battery.level"]
+    assert transitions == ["battery.unplugged", "battery.low",
+                           "battery.charged"], bus.names()
+    assert bus.names().count("battery.low") == 1,         "18% then 15% is one crossing, not two alerts"
+
+
+def test_battery_absent_is_silent():
+    bus = CollectBus()
+    BatterySource(read_fn=lambda: None).scan(bus)
+    assert bus.names() == []
+
+
+def test_network_fires_only_on_change():
+    bus = CollectBus()
+    seq = [True, True, False, False, True]
+    src = NetworkSource(interval_seconds=1.0, probe_fn=lambda: seq.pop(0))
+    for _ in range(5):
+        src.scan(bus)
+    # the first sample only establishes state — no false "restored" event
+    assert bus.names() == ["network.down", "network.restored"], bus.names()
+
+
+def test_sources_honor_config_and_the_disable_switch(monkeypatch):
+    from bee.config import load_config
+    monkeypatch.setattr(BatterySource, "start", lambda self, bus: None)
+    monkeypatch.setattr(NetworkSource, "start", lambda self, bus: None)
+    monkeypatch.setattr(TimerSource, "start", lambda self, bus: None)
+    cfg = load_config()
+    cfg.automation.events_enabled = False
+    assert start_sources(CollectBus(), cfg) == [], "events_enabled=false starts nothing"
+    cfg.automation.events_enabled = True
+    cfg.automation.file_watch_dir = ""
+    started = start_sources(CollectBus(), cfg)
+    kinds = {s.kind for s in started}
+    assert {"timer", "battery", "network"} <= kinds
+    bat = [s for s in started if s.kind == "battery"][0]
+    net = [s for s in started if s.kind == "network"][0]
+    assert bat.interval == cfg.automation.battery_poll_seconds
+    assert net.interval == cfg.automation.network_poll_seconds
+    assert bat.low_percent == cfg.automation.battery_low_percent
+
+
+def test_capability_report_is_honest_on_this_machine():
+    """The report must not overclaim — and must not underclaim either: whatever
+    start_sources() can actually run has to be reported as built-in."""
+    from bee.automation import events as ev
+    from bee.config import load_config
+    rep = available_sources()
+    assert rep["battery"].startswith("built-in") or "unavailable" in rep["battery"]
+    assert rep["network"].startswith("built-in")
+    assert rep["email"].startswith("unavailable"), "email is still schema-only"
+    assert rep["app_event"].startswith("unavailable") or rep["app_event"].startswith("built-in")
+    started = ev.start_sources(CollectBus(), load_config())
+    for src in started:
+        msg = f"started a {src.kind} source but the report says: {rep[src.kind]}"
+        assert rep[src.kind].startswith("built-in"), msg
+    for kind, note in rep.items():
+        if note.startswith("unavailable"):
+            assert kind not in {s.kind for s in started}, f"{kind} claims unavailable but runs"
+
+
+def test_worker_stop_stops_its_attached_event_sources(tmp_path):
+    """A poller that outlives the worker is an orphan thread that keeps
+    publishing into a dead bus."""
+    from bee.automation import EventBus, JobStore, JobWorker
+    from bee.config import load_config
+    from types import SimpleNamespace
+
+    class FakeSrc:
+        kind = "fake"
+        def __init__(self): self.stopped = False
+        def start(self, bus): pass
+        def stop(self): self.stopped = True
+
+    cfg = load_config()
+    ctx = SimpleNamespace(cfg=cfg, workspace=tmp_path, kernel=None,
+                          current_task_id="", cancel_event=None)
+    w = JobWorker(ctx, SimpleNamespace(run=lambda *a, **k: None),
+                  JobStore(tmp_path / "automation"), bus=EventBus(),
+                  tick_seconds=5.0)
+    src = FakeSrc()
+    w.event_sources = [src]
+    w.stop()
+    assert src.stopped, "worker.stop() must stop attached sources"
+    assert w.event_sources == []
+
+
+def test_app_event_source_emits_transitions_only():
+    """A foreground poll must not become an event storm: baseline first, then
+    only real changes."""
+    from bee.automation.events import AppEventSource
+    from bee.computeruse import MockDesktop
+    md = MockDesktop()
+    md.add_window("Program Manager", "Progman", (0, 0, 100, 100))
+    src = AppEventSource(desktop=md, interval_seconds=1.0)
+    bus = CollectBus()
+    src.scan(bus)                                  # prime
+    assert bus.names() == [], bus.names()
+    src.scan(bus)                                  # nothing changed
+    assert bus.names() == []
+    md.map_app("notepad", "Notepad - todo.txt")
+    md.add_window("Notepad - todo.txt", "Notepad", (10, 10, 500, 500))
+    src.scan(bus)
+    names = bus.names()
+    assert "app.launched" in names, names
+    src.scan(bus)
+    assert bus.names() == names, "a steady state must emit nothing new"
+
+
+def test_start_sources_honors_app_events_switch(monkeypatch):
+    from bee.config import load_config
+    from bee.automation import events as ev
+    monkeypatch.setattr(ev.BatterySource, "start", lambda self, bus: None)
+    monkeypatch.setattr(ev.NetworkSource, "start", lambda self, bus: None)
+    monkeypatch.setattr(ev.TimerSource, "start", lambda self, bus: None)
+    monkeypatch.setattr(ev.AppEventSource, "scan", lambda self, bus: None)
+    monkeypatch.setattr(ev.AppEventSource, "start", lambda self, bus: None)
+    cfg = load_config()
+    kinds_on = {s.kind for s in ev.start_sources(CollectBus(), cfg)}
+    assert "app_event" in kinds_on, kinds_on
+    cfg.automation.app_events = False
+    kinds_off = {s.kind for s in ev.start_sources(CollectBus(), cfg)}
+    assert "app_event" not in kinds_off, kinds_off
+    cfg.automation.app_events = True
+    cfg.automation.app_poll_seconds = 3.0
+    src = [s for s in ev.start_sources(CollectBus(), cfg) if s.kind == "app_event"][0]
+    assert src.interval == 3.0
+
+
+# ------------------------------ device pressure source (A22) ----------------
+def test_device_source_is_edge_triggered_with_hysteresis():
+    """A value oscillating on the threshold must not become a ping storm, and a
+    recovery must be unambiguous before re-arming."""
+    from bee.automation.events import DeviceSource
+    bus = CollectBus()
+    src = DeviceSource(mem_low_mb=1500, disk_low_gb=4.0,
+                       read_fn=lambda: {"ram_free_mb": 1400, "disk_free_gb": 15})
+    src.scan(bus); src.scan(bus)
+    assert bus.names() == ["device.memory_low"], bus.names()
+    src._read = lambda: {"ram_free_mb": 1600, "disk_free_gb": 15}
+    src.scan(bus)                                   # +100 MB: not a recovery yet
+    assert bus.names() == ["device.memory_low"]
+    src._read = lambda: {"ram_free_mb": 2000, "disk_free_gb": 3.0}
+    src.scan(bus)
+    assert bus.names() == ["device.memory_low", "device.memory_ok",
+                           "device.disk_low"], bus.names()
+
+
+def test_device_source_survives_a_missing_reader():
+    from bee.automation.events import DeviceSource
+    bus = CollectBus()
+    DeviceSource(read_fn=lambda: None).scan(bus)     # desktop / no stats
+    DeviceSource(read_fn=lambda: {"ram_free_mb": None, "disk_free_gb": None}).scan(bus)
+    assert bus.names() == []
+    # the real reader must never raise into the poll loop
+    assert DeviceSource()._default_read() is not None
+
+
+def test_start_sources_runs_and_can_stop_the_device_source(monkeypatch):
+    from bee.config import load_config
+    from bee.automation import events as ev
+    for cls in (ev.TimerSource, ev.BatterySource, ev.NetworkSource,
+                ev.AppEventSource, ev.DeviceSource):
+        monkeypatch.setattr(cls, "start", lambda self, bus: None)
+    monkeypatch.setattr(ev.AppEventSource, "scan", lambda self, bus: None)
+    cfg = load_config()
+    kinds = {s.kind for s in ev.start_sources(CollectBus(), cfg)}
+    assert "device_state" in kinds, kinds
+    dev = [s for s in ev.start_sources(CollectBus(), cfg) if s.kind == "device_state"][0]
+    assert dev.mem_low_mb == cfg.automation.memory_low_mb
+    assert dev.disk_low_gb == cfg.automation.disk_low_gb
+    assert dev.interval == cfg.automation.device_poll_seconds
+    cfg.automation.device_events = False
+    assert "device_state" not in {s.kind for s in ev.start_sources(CollectBus(), cfg)}
+
+
+def test_device_events_can_drive_a_user_authorized_rule_only():
+    """The event is information; only an explicitly authorized proactive rule
+    may turn it into an action (default-deny stays default-deny)."""
+    from bee.automation.events import BusEvent, ProactivePolicy, ProactiveRule
+    ev = BusEvent(name="device.memory_low", kind="device_state",
+                  payload={"ram_free_mb": 900})
+    assert ProactivePolicy(rules=[]).check(ev) == []
+    by_name = ProactiveRule(kind="device_state", match={"name": "device.memory_low"},
+                            action={"type": "notify", "message": "RAM is low"},
+                            created_by="user")
+    got = ProactivePolicy(rules=[by_name]).check(ev, now=1_760_000_000.0)
+    assert [r.id for r, _a in got] == [by_name.id], "name matching must work"
+
+
+def test_threshold_rules_match_the_way_real_events_vary():
+    """RAM free is a different number every poll, so exact-value matching made
+    device rules unusable. Comparisons are now supported."""
+    from bee.automation.events import (BusEvent, ProactivePolicy, ProactiveRule)
+    low = BusEvent(name="device.memory_low", kind="device_state",
+                   payload={"ram_free_mb": 900, "threshold_mb": 1500})
+    fine = BusEvent(name="device.memory_low", kind="device_state",
+                    payload={"ram_free_mb": 9000, "threshold_mb": 1500})
+    rule = ProactiveRule(kind="device_state", match={"ram_free_mb<=": 1500},
+                         action={"type": "notify", "message": "low"},
+                         created_by="user")
+    pol = ProactivePolicy(rules=[rule])
+    assert pol.check(low, now=1_760_000_000.0), "900 MB free must match <=1500"
+    assert ProactivePolicy(rules=[rule]).check(fine, now=1_760_000_000.0) == []
+    # a key with no operator is still exact
+    exact = ProactiveRule(kind="device_state", match={"threshold_mb": 1500},
+                          action={"type": "notify"}, created_by="user")
+    assert ProactivePolicy(rules=[exact]).check(low, now=1_760_000_000.0)
+    assert ProactivePolicy(rules=[exact]).check(
+        BusEvent(name="device.memory_low", kind="device_state",
+                 payload={"threshold_mb": 2000}), now=1_760_000_000.0) == []

@@ -140,10 +140,11 @@ def build_system_prompt(ctx: Context) -> str:
     lessons = recent_lessons(cfg)
     u = cfg.user
     interests = f" · interests: {', '.join(u.interests)}" if u.interests else ""
+    region = f" · region: {u.region}" if getattr(u, "region", "") else ""
     user_block = (f"## Who I serve\n"
                   f"- Name: **{u.name}** — address them as \"{u.name}\" when natural (never as 'user').\n"
                   f"- Timezone: {u.timezone} (times/deadlines in local time)"
-                  f"{interests}.\n"
+                  f"{region}{interests}.\n"
                   f"- **{u.name} created me** — if asked who made/built/created me, say {u.name} built me on this machine.\n")
     return f"""# {ctx.name} — {date.today().isoformat()}
 

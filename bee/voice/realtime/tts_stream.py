@@ -74,20 +74,38 @@ class StreamingTTS:
         self._stop = threading.Event()
         self._busy = threading.Event()
         self._worker: threading.Thread | None = None
+        self._gen = 0
         self._first_sent = False
         self._sent_any = False
 
     # ------------------------------------------------------------- control
     def begin(self) -> None:
-        """Start a fresh utterance (resets first-chunk tracking)."""
+        """Start a fresh utterance (resets first-chunk tracking).
+
+        `busy` is set unconditionally: a worker from the previous utterance may
+        still be alive (barge-in tears it down asynchronously), and if only the
+        thread-spawn branch marked busy, the engine's echo guard would see an
+        idle TTS mid-utterance and BEE would listen to its own voice.
+        """
+        old = self._worker
+        if old is not None and old.is_alive():
+            self._stop.set()          # retire that utterance's audio pipeline
+            old.join(timeout=1.0)
+            while True:               # discard whatever it left queued
+                try:
+                    self._q.get_nowait()
+                except queue.Empty:
+                    break
+        self._gen += 1
+        gen = self._gen
+        self._stop = threading.Event()    # per-utterance cancel token
+        stop = self._stop
         self._first_sent = False
         self._sent_any = False
-        self._stop.clear()
-        if self._worker is None or not self._worker.is_alive():
-            self._worker = threading.Thread(target=self._run, daemon=True,
-                                            name="BeeTtsStream")
-            self._worker.start()
-            self._busy.set()
+        self._busy.set()
+        self._worker = threading.Thread(target=self._run, args=(gen, stop),
+                                        daemon=True, name="BeeTtsStream")
+        self._worker.start()
 
     def feed(self, sentence: str) -> None:
         s = (sentence or "").strip()
@@ -115,8 +133,8 @@ class StreamingTTS:
         return not self._busy.is_set()
 
     # ------------------------------------------------------------- pipeline
-    def _emit(self, chunk: bytes) -> None:
-        if self._stop.is_set() or not chunk:
+    def _emit(self, chunk: bytes, stop: threading.Event) -> None:
+        if stop.is_set() or not chunk:
             return
         try:
             self.sink(chunk)
@@ -132,36 +150,40 @@ class StreamingTTS:
                 except Exception:
                     pass
 
-    def _run(self) -> None:
+    def _run(self, gen: int, stop: threading.Event) -> None:
+        current = False            # do not fire callbacks if we were superseded
         while True:
-            if self._stop.is_set():
+            if stop.is_set() or gen != self._gen:
                 break
             try:
                 item = self._q.get(timeout=0.15)
             except queue.Empty:
                 if self._first_sent:  # utterance complete (sentences drained)
+                    current = True
                     break
                 continue
             if item is None:
+                current = True
                 break
-            if self._stop.is_set():
+            if stop.is_set() or gen != self._gen:
                 break
             try:
-                self._speak_sentence(item)
+                self._speak_sentence(item, stop)
             except Exception as e:
                 log.debug("sentence synth failed: %s", e)
         # utterance finished
-        self._busy.clear()
-        if self.on_done and not self._stop.is_set():
-            try:
-                self.on_done()
-            except Exception:
-                pass
+        if gen == self._gen:
+            self._busy.clear()
+            if current and self.on_done and not stop.is_set():
+                try:
+                    self.on_done()
+                except Exception:
+                    pass
 
-    def _speak_sentence(self, sentence: str) -> None:
+    def _speak_sentence(self, sentence: str, stop: threading.Event) -> None:
         if self.edge_key or self.voice.startswith("en-"):
             try:
-                self._edge_stream(sentence)
+                self._edge_stream(sentence, stop)
                 return
             except ImportError:
                 pass
@@ -169,7 +191,7 @@ class StreamingTTS:
                 log.debug("edge-tts failed (%s) — falling back", str(e)[:80])
         self._pyttsx3_sentence(sentence)
 
-    def _edge_stream(self, sentence: str) -> None:
+    def _edge_stream(self, sentence: str, stop: threading.Event) -> None:
         """GENUINE streaming: consume edge-tts's chunk iterator live."""
         import asyncio
         import edge_tts
@@ -178,7 +200,7 @@ class StreamingTTS:
         async def gen():
             comm = edge_tts.Communicate(sentence, self.voice, rate=_edge_rate_pct(self.rate))
             async for chunk in comm.stream():
-                if self._stop.is_set():
+                if stop.is_set():
                     return
                 if chunk.get("type") == "audio":
                     yield chunk.get("data", b"")
@@ -187,9 +209,9 @@ class StreamingTTS:
         try:
             t0 = time.time()
             for data in loop.run_until_complete(_collect(gen(), self.timeout)):
-                if self._stop.is_set() or time.time() - t0 > self.timeout:
+                if stop.is_set() or time.time() - t0 > self.timeout:
                     break
-                self._emit(data)
+                self._emit(data, stop)
         finally:
             loop.close()
 

@@ -51,12 +51,13 @@ def _kpi(label: str, value: str, sub: str = "", tone: str = "") -> str:
             f"<div class='kpi-l'>{label}</div><div class='kpi-s'>{sub}</div></div>")
 
 
-def build() -> Path:
+def render(refresh_seconds: int = 0) -> str:
+    """The dashboard as HTML. `refresh_seconds` > 0 makes the page reload itself,
+    which is what the live web route uses; the written file stays a snapshot."""
     st = metrics.stats()
     rows = metrics.load_all()
     tasks = [r for r in rows if r.get("event") == "task"]
     by_day = _series_by_day(rows, "task")
-    ok_day = [r for r in by_day]  # placeholder
     models = dict(Counter(t.get("model") for t in tasks))
     tools = dict(Counter(r.get("tool") for r in rows if r.get("event") == "tool"))
     tool_fail = dict(Counter(r.get("tool") for r in rows if r.get("event") == "tool" and not r.get("ok")))
@@ -114,6 +115,14 @@ def build() -> Path:
     route_rows = "".join(f"<tr><td>{k or '?'}</td><td>{v}</td></tr>"
                          for k, v in sorted(routes.items(), key=lambda kv: -kv[1]))
 
+    refresh_meta = (f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">'
+                    if refresh_seconds else "")
+    sub_line = (f"generated {datetime.now():%Y-%m-%d %H:%M:%S} · live view, "
+                f"reload every {int(refresh_seconds)} s · data: metrics/metrics.jsonl"
+                if refresh_seconds else
+                f"generated {datetime.now():%Y-%m-%d %H:%M:%S} · "
+                f"refresh: python -m bee.cli dashboard · data: metrics/metrics.jsonl")
+
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>BEE — monitoring</title>
 <style>
@@ -136,9 +145,9 @@ def build() -> Path:
  table {{ width:100%; border-collapse:collapse; font-size:13px; }}
  td {{ padding:5px 8px; border-bottom:1px solid {LINE}; }} td:last-child {{ color:{DIM}; }}
  .foot {{ color:{DIM}; font-size:11px; margin-top:24px; }}
-</style></head><body><div class="wrap">
+</style>{refresh_meta}</head><body><div class="wrap">
 <h1>BEE <span>//</span> MONITORING</h1>
-<div class="sub">generated {datetime.now():%Y-%m-%d %H:%M:%S} · refresh: python -m bee.cli dashboard · data: metrics/metrics.jsonl</div>
+<div class="sub">{sub_line}</div>
 <div class="kpis">{kpis}</div>
 <div class="grid">
  <div>
@@ -154,7 +163,14 @@ def build() -> Path:
 </div>
 <div class="foot">BEE local-first agent · episodes: train/episodes/ · eval history: evals/results.jsonl · pipeline report: python -m bee.pipeline.report</div>
 </div></body></html>"""
+    return html
 
+
+def build() -> Path:
+    """Snapshot the dashboard to metrics/dashboard.html (the `/dashboard` command).
+    The web app serves `render(refresh_seconds=…)` live instead — this file is a
+    point-in-time copy, so opening it later shows the data as of this run."""
+    html = render()
     p = paths.METRICS_DIR / "dashboard.html"
     p.write_text(html, encoding="utf-8")
     return p

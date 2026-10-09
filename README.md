@@ -1,8 +1,27 @@
 # BEE — a local-first personal assistant
 
-> **Status (verified 2026-10-08):** BEE is a well-tested single-user personal agent
-> for human-supervised deployment on this machine — 543/543 tests green, 71,914
-> deterministic checks passing, all major security invariants audit-verified.
+> **Status (verified 2026-10-08, post fix-pass):** BEE is a well-tested
+> single-user personal agent for human-supervised deployment on this machine —
+> **767/767 tests green**, 71,914 deterministic checks passing, all major
+> security invariants audit-verified, 19-20/21 on the 21-task agent eval. A
+> post-audit code sweep fixed 34 defect classes the suite had been certifying as
+> clean (dead config switches, an unarmed emergency-stop hotkey, silent TTS
+> playback, a frozen face page, no logging handler at all, a session rule that
+> hijacked the deterministic tier, reminders that fired into a log instead of the
+> desktop, a dashboard that could not show live data, permission prompts that
+> asked the user to approve invisible actions, a semantic-memory call that had
+> never returned anything, memory that stayed unfindable for 12 hours after a
+> fact was stated — and the assistant's own logs being indexed as memory, so it
+> recalled past failures instead of the user's facts, answers claiming actions that never ran,
+> hallucinated skills written into the capability library, a test suite writing
+> into the user's own telemetry and memory, no way for the assistant to name the
+> hardware it runs on, durable memory that duplicated and contradicted itself,
+> and 40-second tasks whose final answer was an offer to help, a loop that let one
+> task burn 48 tool calls on code that kept failing, and pasted code the assistant
+> described instead of running, and a loop whose own `do not repeat this` note was
+> returned as a success — so one task asked for the same refused call 21 times in a row
+> — see
+> `docs/TECHNICAL_DEBT.md` rows A1–A35).
 > It is **not** multi-user, **not** "production-ready" in the service sense, and its
 > hardware paths (real mic/display/LiveKit room) are test-verified only with mocks.
 > Authoritative status: [docs/STATUS.md](docs/STATUS.md) · evidence:
@@ -21,7 +40,7 @@ persona, ~50–90 tok/s, fully on-GPU) orchestrates by default; hard tasks escal
 ```
 ┌────────────────────────────────────────────────────────────────────┐
  │  Interfaces:  CLI REPL · Web UI (localhost) · Voice (speak directly)│
-│  Commands:    /plan /draft /summarize /code /think + /engine, /tts │
+│  Commands:    /plan /draft /summarize /code /think /remind + /engine, /tts │
 ├────────────────────────────────────────────────────────────────────┤
 │  Agent loop: route → think → act → observe (≤25 iters) → verify    │
 │  routing: det > explicit > smalltalk > fast-paths > ML > heuristic  │
@@ -129,7 +148,9 @@ _env_key_for`) — a Gemini model will never receive an OpenAI key.
 | `privacy.redact_cloud` | `true` | PII redaction on cloud-bound payloads (local is never redacted) |
 | `router.ml_enabled` / `ml_min_episodes` | `true` / `150` | learned ML router activation |
 | `rag.auto_context` / `k` | `true` / `4` | memory auto-injection for dangling references |
-| `monitor.enabled` | `true` | metrics stream + dashboard |
+| `monitor.enabled` | `true` | metrics stream + dashboard (false = stream off) |
+| `automation.events_enabled` | `true` | proactive **event sources**: heartbeat + battery (Windows power API) + network (TCP probe, no DNS); `file_watch_dir` opts in file-change. Events never act without a user-authorized rule |
+| `automation.battery_low_percent` | `20` | `battery.low` fires at/below this while unplugged (edge-triggered, one alert per crossing) |
 | `livekit.enabled` / `room` | `true` / `bee-pa` | live realtime voice (see §6.5); the `url`/`api_key`/`api_secret` come from `.env` |
 | `user.name` / `timezone` / `region` / `interests` | `Boss` / `Asia/Calcutta` / `IN` / `[]` | the "Who I serve" personalization block injected into every prompt |
 
@@ -168,11 +189,13 @@ you> lock my pc                    # fast path — guard-checked, one confirmati
 you> what is a transformer         # fast path — Wikipedia REST summary, no LLM
 ```
 
-**Fast paths** (`bee/agent/fastpaths.py`) are a catalog of 39 pure-Python handlers
+**Fast paths** (`bee/agent/fastpaths.py`) are a catalog of 46 pure-Python handlers
 for the things a PA is asked most: time/date/uptime, open `<app>` (chrome, notepad,
 excel, vscode, …), open `<workspace file>`, search/google `<q>`, weather, unit +
 temperature conversions, coin/dice/random/pick, note, todo, CPU/RAM/disk/battery stats,
-public IP, identity, "what's on my plate" (plan list), speak, **and** the JARVIS-port
+machine specs (GPU/CPU/RAM model, read from the box), workspace folder listings,
+run-this-pasted-code (`run python: …` executes it),
+spoken `/remind`, public IP, identity, "what's on my plate" (plan list), speak, **and** the JARVIS-port
 set (see §7): wikipedia, play/youtube, media keys, volume, brightness, lock, sleep,
 show-desktop, take-a-photo, welcome-home. All answer in milliseconds with zero
 LLM calls; anything action-y still passes through the **guard** (a fast path can never
@@ -206,9 +229,14 @@ on-GPU at `num_ctx: 4096`, and measured **~50–90 tok/s** with crisp, direct an
 Rebuild it any time: `ollama create bee4b -f models\bee4b.Modelfile`.
 
 **Math never touches the model.** The deterministic tier (`bee/agent/router.py: math_expr`)
-catches pure expressions *and* lightly-phrased asks — "what is 17*23?", "calculate 10% of
-200", "5 plus 5", "6 to the power of 2", "17 × 23" — and answers in ~0 ms via a safe AST
-evaluator (`eval_safe`). It wins over explicit engine overrides by design: a model should
+catches pure expressions, lightly-phrased asks ("what is 17*23?", "calculate 10% of 200",
+"5 plus 5", "6 to the power of 2", "17 × 23") **and prose-wrapped ones** — "Use the
+calculator tool to compute 12 * 14 + 8 and give the final number." is answered in 0.02 s.
+The prose path (`_embedded_expr`) only fires when a compute-intent verb is present and the
+leftover words are pure math, verified by AST against `eval_safe`'s allowlist, so text that
+carries a second request ("…and explain the steps", "…email it to bob") or injection-shaped
+payloads declines and goes to the model. A 3B model given that same sentence told the user
+"none of the provided functions are for a calculator". It wins over explicit engine overrides by design: a model should
 never be the calculator (one 3B model answered 17×23 = 401; the tier answers 391).
 
 Every command works offline (deterministic floor) and persists its output:
@@ -388,6 +416,7 @@ tool calls — a fast path can never bypass permissions.
 | `/summarize` | URL, local file, or pasted text → **TL;DR + high-density bullets + comparative Markdown table** of figures |
 | `/code` | `[python\|bash\|js\|ts] <task>` → production-grade code (typed, validated, error-handled, commented) **with tests**; `debug <code + error>` → root cause, evidence, fix, regression test |
 | `/think` | Stress-test an idea: verdict, kill criteria, pre-mortem, trade-off table, pros/cons matrix, recommendation; `alternatives` adds 3+ strategic paths |
+| `/remind` | **Durable reminders** on the one job store: `/remind call the bank tomorrow 9am` · `/remind list` · `/remind cancel <id\|last\|all>`. Time words are parsed deterministically (`in 20 min`, `tonight`, `friday 4pm`, `12 Oct 07:30`, `day after tomorrow at 11:30`), so **no model call is needed to set one and none is needed to fire it** — it survives restarts, is repaired by `worker.restore()`, and arrives as a desktop toast. Say it instead of typing it: *"remind me to stretch in 20 min"*, *"what are my reminders?"*, *"cancel all my reminders"* all take the instant fast path (§6) |
 | `/welcome [dry\|reset]` | **Welcome Home** workspace protocol: song → configured Chrome windows on their monitors → spoken greeting → IDE focus (see §7) |
 
 **System commands** (REPL):
@@ -402,7 +431,7 @@ tool calls — a fast path can never bypass permissions.
 | `/mem <query>` | hybrid vector+keyword memory search |
 | `/reflect` · `/consolidate` | run self-review / nightly consolidation now |
 | `/eval` | run the 21-task agent eval suite |
-| `/health` · `/dashboard` | environment report / self-contained metrics dashboard |
+| `/health` · `/dashboard` | environment report / metrics dashboard **snapshot** (the web app serves the same page **live** at `GET /dashboard?token=…`, refreshing every 30 s) |
 | `/router` | learned-ML-router training status |
 | `/guard on\|off` · `/privacy on\|off` · `/rag on\|off` | session safety toggles |
 | `/clear` · `/exit` | screen / quit |
@@ -427,13 +456,19 @@ round on failure. URLs a tool actually **opened** in the browser satisfy the cit
 check (an action is not a fabrication). `bee/privacy.py` redacts PII from **cloud-bound**
 payloads only (local = privacy floor; every redaction counted in metrics).
 `bee/guard.py` classifies every shell/code/sandbox call as allow | ask | deny and is
-**enforced in the loop** — the model cannot bypass it.
+**enforced in the loop** — the model cannot bypass it. Three circuit breakers keep a
+small model from thrashing: identical-failure, identical-call caching, and **per-tool**
+refusal/failure counting (a tool denied 2x or failed 3x is short-circuited without even
+consulting the gate, and 3 refusals lock the toolset so the budget goes to an honest answer).
 
-**Loop discipline (anti-runaway, small-model safe):** the agent loop enforces two
-circuit breakers — a call that *fails twice with identical arguments* is not executed a
-third time, and a call *re-issued identically* gets the cached result back with a nudge
-to finish, instead of another turn. A 3B model once re-ran the same `web_search` 20×;
-now it can't. The `/eval` suite is cancel-poisoning-proof too: a Ctrl-C from a previous
+**Loop discipline (anti-runaway, small-model safe):** the agent loop enforces
+three circuit breakers — a call that *fails twice with identical arguments* is not executed a
+third time, a call *re-issued identically* gets the cached result back with a nudge
+to finish, and **refusals are counted per tool**: a capability already denied twice
+is no longer even consulted, and three refusals in a row lock the toolset so the
+remaining budget goes to an honest answer. A 3B model once re-ran the same `web_search` 20×,
+and asked for one denied capability 6× with slightly varied arguments (which slipped past
+the exact-arguments breakers) — neither can happen now. The `/eval` suite is cancel-poisoning-proof too: a Ctrl-C from a previous
 task can no longer silently cancel every remaining eval task (the event is cleared per
 task and a user cancel stops the suite cleanly).
 
@@ -505,8 +540,9 @@ The REPL, `/help`, and any new surface (web/voice) pick it up automatically.
 ## 11. Testing & verification
 
 ```powershell
-python -m pytest tests -q                 # full suite — 543 passed (2026-10-08)
-python -m pytest tests -q -m core         # portable core (unit+integration) — 474
+python -m pytest tests -q                 # full suite — 767 passed (2026-10-09)
+python -m pytest tests -q -m core         # portable core (unit+integration) — 631
+python -m pytest tests -q -m security     # permission/privacy surface — 125
 python evals/verify_suite.py              # 71,914 deterministic checks vs references
 python -m bee.cli eval                    # 21-task agent eval (measured, per run)
 python -m bee.evals.bench_model           # tok/s + latency benchmark
@@ -606,10 +642,10 @@ Cloud — see §6.5) · secrets env-only · external web content treated as untr
    episode data flywheel + QLoRA pipeline, monitoring, 71,914-check verification suite
    (5 suites with Wilson 95 % CI lower ≥ 99.9 %), **assistant command layer
    (`/plan /draft /summarize /code /think`), BEE persona, configurable TTS**,
-    **fast-path command catalog (39 pure-Python handlers) + engine selection
+    **fast-path command catalog (46 pure-Python handlers) + engine selection
    (hybrid/local/ollama-cloud/api-cloud) + cloud teach-back**
 - [x] **Phase 4.5** — **Super JARVIS integration**: Welcome Home protocol,
-   double-clap acoustic trigger, hands-free PC control (systemctl: stats/battery/
+   double-clap acoustic trigger, hands-free PC control (systemctl: stats/hardware/battery/
    volume/brightness/lock/sleep/media/show-desktop), wikipedia + play fast paths,
    optional vision (webcam photo + face count) — all pure Windows APIs, no
     pyautogui/psutil, all action-y paths guard-checked
@@ -644,6 +680,13 @@ Cloud — see §6.5) · secrets env-only · external web content treated as untr
   - [ ] **Phase 5** — first `bee-8b` fine-tune from verified episodes (pipeline + J3
     quality gate ready; no trained model promoted yet) · GPU sandbox variant ·
    unattended-automation hardening · more commands (`/inbox`, `/remind`) via the registry
+- [x] **Proactive event intelligence (A22–A23)** — six event sources now run in
+ production (timer, file-change, battery, network, app foreground/launch, memory+disk
+ pressure), all edge-triggered with hysteresis; rules stay default-deny and
+ user-authorized, and threshold rules finally work (`{"ram_free_mb<=": 1500}`,
+ `{"name": "device.memory_low"}`). Verified live on this machine: a real 4.1 GB-free
+ reading produced `device.memory_low` and fired an authorized rule, while an
+ unauthorized policy returned nothing.
 - [x] **Phases 6–12 (JARVIS program, 2026-10-08)** — provider abstraction · unified
    durable scheduler (JobWorker through the kernel) · ML-router reproducibility + CI ·
    typed planner + persistent sessions + provenance memory · realtime voice engine

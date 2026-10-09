@@ -21,7 +21,10 @@
 <body>
 <canvas id="c"></canvas>
 <div id="hud"><div id="state">idle</div><div id="line">BEE is standing by.</div></div>
-<div id="hint">F = fullscreen · Esc = exit</div>
+<div id="hint">F = fullscreen · Esc = exit ·
+  <button id="key" title="Enter the web auth token (printed in the server console / temp/web_token.txt)"
+          style="cursor:pointer;background:none;border:0;border-bottom:1px dotted #445060;border-radius:0;font:inherit;font-size:11px;color:#445060;padding:0;">🔑 token</button>
+</div>
 <script>
 const cv = document.getElementById("c"), ctx = cv.getContext("2d");
 let W, H; const fit = () => { W = cv.width = innerWidth; H = cv.height = innerHeight; };
@@ -35,17 +38,47 @@ let state = "idle", user = "", reply = "", t = 0;
 const COLORS = { idle:"#3d4a55", listening:"#6ea8ff", thinking:"#ffb020",
                  speaking:"#D7FF00", error:"#ff5566" };
 
+// ---- auth: /face/state is bearer-gated (same token as the chat page) ----
+let beeToken = localStorage.getItem('beeToken') || '';
+let promptDeclined = false;      // a cancelled prompt must not re-fire every 900 ms
+function promptToken() {
+  if (promptDeclined) return;
+  const t = (prompt('Web auth token (printed in the server console, or in temp/web_token.txt):') || '').trim();
+  if (t) { beeToken = t; localStorage.setItem('beeToken', beeToken); }
+  else { promptDeclined = true; }
+}
+function authHeaders() { return beeToken ? { 'Authorization': 'Bearer ' + beeToken } : {}; }
+document.getElementById('key').onclick = () => {
+  promptDeclined = false;
+  beeToken = (prompt('Web auth token:') || '').trim();
+  if (beeToken) localStorage.setItem('beeToken', beeToken); else localStorage.removeItem('beeToken');
+  err(beeToken ? 'token set' : 'no token');
+};
+
+function err(msg) {
+  // never swallow a failure silently — the face must tell you why it is frozen
+  document.getElementById("state").textContent = "idle (no auth)";
+  document.getElementById("line").textContent = "auth needed — press 🔑 token · " + msg;
+}
+
 async function poll() {
   try {
-    const s = await (await fetch("/face/state")).json();
-    state = s.state || "idle";
-    user = s.last_user || ""; reply = s.last_reply || "";
-    const stale = s.age_s != null && s.age_s > 45;
-    document.getElementById("state").textContent =
-      stale && state !== "idle" ? "idle (agent offline)" : state;
-    document.getElementById("line").textContent =
-      user ? "“" + user + "”" : (reply ? "“" + reply + "”" : "BEE is standing by.");
-  } catch(e) {}
+    const r = await fetch("/face/state", { headers: authHeaders() });
+    if (r.status === 401) {                      // missing or stale token
+      if (beeToken) { beeToken = ''; localStorage.removeItem('beeToken'); }
+      promptToken();                             // once; then the button takes over
+      err('401 rejected');
+    } else {
+      const s = await r.json();
+      state = s.state || "idle";
+      user = s.last_user || ""; reply = s.last_reply || "";
+      const stale = s.age_s != null && s.age_s > 45;
+      document.getElementById("state").textContent =
+        stale && state !== "idle" ? "idle (agent offline)" : state;
+      document.getElementById("line").textContent =
+        user ? "“" + user + "”" : (reply ? "“" + reply + "”" : "BEE is standing by.");
+    }
+  } catch(e) { err(String(e).slice(0, 40)); }
   setTimeout(poll, 900);
 }
 poll();

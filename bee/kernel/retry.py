@@ -48,6 +48,14 @@ class RetryPolicy:
                 else FailureKind.TRANSIENT
         if re.search(r"verification|not (?:created|found|verif)|effect", e):
             return FailureKind.VERIFICATION
+        if re.search(r"no answer after wrap|max iterations", e):
+            # The attempt already spent the full iteration budget (plus a
+            # tools-disabled answer pass in the wrap case). Re-running from
+            # scratch re-burns all of it: the eval's dsa_sort_check logged 21 tool
+            # calls for a task whose first attempt had already exhausted its
+            # budget, and math_sieve went 39.9 s -> 80 s. Honest failure now beats
+            # a slow repeat of the same thrash.
+            return FailureKind.UNRECOVERABLE
         if tool and tool in _DESTRUCTIVE_TOOLS:
             return FailureKind.TOOL
         if e:

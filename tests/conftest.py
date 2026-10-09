@@ -91,6 +91,16 @@ _INTEGRATION = [
     # Coherence pass (2026-10-08): debt-fix regressions (N3 bus timeout,
     # N4 kernel-owned cancel scope, N9 full caps, H8 eval_safe budget).
     "test_debt_fixes",
+    # Audit pass (2026-10-08): streaming-TTS busy/lifecycle contract and local
+    # playback backend regressions (synthesized audio, no device, no network).
+    "test_voice_tts",
+    # Audit pass (2026-10-08): prompt-injection corpus through the real kernel
+    # (untrusted wrap, gate escalation, grant revocation) — stubbed web, scripted LLM.
+    "test_injection",
+    # Audit pass (2026-10-08): operator switches that were read by no code
+    # (computeruse/monitor/scheduler/model_gate/sandbox.max_output), the
+    # app-wide logging handler, num_ctx + workspace resolution.
+    "test_audit_fixes",
 ]
 # Files that need OPTIONAL packages / a specific platform — the default CORE
 # suite must not fail because these are absent (Program Phase 7). Phase 7
@@ -116,7 +126,7 @@ MARKERS = {
     "security": [
         "test_guard", "test_risk", "test_capabilities", "test_privacy",
         "test_netguard", "test_secretscan", "test_webauth", "test_sandbox",
-        "test_audit",
+        "test_audit", "test_injection",
     ],
     "agent": [
         "test_kernel_integration", "test_kernel_unit", "test_jarvis_features",
@@ -128,6 +138,7 @@ MARKERS = {
     ],
     "voice": [
         "test_voice_engine", "test_stt_device", "test_livekit",
+        "test_voice_tts",
     ],
     "scheduler": [
         "test_automation", "test_scheduling_unified", "test_pipeline",
@@ -169,3 +180,75 @@ def pytest_configure(config):
     # version check + clear message (Phase 7). Message-only filter so it also
     # works when sklearn is absent (bare core install).
     config.addinivalue_line("filterwarnings", "ignore:Trying to unpickle estimator")
+    _isolate_append_only_streams()
+
+
+
+# ------------------------------------------------------------------ isolation
+# Applied in pytest_configure (NOT a fixture) on purpose: script-style modules
+# like tests/test_monitor.py record events while they are being *collected*,
+# which happens before any fixture runs. A fixture-based guard leaked one
+# `test_probe` event per run into the user's real metrics.jsonl.
+_STREAM_MP = None
+
+
+def _isolate_append_only_streams():
+    """A test run must not write into the user's real telemetry or training data.
+
+    These streams feed things the USER sees: `metrics.jsonl` drives the dashboard
+    KPIs *and* `cfg.alerts` thresholds (so a synthetic failure can raise a real
+    desktop alert), and `train/episodes/` is the corpus the nightly router retrain
+    eats (so synthetic episodes become training data). Observed on 2026-10-08:
+    the live dashboard showed 563/639 `automation_job` calls failing and 101
+    guard denials — suite noise, not the user's machine.
+
+    A test that redirects these paths for itself still wins: its own monkeypatch
+    applies later and restores to these tmp paths.
+    """
+    global _STREAM_MP
+    import tempfile
+    from pathlib import Path
+
+    from bee import paths
+
+    root = Path(tempfile.mkdtemp(prefix="bee_test_streams_"))
+    mdir = root / "metrics"
+    mdir.mkdir()
+    (root / "episodes").mkdir()
+    sdir = root / "skills"
+    sdir.mkdir()
+    _STREAM_MP = pytest.MonkeyPatch()
+    _STREAM_MP.setattr(paths, "METRICS_DIR", mdir)
+    _STREAM_MP.setattr(paths, "METRICS_FILE", mdir / "metrics.jsonl")
+    _STREAM_MP.setattr(paths, "EPISODES_DIR", root / "episodes")
+    # skills/ is the agent's own procedure library: teach-back writes CANDIDATE
+    # cards there and the nightly `skill_gate` job evaluates them, so a test that
+    # runs the flywheel would leave the user with a skill the assistant believes
+    # it has (observed: `skills/graph_operations/`, source=agent, body = Python
+    # code where the markdown should be).
+    _STREAM_MP.setattr(paths, "SKILLS_DIR", sdir)
+
+    # memory/ is the user's own history: profile facts, diary, long-term notes,
+    # the structured store and its vector index. A test run must not add facts
+    # to it (an invented GPU from an eval fixture ended up in store.json as a
+    # `source: user` fact). Copied rather than emptied so tests that READ memory
+    # still see the real content — writes just go to the copy.
+    try:
+        import shutil
+
+        memroot = root / "memory"
+        shutil.copytree(paths.MEMORY_DIR, memroot, dirs_exist_ok=True)
+        for attr, sub in (("MEMORY_DIR", ""), ("DIARY_DIR", "diary"),
+                          ("LESSONS_DIR", "lessons"), ("VECTOR_DIR", "vectors")):
+            _STREAM_MP.setattr(paths, attr, memroot / sub if sub else memroot)
+        for attr, fn in (("PROFILE_MD", "profile.md"),
+                         ("LONGTERM_MD", "longterm.md"),
+                         ("SYSTEM_MD", "system.md")):
+            _STREAM_MP.setattr(paths, attr, memroot / fn)
+    except Exception:
+        pass
+
+
+def pytest_unconfigure(config):
+    if _STREAM_MP is not None:
+        _STREAM_MP.undo()

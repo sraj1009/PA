@@ -423,8 +423,10 @@ def test_temporal_schedule_creates_real_job(tmp_path):
         assert stored is not None and stored.action["type"] == "agent_task"
         assert stored.next_run.endswith("+00:00")
         assert any(j["id"] == r["job"] for j in stack.temporal.list())
-        # past time -> rejected honestly, no job (deterministic: now - 1h)
-        past = (datetime.now(TZ) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M")
+        # past time -> rejected honestly, no job. Derived from the WORKER'S clock
+        # (the FakeClock below), which is the instant the code compares against;
+        # the wall clock here made the test pass for the wrong reason.
+        past = (clock.now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M")
         r2 = stack.temporal.schedule("x", past)
         assert not r2["ok"] and "past" in r2["note"]
         # unparseable -> honest error
@@ -438,3 +440,66 @@ def test_temporal_schedule_creates_real_job(tmp_path):
                          worker_ref=lambda: None)
     r3 = stack2.temporal.schedule("x", "17:30")
     assert not r3["ok"] and "no job created" in r3["note"]
+
+
+def test_temporal_schedule_speaks_the_same_grammar_as_remind(tmp_path, monkeypatch):
+    """The memory/planner surface and /remind must understand the same words and
+    must decide 'today or tomorrow' from the SCHEDULER'S clock. Before this, a
+    spoken 'tomorrow 9am' was rejected ('could not parse') and a bare '17:30'
+    rolled over against datetime.now() — an instant the tick never uses."""
+    from bee.kernel.memory_if import MemoryStack
+    import bee.memory.md as md
+    monkeypatch.setattr(md, "diary_add", lambda s: None)   # keep the test hermetic
+
+    clock = FakeClock(BASE)                            # 2026-10-08 12:00 IST
+    ctx = Ctx(tmp_path)
+    w = make_worker(tmp_path, FakeKernel(Ctx(tmp_path)), clock, ctx=ctx)
+    stack = MemoryStack(structured_path=tmp_path / "store.json",
+                        worker_ref=lambda: ctx.automation_worker)
+
+    r = stack.temporal.schedule("send the invoice", "tomorrow 9am")
+    assert r["ok"], r
+    assert w.store.load_job(r["job"]).next_run == "2026-10-09T03:30:00+00:00"
+
+    r2 = stack.temporal.schedule("stretch", "in 20 min")
+    assert r2["ok"], r2
+    assert w.store.load_job(r2["job"]).next_run == "2026-10-08T06:50:00+00:00"
+
+    # a bare clock time still means TODAY when it has not passed yet (12:00 IST)
+    r3 = stack.temporal.schedule("call the dentist", "17:30")
+    assert r3["ok"], r3
+    assert w.store.load_job(r3["job"]).next_run == "2026-10-08T12:00:00+00:00"
+
+    # unparseable stays an honest refusal — never a guessed date
+    r4 = stack.temporal.schedule("x", "whenever")
+    assert not r4["ok"] and "tomorrow 9am" in r4["note"]
+
+
+def test_temporal_list_reports_upcoming_not_already_fired(tmp_path, monkeypatch):
+    """A one_time job keeps enabled=True after it fires, so a naive listing tells
+    the model a reminder the user already received is still coming up."""
+    from bee.kernel.memory_if import MemoryStack
+    import bee.memory.md as md
+    monkeypatch.setattr(md, "diary_add", lambda s: None)
+
+    clock = FakeClock(BASE)                            # 2026-10-08 12:00 IST
+    ctx = Ctx(tmp_path)
+    w = make_worker(tmp_path, FakeKernel(Ctx(tmp_path)), clock, ctx=ctx)
+    stack = MemoryStack(structured_path=tmp_path / "store.json",
+                        worker_ref=lambda: ctx.automation_worker)
+
+    from bee.automation.models import Job, JobTrigger, PENDING
+    w.create_job(Job(owner="reminder", description="Reminder: stretch",
+                     action={"type": "notify", "message": "Reminder: stretch",
+                             "critical": True},
+                     trigger=JobTrigger(kind="one_time",
+                                        at=(clock.now + timedelta(minutes=5)).isoformat()),
+                     timezone="Asia/Kolkata", enabled=True, state=PENDING))
+    assert len(stack.temporal.list()) == 1
+
+    clock.advance(minutes=6)
+    w.tick()
+    assert w.wait_idle(5.0)
+    j = w.jobs()[0]
+    assert j.state == "completed" and j.enabled          # the store's truth
+    assert stack.temporal.list() == []                   # but it is no longer 'upcoming'

@@ -26,6 +26,9 @@ def _computeruse_builder():
     # Phase 5: registered from bee.computeruse (kept out of the static list
     # so a missing optional desktop dependency never breaks tool import)
     try:
+        from ..config import load_config
+        if not load_config().computeruse.enabled:
+            return []          # operator kill-switch — see computeruse.enabled
         from ..computeruse import computeruse_tools
         return computeruse_tools()
     except Exception:

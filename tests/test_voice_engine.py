@@ -437,7 +437,10 @@ def test_10_end_to_end_real_kernel(tmp_path):
     cfg = load_config()
     cfg.cloud.enabled = False
     cfg.workspace = tmp_path
-    client = ScriptedClient(["Done. I opened the browser for you."])
+    # not phrased as a past-tense action claim: the verifier now refuses
+    # "I opened/executed X" when no tool ran, which would add a fix round
+    # and make this streaming test about something else entirely
+    client = ScriptedClient(["Sure — the browser is starting up now."])
     ctx = Context(cfg, workspace=tmp_path, client=client,
                   guard_on=True, guard_mode="unattended",
                   episodes_on=False, rag_on=False,
@@ -456,7 +459,7 @@ def test_10_end_to_end_real_kernel(tmp_path):
                       and kernel.last_task.state == TaskState.COMPLETED, timeout=10.0)
     assert kernel.last_task.session_id == "voice"
     assert step_until(eng, lambda: eng.state == VoiceState.LISTENING)
-    assert "Done. I opened the browser for you." in tts.sentences
+    assert "Sure — the browser is starting up now." in tts.sentences
     # genuine streaming: the first sentence was spoken before the task ended
     assert any(e["type"] == "state" and e["to"] == "SPEAKING" for e in ev)
     eng.close()
@@ -582,3 +585,90 @@ def test_14_voice_text_continuity_both_directions(tmp_path):
     assert "10 AM" in user3
     assert "follow-up" in r3.task.text
     eng.close()
+
+
+def test_unverified_action_claim_gets_corrected_before_the_task_ends(tmp_path, monkeypatch):
+    """A 3B model says 'I executed git reset --hard' having run nothing. The
+    verifier now refuses that, so the task must end on the corrected answer.
+    It also pins the honest limitation: because voice streams tokens live, the
+    unverified sentence is audible before the correction — you cannot un-say a
+    sentence, so the fix belongs in when speech starts, not in this test."""
+    from bee.agent.context import Context
+    from bee.config import load_config
+    from bee.kernel import AgentKernel
+    from test_kernel_integration import ScriptedClient
+
+    cfg = load_config()
+    cfg.cloud.enabled = False
+    cfg.workspace = tmp_path
+    client = ScriptedClient(["Done. I executed the shell command git reset --hard HEAD~1.",
+                             "I did not run it — the guard blocked that command."])
+    ctx = Context(cfg, workspace=tmp_path, client=client, guard_on=True,
+                  guard_mode="unattended", episodes_on=False, rag_on=False,
+                  cancel_event=threading.Event())
+    kernel = AgentKernel(ctx, sessions_dir=tmp_path / "sessions",
+                         receipts_path=tmp_path / "receipts.jsonl")
+    res = kernel.run("run git reset --hard HEAD~1", session_id="voice")
+    assert "did not run it" in (res.output or ""), res.output
+    assert client.calls and len(client.calls) == 2, "verification must force a second pass"
+
+
+# ---------------- spoken words cannot be unsaid: claim gating (A29b resolved)
+def _thinking(tts=None):
+    eng, ev = make_engine(tts=tts or FakeTTS())
+    eng.transport.connect()
+    eng._set_state(VoiceState.LISTENING)   # IDLE -> LISTENING -> THINKING is the
+    eng._set_state(VoiceState.THINKING)    # only legal route through the machine
+    return eng
+
+
+def test_action_claim_is_not_spoken_until_verified():
+    eng = _thinking()
+    eng._on_token("I executed the shell command git reset --hard HEAD~1. ")
+    assert eng.tts.sentences == [], "an unverified action claim must not reach the speaker"
+    assert eng._hold is True
+    eng._on_verify({"type": "verify", "verdict": "pass"})
+    eng.tts.wait_done(2.0)
+    assert any("git reset" in s for s in eng.tts.sentences), eng.tts.sentences
+
+
+def test_rejected_claim_is_never_spoken_and_the_correction_is():
+    eng = _thinking()
+    eng._on_token("I deleted every file in the folder.")
+    eng._on_verify({"type": "verify", "verdict": "fail"})
+    eng.tts.wait_done(2.0)
+    assert eng.tts.sentences == [], eng.tts.sentences
+    assert eng._hold is False
+    eng._on_token("The guard blocked that, so nothing was deleted.")
+    eng._flush_splitter()          # the real flow flushes at task end
+    eng.tts.wait_done(2.0)
+    assert any("guard blocked" in s for s in eng.tts.sentences), eng.tts.sentences
+    assert not any("deleted every file" in s for s in eng.tts.sentences)
+
+
+def test_ordinary_answers_still_stream_without_any_delay():
+    eng = _thinking()
+    eng._on_token("It is 21 degrees and clear tonight.")
+    eng._flush_splitter()          # the real flow flushes at task end
+    eng.tts.wait_done(2.0)
+    assert eng._hold is False
+    assert eng.tts.sentences, "plain answers must not be held back"
+
+
+def test_completion_falls_back_to_the_verified_final_answer():
+    """If verification never reported (older kernel, sub-task), silence would be
+    worse than caution: speak what the kernel returned as the final answer."""
+    eng = _thinking()
+    eng._on_token("I ran the backup for you.")
+    eng.tts.wait_done(2.0)
+    assert eng.tts.sentences == []
+    eng._task_result = {"ok": True, "output": "The backup job is scheduled for 02:00.",
+                        "error": None, "cancelled": False}
+    eng._flush_splitter()
+    if eng._hold:
+        out = (eng._task_result or {}).get("output", "")
+        for s in eng._split_all(out):
+            eng._speak_sentence(s)
+    eng.tts.wait_done(2.0)
+    assert any("scheduled for 02:00" in s for s in eng.tts.sentences), eng.tts.sentences
+    assert not any("I ran the backup" in s for s in eng.tts.sentences)

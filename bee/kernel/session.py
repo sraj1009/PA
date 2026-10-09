@@ -78,6 +78,29 @@ class AgentSession:
         self._touch()
 
     # --------------------------------------------------- follow-up resolve
+    @staticmethod
+    def _self_sufficient(t: str) -> bool:
+        """True when a SHORT utterance is a complete request on its own.
+
+        Bare math ('1234 + 5678', '5 plus 5', '10% of 200'), a greeting, and any
+        of the 39 fast-path commands ('what time is it', 'open chrome') do not
+        need the previous task to be understood. Merging them did two kinds of
+        damage: it mis-read the intent, and — because the merged string is what
+        routing sees — it disqualifies the deterministic and fast tiers that
+        would have answered in 0 ms with no LLM call at all.
+        """
+        try:
+            from ..agent.router import math_expr, smalltalk
+            if math_expr(t) or smalltalk(t):
+                return True
+        except Exception:
+            pass
+        try:
+            from ..agent.fastpaths import match as fp_match
+            return fp_match(t) is not None
+        except Exception:
+            return False
+
     def resolve_followup(self, text: str) -> tuple[str, str]:
         """Returns one of:
         ('cancel', <active task text or ''>)   — user wants to stop
@@ -89,6 +112,11 @@ class AgentSession:
         if low in STOP_WORDS:
             return ("cancel", self.active_task_text)
         if not t or not self.active_task_text:
+            return ("new", t)
+        # Self-sufficient requests win over the short-utterance heuristic below
+        # ("25*40/100" looks like a time, "what time is it" looks like a nudge —
+        # both are complete questions, not revisions of the previous task).
+        if self._self_sufficient(t):
             return ("new", t)
         # short message that references time / a revision / the prior object
         short = len(t) <= 90

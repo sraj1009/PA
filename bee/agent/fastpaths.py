@@ -35,6 +35,11 @@ class FastPath:
     name: str
     rx: Pattern
     handle: Callable  # (ctx, match) -> str | FastExec | None   (None = fall through)
+    # Utterance-length ceiling. The global 120-char cap exists so a long paragraph
+    # of prose cannot accidentally match a spoken command; a path that expects the
+    # user to paste content (code) needs more, and says so per path instead of
+    # loosening the cap for everything.
+    max_len: int = 120
 
 
 @dataclass
@@ -267,6 +272,154 @@ def _todo(ctx, m):
     return out
 
 
+_REMIND_LEAD = re.compile(r"^(?:to\s+|that\s+|about\s+|the\s+fact\s+that\s+)", re.I)
+
+
+def _remind_cmd(ctx, body: str):
+    """One implementation for both surfaces: the spoken fast path and /remind
+    share the parser, the durable job shape and the delivery, so a reminder set
+    by voice is listed and cancelled by the slash command and vice versa."""
+    from .. import commands as _cmds
+    cmd = _cmds.get("remind")
+    if cmd is None:
+        return None
+    out = cmd.handler(ctx, body)
+    # ERROR (no worker / no time in the words) declines instead of answering, so
+    # the model gets the turn rather than the user getting a usage message.
+    if out is None or out.startswith("ERROR"):
+        return None
+    return out
+
+
+def _remind(ctx, m):
+    body = _REMIND_LEAD.sub("", (m.group(1) or "").strip())
+    if not body:
+        return None
+    return _remind_cmd(ctx, body)
+
+
+def _remind_list(ctx, m):
+    return _remind_cmd(ctx, "list")
+
+
+def _remind_cancel(ctx, what: str):
+    return _remind_cmd(ctx, f"cancel {what}")
+
+
+def _files_list_reply(r) -> str:
+    if not isinstance(r, dict):
+        return "Could not read that folder."
+    if r.get("error"):
+        return f"Could not list it: {r['error']}"
+    entries = [e for e in (r.get("entries") or []) if "\t" in e]
+    dirs = [e.split("\t")[1] for e in entries if e.startswith("d\t")]
+    files = [e.split("\t")[1] for e in entries if e.startswith("f\t")]
+    head = (f"**{r.get('path', '.')}** — {len(dirs)} "
+            f"{'directory' if len(dirs) == 1 else 'directories'}, "
+            f"{len(files)} {'file' if len(files) == 1 else 'files'}")
+    lines = [head]
+    if dirs:
+        lines.append("- folders: " + ", ".join(dirs[:60]))
+    if files:
+        lines.append("- files: " + ", ".join(files[:60]))
+    if any(e.startswith("...") for e in r.get("entries") or []):
+        lines.append("_truncated at 300 entries_")
+    return "\n".join(lines)
+
+
+_FILES_HEAD = re.compile(
+    r"^(?:please\s+)?(?:"
+    r"(?:list|show(?:\s+me)?)\s+(?:the\s+|all\s+|top[- ]level\s+|its\s+)*"
+    r"(?:files?|folders?|directories|entries|contents)\b"
+    r"|(?:what|how\s+many)\s+(?:are\s+)?(?:the\s+|top[- ]level\s+)*"
+    r"(?:files?|folders?|directories|entries)\b"
+    r"|what(?:'s|s|\s+is|\s+are)?\s+in\b"
+    r")", re.I)
+_FILES_NOUN = re.compile(r"\b(?:file|files|folder|folders|director(?:y|ies)|"
+                         r"entries|contents|workspace|repo|root)\b", re.I)
+_FILES_TARGET = re.compile(r"(?:\bin\s+|\bof\s+|\bunder\s+|\bat\s+)"
+                           r"(?:the\s+|my\s+|our\s+)?"
+                           r"(?P<t>[\w.][\w./\\-]{0,60})", re.I)
+
+
+def _files_list(ctx, m):
+    """"What files are in the workspace?" — the real tool, under the guard.
+
+    The eval showed the local 3B model answering this with "I don't have access to
+    file system operations in this environment" while `file_list` sat in its tool
+    list: with 30 schemas offered it sometimes declines outright. Listing a folder
+    is deterministic work, so it must not depend on the model noticing."""
+    text = m.string or ""
+    target = ""
+    tm = _FILES_TARGET.search(text)
+    if tm:
+        target = tm.group("t").strip().strip("/\\.,;:!?")
+    # The bare "what's in …" form is ambiguous ("what is in the oven"). Only take
+    # it when the sentence is actually about folders; otherwise decline and let
+    # the model answer.
+    if not _FILES_NOUN.search(text) and not re.search(r"[/\\]|\.\.", target):
+        return None
+    if (not target or target.lower()
+            in ("workspace", "here", "root", "project", "folder", "directory",
+                "current", "this", "the", "it", "that")):
+        target = "."
+    return FastExec(
+        tool="file_list", args={"path": target},
+        reply=_files_list_reply,
+        blocked=lambda reason: f"⚠ Listing that folder was not allowed ({reason}).",
+    )
+
+
+def _specs(ctx, m):
+    from ..tools import systemctl
+    h = systemctl.get_hardware()
+    if h is None:
+        return None      # non-Windows / CIM failed — model pipeline takes over
+    return "This machine — " + systemctl.format_hardware(h)
+
+
+def _run_code(ctx, m):
+    """Run code the user pasted, instead of hoping the model calls a tool.
+
+    Two eval tasks say `Run python: <snippet>` and the 3B model replied by WRITING
+    code (with a typo in the module name), or by burning 15 tool calls on variants —
+    so the pasted snippet never ran. When the request contains the code, executing
+    it is deterministic and needs no model judgement at all."""
+    code = (m.group("c") or "").strip()
+    code = re.sub(r"^```(?:python|py)?\s*", "", code, flags=re.I)
+    code = re.sub(r"\s*```$", "", code).strip()
+    # 'Run python: <snippet> — list which sorts are correct' is how the request
+    # actually arrives: the trailing instruction is prose, not code, and leaving it
+    # in the snippet produced a SyntaxError on the first live run. Python source
+    # almost never carries a spaced em-dash, so cutting at the first one is safe.
+    code = re.split(r"\s[—–]\s", code, maxsplit=1)[0].strip()
+    if not code or len(code) > 4000:
+        return None
+    return FastExec(
+        tool="code_run", args={"code": code},
+        reply=_run_code_reply,
+        blocked=lambda reason: ("⚠ Running that was not allowed "
+                                f"({reason}). Nothing executed."),
+    )
+
+
+def _run_code_reply(r) -> str:
+    if not isinstance(r, dict):
+        return "The snippet did not run and returned nothing."
+    if r.get("error"):
+        return f"The snippet did not run: {r['error']}"
+    out = str(r.get("output") or "").strip()
+    err = str(r.get("error") or r.get("stderr") or "").strip()
+    code = r.get("exit_code")
+    if code not in (0, None):
+        return (f"Exit **{code}**" + (f"\n```\n{err[:1500]}\n```" if err else "")
+                + ((f"\noutput before the error:\n```\n{out[:1500]}\n```") if out else "")
+                + "\n\nNothing I can report as a result — the snippet failed.")
+    if not out:
+        return "Ran with exit 0 and printed nothing."
+    return out[:3000]
+
+
 def _sysstats(ctx, m):
     from ..tools import systemctl
     s = systemctl.get_system_stats()
@@ -496,6 +649,43 @@ FASTPATHS: list[FastPath] = [
     FastPath("open_domain", re.compile(r"^(?:please\s+)?(?:open|launch|visit|go to)\s+((?:https?://)?[a-z0-9-]+(?:\.[a-z0-9-]+)+[a-z0-9/._%?&=#-]*)\s*[?.!]*$", re.I), _open_domain),
     FastPath("search", re.compile(r"^(?:please\s+)?(?:search(?:\s+google)?|google|look\s+up|find\s+online)\s+(?!your\s+memory\b|my\s+memory\b|the\s+memory\b|memory\s+for\b)(?:for\s+)?([A-Za-z0-9][A-Za-z0-9 ,.'&-]{2,160})$", re.I), _search),
     FastPath("creator", re.compile(r"^(?:who|who's|whos)\s+(?:created|made|built|wrote|developed|designed)\s+(?:you|bee|this)\b[?.!]*$", re.I), _creator),
+    # spoken reminders ("remind me to stretch in 20 min") — same durable job,
+    # same parser and same delivery as /remind, with no model call and no
+    # provider needed at fire time. Listed BEFORE wikipedia/identity because
+    # "what are my reminders" otherwise reads as a definitional question.
+    FastPath("remind_list", re.compile(
+        r"^(?:(?:what|which)\s+(?:are|is)\s+my\s+reminders?|"
+        r"(?:show|list|check)(?:\s+me)?\s+(?:my\s+|all\s+)?reminders?|"
+        r"do\s+i\s+have(?:\s+any)?\s+reminders?)\s*[?.!]*$", re.I), _remind_list),
+    FastPath("remind_cancel_last", re.compile(
+        r"^(?:please\s+)?(?:cancel|delete|remove|stop)\s+(?:my|the)\s+"
+        r"(?:last|latest|most\s+recent)\s+reminders?\s*(?:please)?[?.!]*$", re.I),
+        lambda ctx, m: _remind_cancel(ctx, "last")),
+    FastPath("remind_cancel_all", re.compile(
+        r"^(?:please\s+)?(?:cancel|delete|remove|clear)\s+all\s+(?:of\s+)?(?:my\s+)?"
+        r"reminders?\s*(?:please)?[?.!]*$", re.I),
+        lambda ctx, m: _remind_cancel(ctx, "all")),
+    FastPath("files_list", _FILES_HEAD, _files_list),
+    FastPath("run_code", re.compile(
+        r"^(?:please\s+)?(?:run|execute|try)\s+(?:the\s+|this\s+)?(?:following\s+)?"
+        r"(?:python|py|python3)(?:\s+(?:code|snippet|script|program))?\s*[:\-–]\s*"
+        r"(?P<c>.+)$", re.I), _run_code, max_len=4000),
+    FastPath("remind", re.compile(
+        r"^(?:please\s+)?(?:remind\s+me\s+(?:to|about|that)|remind\s+me|"
+        r"don['’]t\s+forget\s+to|don['’]t\s+forget|"
+        r"set\s+(?:up\s+)?(?:a|an)\s+reminder\s+(?:to|for|about)|"
+        r"add\s+(?:a\s+)?reminder\s+(?:to|for|about)|reminder\s*[:|-])"
+        r"\s*[:\-]?\s+(.+)$", re.I), _remind),
+    FastPath("specs", re.compile(
+        r"^(?:"
+        r"(?:what\s+(?:are|is)|what['’]s|which\s+(?:are|is))\s+(?:my|this|the)\s+"
+        r"(?:(?:machine|pc|computer|laptop|system|device|hardware)(?:'s)?\s+)?"
+        r"(?:specs?\b|specifications?\b|hardware\b|cpu\b|processor\b|gpu\b|"
+        r"graphics\s+card\b|ram\b|memory\b)"
+        r"|(?:what|which)\s+(?:gpu|cpu|graphics\s+card|processor|ram|memory)\s+"
+        r"(?:do\s+i\s+have|is\s+(?:in|on|inside)\s+(?:my|this|the)\s+"
+        r"(?:machine|pc|computer|laptop|system))"
+        r")(?:\s+(?:do\s+i\s+have|this\s+machine\s+has))?[\s?.!]*$", re.I), _specs),
     FastPath("identity", re.compile(r"^(who\s+are\s+you|what\s+are\s+you|your\s+name|are\s+you\s+bee)\b[?.!]*$", re.I), _identity),
     FastPath("wikipedia", re.compile(r"^(?:what is|who is|what are|who are|tell me about|wiki(?:pedia)?(?:\s+on)?)\s+(?!you\b|bee\b)(.+)$", re.I), _wikipedia),
     FastPath("play", re.compile(r"^(?:please\s+)?(?:play|put\s+on)\s+(?!pause\b|stop\b|next\b|previous\b)([A-Za-z0-9][A-Za-z0-9' ,.&-]{2,120})$", re.I), _play),
@@ -526,9 +716,11 @@ FASTPATHS: list[FastPath] = [
 
 def match(task: str) -> Optional[tuple[FastPath, "re.Match"]]:
     t = (task or "").strip()
-    if not t or len(t) > 120:
+    if not t:
         return None
     for fp in FASTPATHS:
+        if len(t) > fp.max_len:
+            continue
         m = fp.rx.search(t)
         if m:
             return fp, m

@@ -66,6 +66,47 @@ def classify(tool: str, args: dict) -> tuple[str, str]:
     return "allow", ""
 
 
+_PREVIEW_KEYS = ("command", "code", "url", "path", "file", "task", "message",
+                 "query", "pattern", "text", "content", "action", "op", "kind")
+
+
+def preview_call(tool: str, args: dict | None, limit: int = 300) -> str:
+    """One line saying what the user is actually being asked to allow.
+
+    The prompt used to print only `args['command'] or args['code']`, so for every
+    non-shell tool it rendered an empty string: `file_write` onto `~/.ssh/id_rsa`
+    and `automation_job(op=rules, …)` — a rule that could zip Documents and POST
+    them out — both asked permission while showing nothing about the action.
+    Consent without information is not consent, so the preview is built from the
+    arguments that carry meaning, redacted like anything else leaving the process.
+    """
+    a = dict(args or {})
+    if tool == "systemctl":
+        out = f"{a.get('action')} {a.get('value') or ''}".strip()
+    elif a.get("command") or a.get("code"):
+        out = str(a.get("command") or a.get("code"))     # as the shell prompt read
+    else:
+        bits, used = [], 0
+        for k in _PREVIEW_KEYS:
+            v = a.get(k)
+            if v in (None, "", [], {}):
+                continue
+            piece = f"{k}={str(v)[:120]}"
+            bits.append(piece)
+            used += len(piece)
+            if used >= limit:
+                break
+        if not bits and a:      # unknown shape: the key names still tell the user
+            bits = [f"{k}={str(v)[:60]}" for k, v in list(a.items())[:6]]
+        out = " ".join(bits)
+    try:
+        from . import privacy
+        out, _n = privacy.redact(out)
+    except Exception:
+        pass
+    return " ".join(str(out).split())[:limit]
+
+
 def make_approver(mode: str = "cli"):
     """mode: cli (prompt), unattended (auto-deny), always (auto-approve, unsafe)."""
     if mode == "unattended":
@@ -73,12 +114,14 @@ def make_approver(mode: str = "cli"):
     if mode == "always":
         return lambda tool, args, reason: True
     def cli_approver(tool, args, reason) -> bool:
-        if tool == "systemctl":
-            preview = f"{args.get('action')} {args.get('value') or ''}".strip()
-        else:
-            preview = str(args.get("command") or args.get("code") or "")[:300]
+        preview = preview_call(tool, args)
+        if not preview and "pending:" not in str(reason):
+            # a capability ask already names the call inside `reason`; saying
+            # "(no arguments)" on top of that is noise, not information
+            preview = "(no arguments)"
+        line = f"  ⚠ GUARD [{reason}] {tool}" + (f": {preview}" if preview else "")
         try:
-            ans = input(f"  ⚠ GUARD [{reason}] {tool}: {preview}\n    allow? [y/N] ").strip().lower()
+            ans = input(f"{line}\n    allow? [y/N] ").strip().lower()
             return ans in ("y", "yes")
         except (EOFError, KeyboardInterrupt):
             return False

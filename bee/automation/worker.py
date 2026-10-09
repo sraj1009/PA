@@ -85,6 +85,10 @@ def _fn_rebuild_vectors(ctx) -> dict:
     from .. import scheduler
     return scheduler.rebuild_vectors(ctx)
 
+def _fn_flush_memory_index(ctx) -> dict:
+    from .. import scheduler
+    return scheduler.flush_memory_index(ctx)
+
 
 def _fn_train_router(ctx) -> dict:
     from .. import scheduler
@@ -138,6 +142,7 @@ def _redact(text: str) -> str:
 FUNCTIONS: dict[str, Callable] = {
     "bee.scheduler.consolidate": _fn_consolidate,
     "bee.scheduler.rebuild_vectors": _fn_rebuild_vectors,
+    "bee.scheduler.flush_memory_index": _fn_flush_memory_index,
     "bee.scheduler.maybe_train_router": _fn_train_router,
     "bee.scheduler.maybe_teach_back": _fn_teach_back,
     "bee.scheduler.maybe_build_sft": _fn_build_sft,
@@ -171,6 +176,12 @@ class JobWorker:
         self.on_notify = on_notify
         self._threads: set = set()
         self._threads_lock = threading.RLock()
+        # Deterministic idle signal (N7): wait_idle() used to SAMPLE thread
+        # liveness in a 0.05 s poll, so under load the last job thread could be
+        # observed alive past the deadline and the wait would fail even though
+        # everything had finished. Threads now announce their own exit.
+        self._idle = threading.Event()
+        self._idle.set()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.restore_report: dict = {}
@@ -189,6 +200,14 @@ class JobWorker:
         if self._thread is not None:
             self._thread.join(timeout=3.0)
             self._thread = None
+        # event sources are attached by scheduler.start_automation(); stopping
+        # them here means no poller outlives the worker it feeds
+        for src in getattr(self, "event_sources", ()) or ():
+            try:
+                src.stop()
+            except Exception:
+                pass
+        self.event_sources = []
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -204,16 +223,24 @@ class JobWorker:
     def wait_idle(self, timeout: float = 30.0) -> bool:
         """Block until no job thread is running (or timeout). Test/teardown
         helper — production uses the tick loop, not this."""
-        end = time.time() + timeout
-        while time.time() < end:
-            with self._threads_lock:
-                ts = [t for t in self._threads if t.is_alive()]
-            if not ts:
-                return True
-            for t in ts:
-                t.join(0.05)
+        self._idle.wait(timeout)
         with self._threads_lock:
-            return not any(t.is_alive() for t in self._threads)
+            alive = [t for t in self._threads if t.is_alive()]
+        if not alive:
+            self._idle.set()
+            return True
+        # the event was set too eagerly (a job started between wake and check):
+        # fall back to a bounded join sweep so the answer is still exact
+        end = time.time() + max(0.0, timeout - 0.01)
+        while time.time() < end:
+            for t in alive:
+                t.join(0.05)
+            with self._threads_lock:
+                alive = [t for t in self._threads if t.is_alive()]
+            if not alive:
+                self._idle.set()
+                return True
+        return False
 
     # -------------------------------------------------------------- restore
     def restore(self) -> dict:
@@ -377,6 +404,7 @@ class JobWorker:
                                  daemon=True, name=f"BeeJob-{job.id[-8:]}")
             with self._threads_lock:
                 self._threads.add(t)
+            self._idle.clear()            # busy from here; the thread announces exit
             t.start()
             started.append(job.id)
         return started
@@ -392,7 +420,11 @@ class JobWorker:
         finally:
             self.queue.release(job.id)
             with self._threads_lock:
+                # this thread removes itself first, so the remaining set is
+                # exactly the other in-flight jobs
                 self._threads.discard(threading.current_thread())
+                if not any(th.is_alive() for th in self._threads):
+                    self._idle.set()
 
     # ------------------------------------------------------------- execution
     def _run_job(self, job: Job) -> None:
@@ -601,14 +633,24 @@ class JobWorker:
         n = Notification(kind=kind, message=_redact(message + extra)[:500],
                          job_id=job.id if job else "")
         self.store.add_notification(n)
-        # OS-level toast on failure/missed (audit item 6) — best-effort,
-        # gated by cfg.alerts.enabled, never raises
-        if kind in ("failure", "missed"):
+        # OS-level toast, gated by cfg.alerts.enabled, best-effort, never raises.
+        # The gate used to be ONLY failure/missed, which meant a `notify` job —
+        # i.e. every /remind — "succeeded" into the store and the log while the
+        # user waited for something to appear. Proactive notifications are
+        # already past policy.check (authorization + rate limit + quiet hours),
+        # so they are meant to be seen too.
+        action = (job.action or {}) if job is not None else {}
+        wants_toast = (kind in ("failure", "missed") or kind == "proactive"
+                       or (kind == "job_event" and action.get("critical") is True))
+        if wants_toast:
             try:
                 from ..monitor import alerts
                 acfg = getattr(getattr(self.ctx, "cfg", None), "alerts", None)
                 if acfg is not None and getattr(acfg, "enabled", True):
-                    alerts.os_notify(f"BEE job {kind}", n.message)
+                    title = ("BEE reminder" if action.get("critical") is True
+                             else "BEE" if kind == "proactive"
+                             else f"BEE job {kind}")
+                    alerts.os_notify(title, n.message)
             except Exception:
                 pass
         if self.on_notify:
