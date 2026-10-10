@@ -153,7 +153,13 @@ _TOOL_CAPS: dict[str, list[str]] = {
     "computer_window":    ["desktop.launch"],
     "computer_input":     ["desktop.control"],
     "computer_clipboard": ["desktop.clipboard"],
-    "computer_stop":      ["desktop.control"],
+    # Stopping desktop control must never require permission to continue desktop
+    # control. `desktop.control` is R3/ASK, so gating the abort verb behind it made
+    # the emergency stop DENIABLE: every unattended surface fails closed (jobs,
+    # LiveKit, voice), and an interactive user was prompted to approve their own
+    # stop. `security/risk.py` already declares this tool capability-free — this
+    # map was the second source of truth, and it disagreed (A42a).
+    "computer_stop":      [],
     # Phase 6 — durable automation (explicit user authorization)
     "automation_job":     ["automation.manage"],
 }

@@ -152,3 +152,12 @@ automation:
   device_poll_seconds: 60
   memory_low_mb: 1500          # warn below this free RAM (this box stalls under ~1.5 GB)
   disk_low_gb: 4               # warn below this free space on the system drive
+
+# Self-improvement flywheel (bee/agent/reflection.py, called by the kernel after
+# every non-trivial task on EVERY surface — REPL, web, voice, jobs, proactive).
+# A lesson is written to memory/lessons/<date>.md and `context.recent_lessons()`
+# injects it into every future system prompt, so it is an operator-facing switch.
+# Cost: one extra local-model call per non-trivial task. Read by
+# AgentKernel._reflect; the eval turns it off to keep scored runs deterministic.
+learning:
+  reflect: true                # false = never write or spend a reflection call

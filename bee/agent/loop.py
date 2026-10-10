@@ -173,6 +173,36 @@ _WANTS_RESULT = re.compile(
     r"find the value|which|list|print|output|result)\b", re.I)
 _PY_FENCE = re.compile(r"```(?:python|py)?[ \t]*\r?\n(.*?)```", re.S | re.I)
 
+# A45a: does this snippet produce output of its own? If not, running it verbatim
+# yields empty stdout and there is nothing to verify against — the exact dead end
+# `dsa_gcd_lcm` hit in the live eval (the displayed code computed gcd/lcm into
+# variables and never printed them, so "I ran it; it prints:" came back blank).
+_PRINTS_SRC = re.compile(
+    r"\b(?:print|pprint)\s*\(|sys\.stdout|\.write\s*\(|\binput\s*\(", re.I)
+
+# Appended ONLY when the snippet has no output statement, so a printing snippet
+# still runs verbatim and nothing is ever executed twice. Bounded, and it prints
+# the code's own computed values rather than guessing at them.
+_VALUE_READOUT = """
+
+
+# --- appended by BEE: this snippet printed nothing, so report the values it computed
+import types as _bee_types
+_bee_rows = []
+for _bee_k, _bee_v in list(globals().items()):
+    if _bee_k.startswith("_") or isinstance(
+            _bee_v, (_bee_types.ModuleType, _bee_types.FunctionType,
+                    _bee_types.BuiltinFunctionType, type)):
+        continue
+    if isinstance(_bee_v, (int, float, str, bool, list, tuple, dict, set, frozenset)):
+        _bee_rows.append((_bee_k, _bee_v))
+for _bee_k, _bee_v in sorted(_bee_rows)[:12]:
+    try:
+        print(f"{_bee_k} = {repr(_bee_v)[:160]}")
+    except Exception:
+        pass
+"""
+
 _ABOUT_TOOLS_TASK = re.compile(
     r"\b(?:which|what|all)\s+(?:[a-z]+\s+){0,3}(?:tools?|functions?|capabilit\w+|"
     r"permissions?|integrat\w+)\b"
@@ -613,6 +643,7 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
     # empty-completion retry: small models occasionally return a blank reply —
     # one explicit nudge converts that into an answer instead of "(no output)"
     empty_retries = 0
+    empty_final = False        # the model never produced text: an unfinished task (A46)
     narration_nudged = False   # model described a call instead of making it
     force_wrap = False         # last text was meta-commentary: a no-tools pass must answer
     loop_closed = False        # model re-requested a refused call; tools are done
@@ -720,7 +751,17 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                     "Your previous reply was empty. Give your final answer now in plain text "
                     "(call a tool only if you still truly need one)."})
                 continue
-            final_output = (content or "").strip() or "(no output)"
+            # A46: after the one retry an EMPTY answer used to be delivered as the
+            # literal string "(no output)" with ok=True, and the verifier — whose
+            # three checks all key off events that happened — passed it (live eval
+            # `file_roundtrip`: 40.7 s, verify=pass, output "(no output)"). The user
+            # gets a bracketed nothing and the receipts claim success. Ship what
+            # actually happened instead, and say it did not finish.
+            empty_final = not (content or "").strip()
+            if empty_final:
+                final_output = _grounded_fallback(messages, n_tool_calls)
+            else:
+                final_output = (content or "").strip()
             if not sub:
                 try:
                     vres = verifier.verify(task, final_output, ctx.workspace,
@@ -911,6 +952,13 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                     # tools on this task; lock so the rest of the budget goes to
                     # producing an honest answer instead of more denied calls
                     tools_locked = True
+                    # A48: locking alone did not end the waste. Every later
+                    # iteration still paid a full local-model round-trip to be
+                    # handed another blocked note (live eval `file_roundtrip`:
+                    # 25 iterations, 28 refused calls, 40.7 s to reach the answer
+                    # it could have given at call 4). Reusing the repeat-abuse
+                    # exit makes the lock a real stop, not a polite suggestion.
+                    loop_closed = True
             elif isinstance(res_v, dict) and res_v.get("error"):
                 failures[tname] = failures.get(tname, 0) + 1
             elif isinstance(res_v, dict) and res_v.get("exit_code") not in (None, 0):
@@ -1053,16 +1101,21 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
         snippet = (fm.group(1).strip() if fm else "")
         if 8 <= len(snippet) <= 4000:
             from ..tools import tools_by_name as _tbn
+            # What the gate authorizes, the guard checks and the interpreter runs
+            # must be the SAME text — otherwise a read-out appended after
+            # approval would run unreviewed.
+            echoed = not _PRINTS_SRC.search(snippet)
+            run_src = snippet + _VALUE_READOUT if echoed else snippet
             proceed, action, reason = True, "allow", "not needed"
             gate = getattr(ctx, "capability_gate", None)
             if gate is not None:
-                g = gate.check("code_run", {"code": snippet},
+                g = gate.check("code_run", {"code": run_src},
                                task_id=getattr(ctx, "current_task_id", ""),
                                untrusted_context=False)
                 if not g.allowed:
                     proceed, action, reason = False, "capability_deny", g.reason
             if proceed and ctx.guard_on and cfg.guard.enabled:
-                proceed, action, reason = guard.check("code_run", {"code": snippet}, True,
+                proceed, action, reason = guard.check("code_run", {"code": run_src}, True,
                                                       ctx.guard_mode, approver=on_ask)
             if not proceed:
                 metrics.record("guard", tool="code_run", action=action, reason=reason)
@@ -1073,10 +1126,10 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                 bus = getattr(getattr(ctx, "kernel", None), "bus", None)
                 try:
                     if bus is not None:
-                        rv, _bd, _bk, _bm = bus.call(ctx, "code_run", {"code": snippet},
+                        rv, _bd, _bk, _bm = bus.call(ctx, "code_run", {"code": run_src},
                                                      stop_check=lambda: False)
                     else:
-                        rv = _tbn()["code_run"](ctx, code=snippet)
+                        rv = _tbn()["code_run"](ctx, code=run_src)
                 except Exception as e:
                     rv = {"error": f"{type(e).__name__}: {e}"}
                 dt = time.time() - t0
@@ -1086,11 +1139,11 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                 out = str(rv.get("output") or "").strip()
                 err = str(rv.get("error") or "").strip()
                 ok_run = not (rv.get("error") or rv.get("blocked"))
-                emit({"type": "tool_start", "tool": "code_run", "args": {"code": snippet[:120]}})
+                emit({"type": "tool_start", "tool": "code_run", "args": {"code": run_src[:120]}})
                 emit({"type": "tool_result", "tool": "code_run", "seconds": round(dt, 1),
                       "ok": ok_run, "preview": (out or err)[:300]})
                 if episode:
-                    episode.tool("code_run", {"code": snippet}, ok_run, dt, rv)
+                    episode.tool("code_run", {"code": run_src}, ok_run, dt, rv)
                 metrics.record("tool", tool="code_run", ok=ok_run, seconds=round(dt, 2),
                                blocked=bool(rv.get("blocked")))
                 messages.append({"role": "tool", "tool_call_id": "verify_shown_code",
@@ -1103,7 +1156,56 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                                      + (f" (exit {exit_code})" if exit_code not in (None, 0) else "")
                                      + f": {(err or out)[:300]} — the value above is unverified.")
                 else:
-                    final_output += "\n\nI ran it; it prints:\n```\n" + out[:800] + "\n```"
+                    # Stated as authoritative, not as a footnote: the live probe had
+                    # the model write 'the LCM is **308**' in prose while the snippet it
+                    # displayed prints 588. A user copies the confident number, so the
+                    # measured output has to be labelled the thing to trust.
+                    if echoed and not out:
+                        final_output += ("\n\n⚠ I ran the snippet and it neither printed "
+                                         "anything nor computed a value I could report — "
+                                         "the number above is unverified.")
+                    elif echoed:
+                        final_output += ("\n\nI ran that snippet. It printed nothing itself, "
+                                         "so these are the values it actually computed — "
+                                         "trust them over any number stated above:\n```\n"
+                                         + out[:800] + "\n```")
+                    else:
+                        final_output += ("\n\nI ran that snippet; this is what it actually "
+                                         "printed — trust it over any number stated above:\n```\n"
+                                         + out[:800] + "\n```")
+
+    # A45b: a plan the model narrates instead of producing. `plan_complex` asked
+    # for a plan "using the planner tool", the 3B model answered "I would follow
+    # these steps: 1. Loading…" and never called the planner — so the relay below
+    # had nothing to relay and the answer lost the library names the planner does
+    # produce. The planner is risk-LOW and needs no capability, so asking it is
+    # not a new permission surface; it is the tool the user named.
+    if (not sub and not cancelled and not plan_text and final_output
+            and _WANTS_PLAN.search(task or "")):
+        from ..tools import tools_by_name as _tbn2
+        bus2 = getattr(getattr(ctx, "kernel", None), "bus", None)
+        t0p = time.time()
+        try:
+            if bus2 is not None:
+                pv, _b1, _b2, _b3 = bus2.call(ctx, "planner", {"task": task},
+                                              stop_check=lambda: False)
+            else:
+                pv = _tbn2()["planner"](ctx, task=task)
+        except Exception as e:
+            pv = {"error": f"{type(e).__name__}: {e}"}
+        dtp = time.time() - t0p
+        pv = pv if isinstance(pv, dict) else {}
+        ptxt = str(pv.get("plan") or "").strip()
+        okp = bool(ptxt) and not pv.get("error")
+        n_tool_calls += 1 if okp else 0
+        emit({"type": "tool_start", "tool": "planner", "args": {"task": task[:120]}})
+        emit({"type": "tool_result", "tool": "planner", "seconds": round(dtp, 1),
+              "ok": okp, "preview": (ptxt or str(pv.get("error") or ""))[:300]})
+        if episode:
+            episode.tool("planner", {"task": task}, okp, dtp, pv)
+        metrics.record("tool", tool="planner", ok=okp, seconds=round(dtp, 2), blocked=False)
+        if okp:
+            plan_text = ptxt
 
     # A plan the model paraphrases is a plan the user cannot act on. Asked to plan a
     # CSV analysis with the planner tool, the reply was 'we would need to load the
@@ -1126,10 +1228,17 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                         "\n\n⚠ I could not verify that this actually ran — no tool "
                         "result backs it up. Please treat the action as NOT done.")
 
+    # A46: an empty answer is an unfinished task, never a verified one.
+    if empty_final:
+        vres = {"verdict": "fail",
+                "findings": [{"check": "empty answer",
+                              "detail": "the model returned no text for this task"}]}
+
     res = AgentResult(output=final_output, model=name, iterations=iters, escalated=escalated,
                       tool_calls=n_tool_calls, est_tokens=tokens, sub_results=sub_results,
-                      ok=not (claim_fail or degraded),
+                      ok=not (claim_fail or degraded or empty_final),
                       error=("unverified action claim" if claim_fail
-                             else ("no answer after wrap" if degraded else "")),
+                             else ("no answer after wrap" if degraded
+                                   else ("empty answer" if empty_final else ""))),
                       verify=vres["verdict"], route_source=rinfo.get("source", ""))
     return _finish(ctx, task, episode, res, start, emit, sub)

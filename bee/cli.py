@@ -233,10 +233,17 @@ def _repl(cfg):
                         p.info(f"  {mark} [{meta['n']}] {labels[e]}")
                     p.info("  set with: /engine hybrid | local | ollama-cloud | api-cloud  (persisted)")
                 elif arg in engines.ENGINES:
-                    engines.save_engine(arg)
                     model_override = engines.override_for(arg)
                     ctx.model_override = model_override
-                    p.info(f"engine set to {arg} (persisted; this session: {model_override or 'auto routing'})")
+                    # Do not claim "persisted" unless the write happened: a blocked
+                    # file (OneDrive locks this one on this machine) used to lose the
+                    # choice silently while the REPL said it was saved (A41b).
+                    if engines.save_engine(arg):
+                        p.info(f"engine set to {arg} (persisted; this session: "
+                               f"{model_override or 'auto routing'})")
+                    else:
+                        p.info(f"engine set to {arg} for THIS session only — "
+                               f"it could not be written to settings.json")
                 else:
                     p.error("unknown engine — run /engine with no arg to list")
             elif cmd == "/tts":
@@ -533,12 +540,9 @@ def _repl(cfg):
             if not result.ok:
                 p.error(result.error)
             last_task = (line, result)
-            try:
-                lesson = reflection.reflect(ctx, line, result)
-                if lesson:
-                    p.info("  lesson saved to memory/lessons/")
-            except Exception:
-                pass
+            # The lesson is written by the kernel now (`AgentKernel._reflect`), so
+            # every surface learns, not just this REPL (A40b). `/reflect` still
+            # re-runs it on demand for the last task.
 
 
 def _on_event(p: _Print, ev: dict):

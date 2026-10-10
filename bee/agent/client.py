@@ -138,11 +138,12 @@ class LLMClient:
         if info["cloud"] and info.get("api_key"):
             kwargs["api_key"] = info["api_key"]
 
-        emitted = {"n": 0}
+        emitted = {"n": 0, "text": ""}
 
         def tok(s: str):
             if s:
                 emitted["n"] += 1
+                emitted["text"] += s
                 try:
                     on_token(s)
                 except Exception:
@@ -156,7 +157,7 @@ class LLMClient:
                 if info["cloud"]:
                     raise LLMError("cloud streaming requested but litellm not installed",
                                    "server", False)
-                return self._ollama_stream(info, kwargs, on_token, tok, emitted)
+                return self._ollama_stream(info, kwargs, tools, on_token, tok, emitted)
             except LLMError as e:
                 last_err = e
                 if e.retryable and attempt < max_retries and emitted["n"] == 0:
@@ -164,7 +165,7 @@ class LLMClient:
                     continue
                 if emitted["n"] > 0:
                     # partial stream already reached the user — surface it
-                    return {"content": getattr(e, "_partial", None),
+                    return {"content": emitted["text"] or None,
                             "tool_calls": [], "usage": {}}
                 raise
             except Exception as e:
@@ -174,7 +175,8 @@ class LLMClient:
                     time.sleep(1.0 * (2 ** attempt))
                     continue
                 if emitted["n"] > 0:
-                    return {"content": None, "tool_calls": [], "usage": {},
+                    return {"content": emitted["text"] or None,
+                            "tool_calls": [], "usage": {},
                             "error": str(e)}
                 raise LLMError(str(e), err.kind, err.retryable) from e
         raise LLMError(str(last_err), "server")  # pragma: no cover
@@ -200,7 +202,7 @@ class LLMClient:
         timeout = kwargs.get("timeout", 300)
         with httpx.Client() as hc:
             with hc.stream("POST", f"{info['base_url']}/api/chat", json=payload,
-                           timeout=httpx.Timeout(connect=6.0, read=float(timeout))) as r:
+                           timeout=httpx.Timeout(float(timeout), connect=6.0)) as r:
                 r.raise_for_status()
                 for line in r.iter_lines():
                     if not line:
@@ -323,10 +325,14 @@ class LLMClient:
             raise LLMError("Ollama not reachable for embeddings", "connect")
         if HAS_LITELLM:
             try:
-                resp = litellm.embedding(model=f"ollama_chat/{self.cfg.ollama.embed_model}", input=texts)
+                # `ollama_chat/` is a CHAT provider: for embeddings litellm maps
+                # only `ollama/`, so the old ref raised UnknownProvider on every
+                # call and the blanket except dropped it into the native loop.
+                resp = litellm.embedding(model=f"ollama/{self.cfg.ollama.embed_model}",
+                                         api_base=self.cfg.ollama.base_url, input=texts)
                 return [d["embedding"] for d in resp["data"]]
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("litellm embedding unavailable (%s); using native Ollama", e)
         url = f"{self.cfg.ollama.base_url}/api/embeddings"
         out = []
         for t in texts:

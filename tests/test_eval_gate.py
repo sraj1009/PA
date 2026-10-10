@@ -160,3 +160,66 @@ def test_baselines_file_corruption_is_safe(env, monkeypatch):
     env["baselines"].write_text("{not json", encoding="utf-8")
     data = gate.load_baselines()
     assert data == {"models": {}, "promotions": []}
+
+
+# ------------------------------------------- eval permission posture + workspace (A36)
+def test_the_eval_answers_prompts_the_way_a_user_would(tmp_path):
+    """The suite used to auto-deny every prompt, which made any task whose correct
+    answer requires executing code unsatisfiable BY CONFIGURATION. Local compute and
+    file actions are granted; anything destructive or externally visible stays denied
+    so `guard_blocked` still proves the block is real."""
+    from bee.evals import runner
+    for tool in ("code_run", "file_write", "file_read", "file_list", "planner"):
+        assert runner.eval_approver(tool, {}, "r"), tool
+    for tool in ("shell", "sandbox_run", "systemctl", "automation_job", "skill_create",
+                 "email", "browser"):
+        assert not runner.eval_approver(tool, {}, "r"), tool
+
+
+def test_the_eval_may_create_a_file_but_never_clobber_one(tmp_path):
+    """`file_roundtrip` asks for a NEW eval_probe.txt; granting file_write wholesale
+    would let a run overwrite real source. Creation yes, destruction no — the
+    restore guard stays the backstop, not the control."""
+    from bee.evals import runner
+    (tmp_path / "bee").mkdir()
+    (tmp_path / "bee" / "agent.py").write_text("USER WORK\n", encoding="utf-8")
+    assert runner.eval_approver("file_write", {"path": "notes/new.txt"}, "r",
+                               workspace=tmp_path) is True
+    assert runner.eval_approver("file_write", {"path": "bee/agent.py"}, "r",
+                               workspace=tmp_path) is False
+    assert runner.eval_approver("file_write", {"path": "../outside.py"}, "r",
+                                workspace=tmp_path) is True   # guard/capability still apply
+
+
+def test_restore_workspace_undoes_everything_the_run_touched(tmp_path):
+    import shutil as _sh
+    import subprocess
+    from bee.evals.runner import _restore_workspace
+
+    if not _sh.which("git"):
+        pytest.skip("git unavailable")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+    (repo / "keep.txt").write_text("original\n", encoding="utf-8")
+    (repo / "doomed.txt").write_text("still here\n", encoding="utf-8")
+    (repo / "dirty_before.txt").write_text("uncommitted work\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-qm", "x"], cwd=str(repo), check=True)
+    # 'dirty before' will be made dirty BEFORE the context opens: it must survive
+    # untouched even though the run also changes it.
+    (repo / "dirty_before.txt").write_text("MY UNCOMMITTED WORK\n", encoding="utf-8")
+
+    with _restore_workspace(repo):
+        (repo / "eval_probe.txt").write_text("BEE EVAL OK", encoding="utf-8")
+        (repo / "keep.txt").write_text("clobbered by the run\n", encoding="utf-8")
+        (repo / "doomed.txt").unlink()
+        (repo / "dirty_before.txt").write_text("mangled by the run\n", encoding="utf-8")
+
+    assert (repo / "keep.txt").read_text(encoding="utf-8") == "original\n"
+    assert (repo / "doomed.txt").read_text(encoding="utf-8") == "still here\n"
+    assert not (repo / "eval_probe.txt").exists()
+    # work that was already uncommitted before the run is never reverted
+    assert (repo / "dirty_before.txt").read_text(encoding="utf-8") == "MY UNCOMMITTED WORK\n"

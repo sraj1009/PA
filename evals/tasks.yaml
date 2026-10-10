@@ -60,7 +60,11 @@ tasks:
 
   - id: plan_complex
     task: "Plan (do not execute) how you would analyze a 50MB CSV sales file: loading, cleaning, top-10 products by revenue, monthly trend, and a summary report. Use the planner tool."
-    expect: ["pandas"]
+    # A45d: the requirement is that the plan COMMITS to a real library, not that it
+    # picks one particular library. The literal was ['pandas'] while the planner now
+    # correctly answers polars (a better fit at 50 MB), so a correct plan failed on
+    # vocabulary. Still fails if no library is named at all.
+    expect_any: ["pandas", "polars", "duckdb", "dask", "arrow"]
 
   # ---------- Phase 4: routing / guard / verification / RAG / privacy ----------
   # Event assertions: expect_route (first route event model|source),

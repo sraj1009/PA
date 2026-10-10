@@ -45,6 +45,10 @@ SKILLS_DIR = PROJECT_ROOT / "skills"
 MODELS_YAML = PROJECT_ROOT / "models.yaml"
 
 CONFIG_YAML = PROJECT_ROOT / "config.yaml"
+# The persisted engine choice. A module-level path (not `PROJECT_ROOT / ...`
+# inside the caller) so the test suite can redirect it — an unredirectable path
+# is what let the suite write user state before (A25b, A27f).
+SETTINGS_JSON = PROJECT_ROOT / "settings.json"
 JOBS_JSON = PROJECT_ROOT / "jobs.json"
 JOBS_LOG = PROJECT_ROOT / "jobs.log"
 EVALS_DIR = PROJECT_ROOT / "evals"

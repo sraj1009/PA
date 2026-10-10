@@ -9,11 +9,11 @@ Legend:
 - **YELLOW** — implemented with known, documented limitations
 - **RED** — incomplete / unverified / unsafe
 
-Test basis (final, post fix-pass 2026-10-09): `pytest tests -q` = **767 passed,
-0 failed** (core 688 · security 125 · integration 454 · unit 241 ·
+Test basis (final, post fix-pass 2026-10-09): `pytest tests -q` = **842 passed,
+0 failed** (core 763 · security 135 · integration 460 · unit 310 ·
 windows 88 · ml 65 · voice 45 · livekit 13 — suites overlap by marker);
 `evals/verify_suite.py` = **71,914 checks, ALL PASS** (re-run after every change).
-21-task agent eval: **19-20/21** across consecutive runs (20/21 → 19/21 → 18/21 → 17/21
+21-task agent eval: **19/21** on the post-A45/A46 full run (20/21 → 19/21 → 18/21 → 17/21
 → 16/21 → 15/21 → 14/21 → 11/21 → 10/21 the day before, 5/21 in the pre-fix run).
 The score moves with
 local-3B answer quality and is stochastic — what is *mechanism-level* stable is
@@ -24,7 +24,10 @@ FAIL** to **0.0 s / 0 tool calls / PASS**, likewise `route_det_pct`, `math_repea
 `dsa_sort_check` — pasted code now executes instead of being described,
 **32.6 s / 14 tool calls / FAIL → 0.1 s / 1 call / PASS** — and `dsa_lis`,
 `dsa_gcd_lcm`, `dsa_graph` once code the model merely displayed is executed for real
-(A34c, A34e).
+(A34c, A34e) — and A45a, where the displayed snippet computed into variables and
+printed nothing: `dsa_gcd_lcm` **40.3 s / 16 tool calls / FAIL → 25.4 s / 1 call /
+PASS**, the values reported as measured (`gcd_value = 21`, `lcm_value = 588`) rather
+than as the model's arithmetic.
 
 ## Post-audit fix pass (2026-10-08) — rows this document had wrong
 
@@ -216,6 +219,24 @@ rows below were therefore **overclaimed** and are now corrected:
   budget-exhausted attempt is now final rather than re-burned), and the fallback
   was quoting the guard's own refusal JSON as if it were evidence.
 
+- **Genuine streaming was broken in the no-litellm configuration (A37), and the
+  primary embedding path had never worked (A38).** Every streaming test used a
+  fake client with its own `chat_stream`, so the real `LLMClient` streaming path
+  had never executed: `tools` was omitted at the one call site (→ `TypeError`
+  re-raised as a generic `LLMError`, so **no token stream at all** when litellm is
+  absent — the REPL, web SSE and voice surfaces), `httpx.Timeout(connect=, read=)`
+  was invalid without a default, and the partial-recovery branch read
+  `e._partial`, which nothing sets. `embed()` requested `ollama_chat/<model>` —
+  unmapped for embeddings — and its `except: pass` dropped every batch into the
+  native loop silently. **Live on the real `bee4b`/Ollama:** `LLMError: …
+  _ollama_stream() missing 1 required positional argument: 'emitted'` →
+  `tokens=2 content='STREAM OK' usage={'prompt': 146,'completion': 3}` in 0.2 s;
+  embeddings now return 3×768-dim from the primary path in one call. Pinned by 7
+  real-client tests (`tests/test_streaming_contract.py`) plus a static
+  call-signature contract (`tests/test_static_contracts.py`, A37e) that also
+  re-feeds the original A27a/A37a bugs into itself so it cannot pass by being
+  unable to fire.
+
 Also fixed and live-verified: the face page now authenticates (verified in a
 real browser — it renders `thinking` + the utterance instead of sitting on
 "idle" forever), edge-tts MP3 actually plays (real MP3 → exact-size WAV,
@@ -243,6 +264,7 @@ A14) · verify_suite ALL PASS.
 | Cloud-unavailable operation | GREEN (tested) / YELLOW (live) | fallback + deterministic floor verified with fake clients; live offline drill not performed in this audit |
 | ML router | GREEN | optional; major-version incompatible artifact **refused** with a clear message; falls back to heuristics; per-class training report; pinned env |
 | Offline deterministic tier (math/smalltalk/files) | GREEN | eval_safe AST calculator, fast paths, offline floor |
+| Engine choice (hybrid / local / ollama-cloud / api-cloud) + persistence | GREEN (A41) | one canonical redirectable path (`paths.SETTINGS_JSON`, isolated by the suite); `save_engine` returns whether the write happened and the REPL / `POST /engine` report `persisted` separately from the in-session switch; unknown names and corrupt files log instead of silently reverting to hybrid. **Live through the real app:** blocked write → `{'ok': True, 'persisted': False}` + warning (was a silent `{"ok": true}`). |
 
 ## Memory & conversation
 
@@ -253,12 +275,15 @@ A14) · verify_suite ALL PASS.
 | Session persistence + follow-up resolution | GREEN | "continue/new/cancel" + time nudges; "Remind me… → Tomorrow." = ONE rescheduled durable job |
 | Planner (typed intent → validated plan before execution) | GREEN | impossible/ambiguous requests short-circuit without LLM; replans counted |
 | Markdown memory (diary/lessons/profile/longterm) + RAG | GREEN | hybrid vector+keyword; vector rebuild is clear-before-add |
+| Self-improvement flywheel (post-task reflection → lessons → next prompt) | GREEN (A40, live on `bee4b`) | now owned by the **kernel**, so web/voice/LiveKit/jobs/proactive learn too — previously only the REPL wrote lessons while all of them read them. `_usable()` gate rejects plumbing-ramble / self-machinery / all-empty lessons before any write (7 of the 23 real stored lessons would now be refused); cancelled tasks teach nothing; a failed write is logged, never claimed. Switch: `learning.reflect` (off in the eval so scored runs stay deterministic). |
 
 ## Scheduling & proactivity
 
 | Feature | Status | Note / limitation |
 |---|---|---|
 | Durable scheduler (one Job model, UTC-canonical next_run, job timezone) | GREEN | restart restore with crash repair, no blind replay, file-claim single-flight; trigger math pure & tz-deterministic |
+| `automation_job` create validation (A43) | GREEN | a trigger whose next fire cannot be computed is **refused** with the field and shape named (`at`/`time`/`days`/`every_seconds`), never stored as a live-but-deaf `pending/enabled/next_run=""` job; day names map to 0-6, unknown days and unknown kinds are refused; malformed numbers return a model-actionable message instead of `invalid literal for int() with base 10` |
+| Eval hermeticity (A44) | GREEN (live-verified) | a scored run redirects memory **+ telemetry** (`metrics.jsonl`, `train/episodes/`, `skills/`) **+ workspace**, and disables reflection; verified by hash before/after a live 2-task run. 322 eval episodes and 502 eval metric rows written by earlier runs were removed reversibly (backups in `temp/*.before-a44-…`), keeping the user's rows byte-for-byte |
 | Scheduled tasks through the kernel | GREEN | agent jobs + proactive tasks run `kernel.run` with fail-closed approver (only preapproved capabilities) |
 | Proactive policy (default-deny, rate limits, quiet hours) | GREEN | no rule → no action; per-rule + global caps; quiet hours suppress non-critical pings |
 | External side effects (auto email/whatsapp/sms) | GREEN (gate) / **must stay off by default** | require `external_authorized=True` per rule; default-deny enforced in `ProactivePolicy.check` |
@@ -283,7 +308,8 @@ A14) · verify_suite ALL PASS.
 | Observe → act → re-observe → verify closed loop | GREEN (mocked UI) | per-action pre/post snapshots + `verify_action`; budget-bounded; action ids |
 | Coordinate provenance (no stale pixels) | GREEN | coords must lie in a rect from the LAST observe; semantic targets resolved by the vision backend against a fresh snapshot; `model_raw` explicitly flagged for the risk layer |
 | Safe action set (12 verbs) | GREEN | no financial/destructive/credential/download/executable verbs exist in `VERBS`; credential targets blocked by name |
-| Emergency stop (independent of the LLM) | GREEN (mocked) | 3 mechanisms: kernel cancel event, global registry stop, Ctrl+Alt+Q hotkey poller |
+| Emergency stop (independent of the LLM) | GREEN (mocked, A42) | 4 mechanisms: kernel cancel event, global registry stop, Ctrl+Alt+Q hotkey poller, and the `computer_stop` tool — which now requires **no** capability (it used to be gated behind `desktop.control`/ASK, so an unattended surface could be denied its own abort). Stops are per-task: the next task gets a clean session. |
+| Argument-shape validation on computer actions | GREEN (A42b) | a string `keys` ("ctrl+s") is refused with the shape to send instead — it used to iterate and press six individual keys into the focused window while verification reported `verified: True`; `expected` must be an object, numeric-string coordinates are coerced and non-numeric refused. |
 | Permissions for risky actions | GREEN | risk classification → kernel approver + capability gate (e2e test through the real kernel) |
 | Privacy/retention (no typed text/clipboard/pixels/titles in logs; bounded screenshot ring) | GREEN | enforced in `privacy.py`, test-pinned |
 | Vision layer (vendor-neutral `VisionBackend`) | YELLOW | `StructuralVision` (window rects) is the default; learned-vision backends are swappable but **not implemented** |

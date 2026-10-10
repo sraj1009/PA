@@ -661,9 +661,44 @@ def test_code_the_model_showed_but_never_ran_is_executed_and_reported(tmp_path, 
     k, client = _allowing_kernel(tmp_path, [SHOW_CODE], monkeypatch)
     res = k.run("Compute gcd and lcm of 84 and 147 with a short Python snippet. "
                 "Show both values.")
-    assert "I ran it; it prints" in res.output, res.output
+    assert "I ran that snippet" in res.output, res.output
     assert "21 588" in res.output, res.output
     assert res.tool_calls == 1, res.tool_calls
+
+
+SHOW_CODE_NO_PRINT = ("Here is the computation:\n\n```python\nimport math\n"
+                      "a, b = 84, 147\ngcd_value = math.gcd(a, b)\n"
+                      "lcm_value = a * b // gcd_value\n```\n\n"
+                      "So the values are 21 and 308.")
+
+
+def test_a_shown_snippet_that_computes_without_printing_is_still_verified(tmp_path, monkeypatch):
+    """A45a: the model displayed code that stores the results in variables and
+    never prints them, so running it verbatim produced EMPTY stdout — the existing
+    mechanism appended 'I ran it; it prints:' with nothing in it, `588` never
+    appeared, and `dsa_gcd_lcm` kept failing for a reason no code could see.
+    The loop now asks the snippet for the values it computed (only when it has no
+    output statement of its own) and labels them authoritative. Note the model's
+    prose says 308: the measured 588 must win."""
+    k, client = _allowing_kernel(tmp_path, [SHOW_CODE_NO_PRINT], monkeypatch)
+    res = k.run("Compute gcd and lcm of 84 and 147 with a short Python snippet. "
+                "Show both values.")
+    assert "values it actually computed" in res.output, res.output
+    assert "gcd_value = 21" in res.output, res.output
+    assert "lcm_value = 588" in res.output, res.output
+    assert res.tool_calls == 1, res.tool_calls
+
+
+def test_a_snippet_that_prints_is_run_verbatim_not_rewritten(tmp_path, monkeypatch):
+    """The read-out must only be appended when there is no output of its own —
+    otherwise every printing snippet runs modified code (and side effects would
+    be doubled if it were appended after the fact)."""
+    k, client = _allowing_kernel(tmp_path, [SHOW_CODE], monkeypatch)
+    res = k.run("Compute gcd and lcm of 84 and 147 with a short Python snippet. "
+                "Show both values.")
+    assert "this is what it actually printed" in res.output, res.output
+    assert "21 588" in res.output, res.output
+    assert "appended by BEE" not in str(client.calls), "printing snippet was rewritten"
 
 
 def test_a_refused_snippet_is_flagged_unverified_instead_of_silent(tmp_path, monkeypatch):
@@ -677,7 +712,7 @@ def test_a_refused_snippet_is_flagged_unverified_instead_of_silent(tmp_path, mon
     k, client = _allowing_kernel(tmp_path, [SHOW_CODE], monkeypatch)
     res = k.run("Compute gcd and lcm of 84 and 147 with a short Python snippet.")
     assert "unverified" in res.output, res.output
-    assert "I ran it; it prints" not in res.output, res.output
+    assert "I ran that snippet" not in res.output, res.output
 
 
 def test_a_snippet_that_errors_is_not_passed_off_as_an_answer(tmp_path, monkeypatch):
@@ -694,7 +729,7 @@ def test_a_task_that_already_ran_python_is_not_executed_twice(tmp_path, monkeypa
         tc("c1", "code_run", {"code": "print(4)"}),
         "It printed 4.\n\n```python\nprint(1/0)\n```"], monkeypatch)
     res = k.run("compute the value using python code please")
-    assert "I ran it; it prints" not in res.output, res.output
+    assert "I ran that snippet" not in res.output, res.output
     assert "it failed" not in res.output, res.output
 
 
@@ -750,7 +785,7 @@ def test_code_volunteered_for_a_value_question_is_run_too(tmp_path, monkeypatch)
            "print(c(100))\n```\n\nThere are quite a few.")
     k, client = _allowing_kernel(tmp_path, [ans, ans], monkeypatch)
     res = k.run("How many prime numbers are there between 1 and 100?")
-    assert "I ran it; it prints" in res.output, res.output
+    assert "I ran that snippet" in res.output, res.output
     assert "25" in res.output, res.output
 
 
@@ -781,3 +816,21 @@ def test_grounded_fallback_does_not_quote_a_refusal_as_evidence():
                                      'earlier in this task.", "cached_result": "x"}'}], 4)
     assert "You already ran" not in loop_notes, loop_notes
     assert "4" in loop_notes, loop_notes
+
+
+def test_an_empty_answer_is_never_delivered_as_a_verified_success(tmp_path, monkeypatch):
+    """A46, live eval `file_roundtrip`: the model returned no text, the loop shipped
+    the literal string '(no output)' as the assistant's reply, and because the
+    verifier's checks all key off events that already happened, it came back
+    ok=True with verify=pass. A user reading that sees a bracketed nothing and the
+    receipts claim the task succeeded."""
+    # empty on EVERY call: the kernel retries a verify=fail task, and the scripted
+    # client hands back a canned reply once its script runs out — which would be a
+    # second, unrelated answer rather than the empty one under test.
+    k, client = _allowing_kernel(tmp_path, [""] * 12, monkeypatch)
+    res = k.run("Create a file called eval_probe.txt containing 'BEE EVAL OK', "
+                "then read it back and tell me what it says.")
+    assert res.output != "(no output)", res.output
+    assert res.ok is False, res
+    assert res.error == "empty answer", (res.ok, res.error)
+    assert res.verify == "fail", res.verify

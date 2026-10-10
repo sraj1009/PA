@@ -21,6 +21,7 @@ event, which run_agent honors between iterations and before each tool call.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -39,6 +40,8 @@ from .session import AgentSession
 from .state import InvalidTransitionError, transition
 from .tools_bus import ToolBus
 from .verification import check_effect, verify_task
+
+log = logging.getLogger("bee.kernel")
 
 _STEP_SPLIT = None  # kept simple: the agent loop is already multi-step internally
 
@@ -388,7 +391,7 @@ class AgentKernel:
         # grants given mid-task never outlive the task (end_task below).
         self.ctx.current_task_id = task.id
         try:
-            return self._execute_loop(task, session_id, exec_text, model, bridge, _approver,
+            result = self._execute_loop(task, session_id, exec_text, model, bridge, _approver,
                                       start, session, on_token, max_iters=max_iters,
                                       # Instant-tier input: what the user actually
                                       # typed. Only when this turn IS a merged
@@ -396,6 +399,12 @@ class AgentKernel:
                                       # does the merged text drive the tiers.
                                       raw_text=(text if (resolved or "").strip()
                                                 == (text or "").strip() else resolved))
+            # A40b: the self-improvement flywheel used to run only from the REPL,
+            # so web / voice / LiveKit / scheduled / proactive tasks never produced
+            # lessons — while every one of them READS them in the system prompt.
+            # One chokepoint writes them now, so all surfaces learn.
+            self._reflect(text, result)
+            return result
         finally:
             self.gate.store.end_task(task.id)   # task-scoped grants die with the task
             self.ctx.current_task_id = ""
@@ -413,6 +422,20 @@ class AgentKernel:
                 self._clear_checkpoint(task)
 
     # ------------------------------------------- J1: crash-recovery checkpoints
+    def _reflect(self, text: str, result) -> None:
+        """Post-task self-review, gated by `learning.reflect`.
+
+        Reflection is an optimization, never a failure source: it gets one bounded
+        local-model call and any error is logged, not raised into the user's turn.
+        """
+        if not getattr(self.ctx.cfg.learning, "reflect", True):
+            return
+        try:
+            from ..agent import reflection
+            reflection.reflect(self.ctx, text, result)
+        except Exception as e:
+            log.warning("reflection failed (task unaffected): %s", e)
+
     @property
     def _checkpoint_dir(self) -> Path:
         return Path(self.sessions_dir).parent / "checkpoints"

@@ -12,8 +12,11 @@ Asked once at first launch (REPL), persisted in settings.json, switchable with
 from __future__ import annotations
 
 import json
+import logging
 
 from .. import paths
+
+log = logging.getLogger("bee.engines")
 
 ENGINES: dict[str, dict] = {
     "hybrid": {
@@ -40,31 +43,50 @@ ENGINES: dict[str, dict] = {
 
 
 def settings_file():
-    return paths.PROJECT_ROOT / "settings.json"
+    """The persisted engine choice, through `paths` so the test suite can
+    redirect it (A41a: an unredirectable path meant any launch of `web`/`voice`
+    under a pipe rewrote the USER's settings.json)."""
+    return paths.SETTINGS_JSON
 
 
 def load_engine() -> str | None:
     try:
         data = json.loads(settings_file().read_text(encoding="utf-8"))
-        e = data.get("engine")
-        return e if e in ENGINES else None
-    except Exception:
+    except FileNotFoundError:
         return None
+    except Exception as e:
+        log.warning("settings.json is unreadable (%s) — using the hybrid default", e)
+        return None
+    e = data.get("engine") if isinstance(data, dict) else None
+    if e is not None and e not in ENGINES:
+        log.warning("settings.json names unknown engine %r — using hybrid routing", e)
+        return None
+    return e
 
 
-def save_engine(engine: str) -> None:
+def save_engine(engine: str) -> bool:
+    """Persist the choice. Returns whether it actually happened: the caller may
+    not be able to do anything about it, but silently losing the user's explicit
+    `/engine` selection is how a config file becomes a lie (A41b)."""
     if engine not in ENGINES:
-        return
+        return False
     try:
         data = {}
         try:
             data = json.loads(settings_file().read_text(encoding="utf-8"))
-        except Exception:
+            if not isinstance(data, dict):
+                data = {}
+        except FileNotFoundError:
             pass
+        except Exception as e:
+            log.info("starting settings.json fresh (previous contents unreadable: %s)", e)
         data["engine"] = engine
         settings_file().write_text(json.dumps(data, indent=1), encoding="utf-8")
-    except Exception:
-        pass
+        return True
+    except Exception as e:
+        log.warning("could not persist engine %r: %s — this session keeps it, "
+                    "the next launch will not", engine, e)
+        return False
 
 
 def override_for(engine: str | None) -> str | None:

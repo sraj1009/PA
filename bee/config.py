@@ -281,6 +281,15 @@ class ModelGateCfg:
 
 
 @dataclass
+class LearningCfg:
+    """Self-improvement flywheel. `reflect` writes a short self-review per
+    non-trivial task into memory/lessons/, which `context.recent_lessons()` then
+    injects into every future system prompt — so it is an operator-visible
+    kill-switch, not an internal detail (read by `AgentKernel._reflect`)."""
+    reflect: bool = True
+
+
+@dataclass
 class Config:
     ollama: OllamaCfg = field(default_factory=OllamaCfg)
     cloud: CloudCfg = field(default_factory=CloudCfg)
@@ -300,6 +309,7 @@ class Config:
     automation: AutomationCfg = field(default_factory=AutomationCfg)
     alerts: AlertsCfg = field(default_factory=AlertsCfg)
     model_gate: ModelGateCfg = field(default_factory=ModelGateCfg)
+    learning: LearningCfg = field(default_factory=LearningCfg)
     workspace: Path = paths.WORKSPACE
     # M14: where each resolvable field actually came from (default | config.yaml
     # | models.yaml | .env | process-env | env-provider-key). Attached by
@@ -462,6 +472,7 @@ def _build_from_yaml(data: dict) -> Config:
     c.automation = _section(AutomationCfg, c.automation, data.get("automation"))
     c.alerts = _section(AlertsCfg, c.alerts, data.get("alerts"))
     c.model_gate = _section(ModelGateCfg, c.model_gate, data.get("model_gate"))
+    c.learning = _section(LearningCfg, c.learning, data.get("learning"))
     return c
 
 

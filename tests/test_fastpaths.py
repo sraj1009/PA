@@ -208,11 +208,13 @@ def test_engines_override_and_persist(tmp_path, monkeypatch):
     assert engines.load_engine() == "api-cloud"
 
 
-def test_ask_engine_non_interactive_defaults_hybrid(monkeypatch):
-    # pytest captures stdin (isatty() is False) -> must default to hybrid, no prompt
-    import pathlib
-    monkeypatch.setattr(engines, "settings_file", lambda: pathlib.Path("/tmp") / "bee_test_engine.json")
+def test_ask_engine_non_interactive_defaults_hybrid(monkeypatch, tmp_path):
+    # pytest captures stdin (isatty() is False) -> must default to hybrid, no prompt.
+    # Used to point at /tmp/bee_test_engine.json, which on Windows lands outside the
+    # per-test tmp dir and is shared between runs (A41c).
+    monkeypatch.setattr(engines, "settings_file", lambda: tmp_path / "settings.json")
     assert engines.ask_engine() == "hybrid"
+    assert engines.load_engine() == "hybrid", "the default was never persisted"
 
 
 # ------------------------------------------------------- spoken reminders (A24)

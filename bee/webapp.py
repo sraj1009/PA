@@ -310,10 +310,14 @@ async def engine_set(body: dict, request: Request):
     name = str(body.get("engine", "")).strip()
     if name not in engines.ENGINES:
         return JSONResponse({"error": f"unknown engine: {name}"}, status_code=400)
-    engines.save_engine(name)
+    persisted = engines.save_engine(name)
     if CTX is not None:
         CTX.model_override = engines.override_for(name)
-    return {"ok": True, "current": name, "override": engines.override_for(name)}
+    # `ok` means the switch took effect for this session; `persisted` says whether
+    # it survived to the next launch — the two differ when settings.json is locked
+    # (A41b), and the UI must not promise durability it did not get.
+    return {"ok": True, "current": name, "persisted": persisted,
+            "override": engines.override_for(name)}
 
 
 @app.get("/skills")

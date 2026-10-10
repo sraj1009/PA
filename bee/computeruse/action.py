@@ -89,6 +89,32 @@ class ComputerAction:
             raise ValueError("type_text requires text")
         if self.action == "key_press" and not self.keys:
             raise ValueError("key_press requires keys")
+        if self.action == "key_press" and isinstance(self.keys, str):
+            # A chord arrives as a STRING from a small model ("ctrl+s"), and a
+            # string is iterable, so the desktop pressed its characters one by
+            # one — six stray keystrokes into whatever the user has focused —
+            # while verification reported `executed: True, verified: True`
+            # because the screen did change (A42b). Refuse rather than guess:
+            # 'ctrl+s' could mean a chord or a literal, and the wrong guess
+            # types into the user's document.
+            raise ValueError(
+                "keys must be a list of key names, e.g. [\"ctrl\", \"s\"] "
+                f"(got the string {self.keys!r})")
+        if isinstance(self.expected, str):
+            raise ValueError(
+                'expected must be an object, e.g. {"screen_changed": true} '
+                f"(got the string {self.expected!r})")
+        for axis in ("x", "y"):
+            v = getattr(self, axis)
+            if isinstance(v, str):
+                # Accept the harmless case a model produces ("12"), refuse the
+                # one that would otherwise reach the desktop as a non-number.
+                try:
+                    v = int(float(v.strip()))
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"{axis} must be an integer pixel coordinate (got {v!r})")
+                setattr(self, axis, v)
 
     # ------------------------------------------------------------ risk
     @property

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+import re
 
 from .. import paths
 from ..config import Config
@@ -102,10 +103,29 @@ def skills_index(cfg: Config, force: "set | None" = None) -> str:
             if ln.lower().startswith("description:"):
                 desc = ln.split(":", 1)[1].strip()
                 break
-        lines.append(f"- {name}: {desc or first}")
+        lines.append(f"- {name}: {desc or first}{_module_hint(body, name)}")
     if not lines:
         return "(no skills indexed — use skill_create to distill novel solutions)"
     return "\n".join(lines[:60])
+
+
+def _module_hint(body: str, name: str) -> str:
+    """A45c: the index line used to carry only the description, so BEE knew a `dsa`
+    skill existed but not what it imports — and in the live eval `dsa_graph`
+    invented `bee_dsa` ('there is no module named bee_dsa available') when the real
+    one is `bee.dsa.graphs`, whose name is written in that very skill's body. The
+    names cost a few tokens and remove the guess; the full procedure stays behind
+    `skill_get`, so the prompt budget is unchanged for everything else."""
+    mods: list[str] = []
+    for m in re.findall(r"^[ \t]*from[ \t]+([A-Za-z_][\w.]*)[ \t]+import", body, re.M):
+        if m not in mods:
+            mods.append(m)
+        if len(mods) >= 3:
+            break
+    if not mods:
+        return ""
+    shown = ", ".join(m if len(m) <= 28 else m[:25] + "..." for m in mods)
+    return f"  [imports: {shown}; call skill_get(\"{name}\") for the full procedure]"
 
 
 def recent_lessons(cfg: Config, n: int = 3, lines: int = 12) -> str:

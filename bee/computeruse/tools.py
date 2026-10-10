@@ -212,5 +212,6 @@ def computeruse_tools() -> list[T]:
                       "or the 'stop' command in any interface).",
           parameters={"type": "object", "properties": {}},
           handler=computer_stop, risk="low",
-          capabilities=("desktop.control",)),
+          # No capability: an abort that can be refused is not an abort (A42a).
+          capabilities=()),
     ]

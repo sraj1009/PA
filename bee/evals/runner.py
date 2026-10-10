@@ -21,6 +21,8 @@ Task schema (evals/tasks.yaml):
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import shutil
 import tempfile
 import time
@@ -67,6 +69,163 @@ def _isolated_memory():
         for k, v in saved.items():
             setattr(paths, k, v)
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+@contextmanager
+def _isolated_telemetry():
+    """A44: the eval must not write the user's telemetry or training corpus.
+
+    `_isolated_memory` (A31b) covered memory only, so every scored run kept
+    appending to the two streams the USER reads: `metrics/metrics.jsonl` — which
+    drives the dashboard KPIs *and* `cfg.alerts` thresholds, so a synthetic failure
+    can raise a real desktop alert — and `train/episodes/*.jsonl`, the corpus the
+    nightly router retrain and the SFT build eat. Measured on 2026-10-09 after one
+    full run: **322 of 375** of today's episode rows had a task text that is an
+    eval prompt (16 distinct eval ids), and 473 new rows in metrics.jsonl with
+    session ids like `eval-cloud_redaction-r0`. Same class as A25b/A25c, one entry
+    point later."""
+    keys = ("METRICS_DIR", "METRICS_FILE", "EPISODES_DIR", "SKILLS_DIR")
+    saved = {k: getattr(paths, k) for k in keys}
+    tmp = Path(tempfile.mkdtemp(prefix="bee_eval_telemetry_"))
+    try:
+        (tmp / "metrics").mkdir()
+        (tmp / "episodes").mkdir()
+        (tmp / "skills").mkdir()
+        paths.METRICS_DIR = tmp / "metrics"
+        paths.METRICS_FILE = tmp / "metrics" / "metrics.jsonl"
+        paths.EPISODES_DIR = tmp / "episodes"
+        paths.SKILLS_DIR = tmp / "skills"
+        yield tmp
+    finally:
+        for k, v in saved.items():
+            setattr(paths, k, v)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# The suite's own report artefacts — allowed to change (they are the run's output).
+_KEEP_CHANGED = {"evals/results.jsonl", "evals/results_summary.json",
+                 "evals/REPORT.md", "evals/verify_results.json",
+                 "evals/bench_model.json"}
+
+# Local, in-workspace compute and file actions a user answers 'yes' to every day.
+# The suite used to auto-deny EVERY prompt, which graded the assistant in a
+# configuration nobody runs: any task whose correct answer requires executing code
+# (dsa_gcd_lcm, dsa_lis, math_sieve, file_roundtrip) was unsatisfiable by design —
+# the executed 21/588 could never reach the answer. Destructive and
+# externally-visible actions (shell, sandbox_run, systemctl, email, job creation,
+# skill writes) stay denied, so `guard_blocked` still proves a dangerous command is
+# refused and reported honestly.
+_EVAL_ALLOW = {"code_run", "file_write", "file_read", "file_list", "planner",
+               "calculator"}
+
+
+def eval_approver(tool: str, args: dict, reason: str, workspace=None) -> bool:
+    """The permission prompt the eval answers on the user's behalf.
+
+    `file_write` is granted for CREATING a file (`file_roundtrip` asks for a new
+    eval_probe.txt) and refused for overwriting one the user already has: the suite
+    measures whether the assistant can do the work, it must never be able to destroy
+    a line of it. `_restore_workspace` stays as the backstop, not the control."""
+    if str(tool or "") not in _EVAL_ALLOW:
+        return False
+    if tool == "file_write" and workspace is not None:
+        try:
+            if (Path(workspace) / str((args or {}).get("path") or "")).exists():
+                return False
+        except Exception:
+            return False
+    return True
+
+
+_SNAP_DIRS = {"bee", "tests", "docs", "evals", "scripts", "web", "site"}
+_SNAP_SKIP = {".git", "__pycache__", ".venv", "venv", "node_modules", ".pytest_cache",
+              ".mypy_cache", "build", "dist", "memory", "models", "logs", "tmp",
+              "temp", ".idea", ".vscode"}
+_SNAP_MAX = 4 * 1024 * 1024          # bytes; larger files are data, not code
+
+
+def _tree_files(root: Path):
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = Path(dirpath).relative_to(root).as_posix()
+        top = rel_dir.split("/")[0]
+        if rel_dir != "." and top not in _SNAP_DIRS:
+            dirnames[:] = []
+            continue
+        dirnames[:] = [d for d in dirnames if d not in _SNAP_SKIP]
+        for fn in filenames:
+            if fn.endswith((".pyc", ".log")):
+                continue
+            yield Path(dirpath) / fn
+
+
+@contextmanager
+def _restore_workspace(root: Path):
+    """Leave every source file exactly as the run found it — by bytes, not by git.
+
+    Approving `file_write` and `code_run` (A36a) means the suite can now create and
+    edit files in the user's real project; `file_roundtrip` literally asks for
+    eval_probe.txt, and the first version of this guard used `git status` to decide
+    what to restore. That misclassified the user's own uncommitted work — a file the
+    run never touched (bee/agent/client.py, with real uncommitted changes) looked
+    'clean before' because of a refreshed index, was moved aside, and the diff was
+    nearly lost. So: snapshot the bytes of the code tree on entry and put them back
+    where they differ. Pre-existing uncommitted work is then protected by
+    construction, because 'as found' means 'as the user had it', not 'as HEAD has it'.
+    """
+    if not root or not Path(root).exists():
+        yield Path(root) if root else None
+        return
+    root = Path(root)
+    side = Path(tempfile.mkdtemp(prefix="bee_eval_ws_snapshot_"))
+    orig = side / "orig"
+    digests = {}
+    for p in _tree_files(root):
+        rel = p.relative_to(root).as_posix()
+        try:
+            if p.stat().st_size > _SNAP_MAX:
+                continue
+            b = p.read_bytes()
+        except Exception:
+            continue
+        d = orig / rel
+        d.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            d.write_bytes(b)
+            digests[rel] = hashlib.sha256(b).hexdigest()
+        except Exception:
+            continue
+    try:
+        yield root
+    finally:
+        now = {}
+        for p in _tree_files(root):
+            rel = p.relative_to(root).as_posix()
+            try:
+                now[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+            except Exception:
+                continue
+        for rel, digest in sorted(digests.items()):
+            if rel in _KEEP_CHANGED:
+                continue
+            if now.get(rel) == digest:
+                continue                      # untouched by the run
+            try:
+                if now.get(rel) is None:       # the run deleted it
+                    (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(orig / rel, root / rel)
+            except Exception:
+                continue
+        for rel in sorted(set(now) - set(digests)):
+            if rel in _KEEP_CHANGED:
+                continue
+            p = root / rel                    # a file the run invented: keep it out
+            try:
+                dest = side / "invented" / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(p), str(dest))
+            except Exception:
+                continue
+
 
 # model output may contain emoji — redirected Windows consoles default to
 # cp1252 and would crash the run; force UTF-8 with replacement fallback
@@ -123,6 +282,17 @@ def check_task(t: dict, r: AgentResult, events: list[dict]) -> tuple[bool, str]:
     for e in t.get("expect") or []:
         if str(e).lower() not in out:
             return False, f"missing substring {e!r}"
+    # A45d: some expectations encode a CHOICE rather than a requirement.
+    # `plan_complex` asserts the plan names the library it will load a 50 MB CSV
+    # with; the literal was 'pandas', but the plan named `polars` — a defensible,
+    # arguably better answer for that size — so a correct plan failed on vocabulary.
+    # The premise being tested is "commits to a real library", so that is what is
+    # asserted now, against a set of libraries that can actually do the job. This
+    # is a corrected premise, not a loosened one: an answer naming NO library still
+    # fails, and it must name one of a closed list.
+    any_of = [str(x) for x in (t.get("expect_any") or [])]
+    if any_of and not any(a.lower() in out for a in any_of):
+        return False, f"expected at least one of {any_of}"
     return _events_ok(t, events, r)
 
 
@@ -135,9 +305,24 @@ def _should_skip(t: dict, ctx) -> bool:
 
 
 def run_suite(ctx, model: str | None = None, only: "str | list[str] | None" = None) -> list[dict]:
-    """Public entry: the whole run happens against an isolated copy of memory."""
-    with _isolated_memory():
-        return _run_suite(ctx, model=model, only=only)
+    """Public entry: the run happens against an isolated copy of memory, and the
+    workspace is restored to the state it was found in afterwards."""
+    cfg = getattr(ctx, "cfg", None)
+    prev = None
+    if cfg is not None:
+        # A40b: the kernel now reflects after every task on every surface. Inside
+        # the scored run that would add an extra local-model call per task AND grow
+        # the isolated lessons file mid-run, so later tasks would see a different
+        # system prompt than earlier ones. Neither is what the eval measures.
+        prev = cfg.learning.reflect
+        cfg.learning.reflect = False
+    try:
+        with _isolated_memory(), _isolated_telemetry(), \
+                _restore_workspace(getattr(ctx, "workspace", None)):
+            return _run_suite(ctx, model=model, only=only)
+    finally:
+        if cfg is not None and prev is not None:
+            cfg.learning.reflect = prev
 
 
 def _run_suite(ctx, model: str | None = None, only: "str | list[str] | None" = None) -> list[dict]:
@@ -153,7 +338,9 @@ def _run_suite(ctx, model: str | None = None, only: "str | list[str] | None" = N
     those must point at the copy. The caller's own kernel is put back after."""
     kernel = getattr(ctx, "kernel", None)
     from ..kernel import AgentKernel
-    ctx.kernel = AgentKernel(ctx, approver=lambda t, a, r: False)
+    from functools import partial
+    ctx.kernel = AgentKernel(ctx, approver=partial(
+        eval_approver, workspace=getattr(ctx, "workspace", None)))
     try:
         return _run_tasks(ctx, model, only)
     finally:

@@ -27,16 +27,64 @@ def _worker(ctx) -> JobWorker | None:
     return getattr(ctx, "automation_worker", None)
 
 
+def _num(args: dict, key: str, default, cast=int):
+    """Cast a model-supplied number with a message that names the field and the
+    accepted shape. A bare `int(args['every_seconds'])` let a small model's "1h"
+    escape the tool as `ValueError: invalid literal for int() with base 10: '1h'`
+    — a Python internals message the model cannot act on (A43b)."""
+    raw = args.get(key)
+    if raw in (None, ""):
+        return default
+    try:
+        return cast(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} must be a number, got {raw!r}")
+
+
+_DAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4,
+         "saturday": 5, "sunday": 6}
+
+
+def _days_from(raw):
+    """Accept the integers the schema documents and the day names a small model
+    writes anyway (`["mon","tue"]`), rejecting anything else instead of silently
+    scheduling on the wrong day."""
+    out = []
+    for d in list(raw or []):
+        if isinstance(d, bool):
+            raise ValueError(f"days must be integers 0=Mon..6=Sun, got {d!r}")
+        if isinstance(d, int):
+            out.append(d % 7)
+            continue
+        s = str(d).strip().lower()
+        if s.isdigit():
+            out.append(int(s) % 7)
+            continue
+        full = _DAYS.get(s)
+        if full is None:
+            for k, v in _DAYS.items():
+                if k.startswith(s[:3]):
+                    full = v
+                    break
+        if full is None:
+            raise ValueError(f"days must be 0=Mon..6=Sun or a day name, got {d!r}")
+        out.append(full)
+    return sorted(set(out))
+
+
 def _trigger_from(args: dict) -> JobTrigger:
     kind = (args.get("kind") or "one_time").lower()
+    if kind not in ("one_time", "daily", "weekly", "interval", "calendar"):
+        raise ValueError(f"unknown trigger kind {kind!r} "
+                         "(use one_time | daily | weekly | interval | calendar)")
     return JobTrigger(
         kind=kind,
         at=args.get("at") or "",
         time=args.get("time") or "",
-        days=list(args.get("days") or []),
-        every_seconds=int(args.get("every_seconds") or 0),
+        days=_days_from(args.get("days")),
+        every_seconds=_num(args, "every_seconds", 0, int),
         calendar=args.get("calendar") or "",
-        reminder_offset_minutes=int(args.get("reminder_offset_minutes") or 0),
+        reminder_offset_minutes=_num(args, "reminder_offset_minutes", 0, int),
     )
 
 
@@ -53,18 +101,49 @@ def automation_job(ctx, op: str = "list", **kw):
         message = kw.get("message") or ""
         if not task and not message:
             return {"error": "create needs 'task' (agent task) or 'message' (notify)"}
-        trigger = _trigger_from(kw)
+        try:
+            trigger = _trigger_from(kw)
+            max_attempts = _num(kw, "max_attempts", 2, int)
+            max_runtime = _num(kw, "max_runtime", 600.0, float)
+        except ValueError as e:
+            return {"error": str(e)}
+        # A43a: a trigger whose next fire time cannot be computed used to be
+        # stored anyway as PENDING with `next_run=""` — enabled, never scheduled,
+        # and the tool answered {"created": ..., "next_run": ""} with the note
+        # "authorized automation". Live probe, 2026-10-09: five such jobs
+        # ("at": "tomorrow 9am", daily with no time, weekly with no time) landed
+        # in the durable store while every caller was told it succeeded. This is
+        # A24b one layer down: the user waits for a reminder that cannot fire.
+        from .schedule import next_run as _next_run
+        try:
+            tzname = kw.get("timezone") or w.default_timezone
+            fires_at = _next_run(trigger, tzname, now)
+        except Exception as e:
+            return {"error": f"could not schedule this trigger: {e}"}
+        if fires_at is None:
+            hint = {
+                "one_time": "pass 'at' as an ISO datetime, e.g. \"2026-10-10T09:00\" "
+                            f"(got {trigger.at!r})",
+                "daily": "pass 'time' as HH:MM, e.g. \"08:00\" (got {t!r})".format(t=trigger.time),
+                "weekly": "pass 'time' as HH:MM and 'days' as 0=Mon..6=Sun "
+                          f"(got time={trigger.time!r}, days={trigger.days!r})",
+                "interval": "pass 'every_seconds' as a whole number of seconds, e.g. 3600 "
+                            f"(got {kw.get('every_seconds')!r})",
+                "calendar": "pass 'calendar' as \"ics:<path>\" — only ICS calendars are "
+                            f"supported (got {trigger.calendar!r})",
+            }.get(trigger.kind, "check 'kind' against the accepted shapes")
+            return {"error": f"this job can never fire: {hint}"}
         job = Job(
             owner=kw.get("owner") or "main",
             description=kw.get("description") or task or message,
             action=({"type": "agent_task", "task": task} if task
                     else {"type": "notify", "message": message}),
             trigger=trigger,
-            timezone=kw.get("timezone") or w.default_timezone,
+            timezone=tzname,
             enabled=True,
-            retry_policy={"max_attempts": int(kw.get("max_attempts") or 2),
+            retry_policy={"max_attempts": max_attempts,
                           "backoff_seconds": 60},
-            max_runtime=float(kw.get("max_runtime") or 600.0),
+            max_runtime=max_runtime,
         )
         w.create_job(job)
         return {"created": job.id, "description": job.description,
@@ -100,11 +179,16 @@ def automation_job(ctx, op: str = "list", **kw):
             action = {"type": "notify", "message": kw.get("message") or ""}
             if kw.get("task"):
                 action = {"type": "agent_task", "task": kw.get("task")}
+            try:
+                per_hour = _num(kw, "max_per_hour", 6, int)
+                match = dict(kw.get("match") or {})
+            except (TypeError, ValueError) as e:
+                return {"error": str(e) if str(e) else "match must be an object"}
             rule = ProactiveRule(kind=kw.get("kind") or "timer",
-                                 match=dict(kw.get("match") or {}),
+                                 match=match,
                                  action=action,
                                  description=kw.get("description") or "",
-                                 max_per_hour=int(kw.get("max_per_hour") or 6),
+                                 max_per_hour=per_hour,
                                  # Provenance is a fact, not a courtesy: the
                                  # field's documented meaning is "explicit user
                                  # authorization", and a rule the MODEL composed

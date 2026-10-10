@@ -66,6 +66,28 @@ _UNIT = [
     "test_router_tiers", "test_secretscan", "test_dsa", "test_extractor",
     "test_capabilities", "test_offline", "test_audit",
     "test_config_precedence", "test_events", "test_providers",
+    # A37 (2026-10-09): the real LLMClient streaming path (only the transport is
+    # faked) + the static call-signature contract that catches the A27a/A37a
+    # species before a blanket `except` can hide it.
+    "test_streaming_contract", "test_static_contracts",
+    # A40 (2026-10-09): lesson quality gate (lessons are injected into every
+    # system prompt), kernel-owned reflection, the learning.reflect switch.
+    "test_reflection_loop",
+    # A41 (2026-10-09): the persisted engine choice — redirectable path, honest
+    # failure reporting, corrupt-file handling.
+    "test_engine_choice",
+    # A42 (2026-10-09): the computer-use abort path (the stop verb must never be
+    # capability-gated), driven through the real tool handlers.
+    "test_computeruse_safety",
+    # A44 (2026-10-09): the eval must not write the user's telemetry or the
+    # training corpus (memory isolation alone left 322 eval episodes behind).
+    "test_eval_hermeticity",
+    # A43 (2026-10-09): automation_job create validation — a job that can never
+    # fire is refused instead of stored as a silent no-op.
+    "test_automation_tool_validation",
+    # A45 (2026-10-09): planner inputs (real tool list), skill-index module names,
+    # and the eval's expect_any premise.
+    "test_plan_inputs",
 ]
 _INTEGRATION = [
     "test_kernel_integration", "test_automation", "test_episodes",
@@ -126,7 +148,7 @@ MARKERS = {
     "security": [
         "test_guard", "test_risk", "test_capabilities", "test_privacy",
         "test_netguard", "test_secretscan", "test_webauth", "test_sandbox",
-        "test_audit", "test_injection",
+        "test_audit", "test_injection", "test_computeruse_safety",
     ],
     "agent": [
         "test_kernel_integration", "test_kernel_unit", "test_jarvis_features",
@@ -181,6 +203,34 @@ def pytest_configure(config):
     # works when sklearn is absent (bare core install).
     config.addinivalue_line("filterwarnings", "ignore:Trying to unpickle estimator")
     _isolate_append_only_streams()
+    _isolate_post_task_model_calls()
+
+
+def _isolate_post_task_model_calls():
+    """Reflection (A40b) adds ONE local-model call after every non-trivial task,
+    on every surface. That is real product behaviour, but it must not be visible
+    to tests that assert on the task loop: `test_6_failed_task_provider_retry`
+    counts LLM calls to prove the retry budget ("exactly one retry, then stop"),
+    and a post-task review call is not part of that budget — nor is any test's
+    scripted reply meant to be eaten by it.
+
+    So the suite turns the switch off by default, exactly as it redirects metrics
+    and lessons: a behavioural isolation, not a weakened assertion. The capability
+    has its own coverage with it explicitly re-enabled —
+    tests/test_reflection_loop.py.
+    """
+    import bee.config as bc
+    if getattr(bc.load_config, "_bee_tests_no_reflect", False):
+        return
+    real = bc.load_config
+
+    def load_config_no_reflect(*a, **kw):
+        cfg = real(*a, **kw)
+        cfg.learning.reflect = False
+        return cfg
+
+    load_config_no_reflect._bee_tests_no_reflect = True
+    bc.load_config = load_config_no_reflect
 
 
 
@@ -227,6 +277,18 @@ def _isolate_append_only_streams():
     # it has (observed: `skills/graph_operations/`, source=agent, body = Python
     # code where the markdown should be).
     _STREAM_MP.setattr(paths, "SKILLS_DIR", sdir)
+    # settings.json holds the user's persisted ENGINE choice — which brain BEE
+    # defaults to on every surface. `ask_engine()` writes it whenever stdin is not
+    # a tty, so any test that launched the web/voice/talk/clap entry points under
+    # a pipe would silently rewrite the user's default model (A41a). Copied rather
+    # than emptied so tests that READ the engine still see the real choice.
+    try:
+        if paths.SETTINGS_JSON.exists():
+            (root / "settings.json").write_text(
+                paths.SETTINGS_JSON.read_text(encoding="utf-8"), encoding="utf-8")
+        _STREAM_MP.setattr(paths, "SETTINGS_JSON", root / "settings.json")
+    except Exception:
+        pass
 
     # memory/ is the user's own history: profile facts, diary, long-term notes,
     # the structured store and its vector index. A test run must not add facts
