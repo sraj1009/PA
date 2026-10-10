@@ -444,6 +444,24 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
     cfg: Config = ctx.cfg
     if ctx.client is None:
         ctx.client = LLMClient(cfg)
+    # P0 (audit): the ToolBus is now the single dispatcher for EVERY
+    # tool-capable route, including deterministic fast paths. The bus consults
+    # ctx.approver for its guard 'ask' path — bind it to this run's on_ask so
+    # the kernel's WAITING_FOR_PERMISSION flow is identical whether the call
+    # came from the model loop or a 0 ms shortcut. Restored on exit so a
+    # nested/sub run never leaks its approver into an outer one.
+    _prev_approver = getattr(ctx, "approver", None)
+    ctx.approver = on_ask
+    try:
+        return _run_agent_inner(ctx, task, on_event, model, max_iters, system, sub,
+                                on_ask, on_token, route_text)
+    finally:
+        ctx.approver = _prev_approver
+
+
+def _run_agent_inner(ctx: Context, task: str, on_event=None, model: str | None = None,
+                     max_iters: int = 25, system: str | None = None, sub: bool = False,
+                     on_ask=None, on_token=None, route_text: str | None = None) -> AgentResult:
     raw = (task or "").strip()
     cloud_prefix = bool(CLOUD_PREFIX.search(raw))  # per-task explicit intent
     task = strip_cloud_prefix(raw).strip()
