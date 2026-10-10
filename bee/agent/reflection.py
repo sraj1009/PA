@@ -109,8 +109,8 @@ def reflect(ctx, task: str, result: AgentResult) -> str:
         p = paths.LESSONS_DIR / f"{date.today().isoformat()}.md"
         stamp = time_stamp()
         p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("a", encoding="utf-8") as f:
-            f.write(f"\n## {stamp}\n{lesson}\n")
+        from .. import safeio
+        safeio.append_text(p, f"\n## {stamp}\n{lesson}\n")
     except Exception as e:
         # A lesson that could not be written must not look like it was (A7).
         log.warning("could not write lesson: %s", e)

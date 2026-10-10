@@ -19,8 +19,8 @@ def diary_add(message: str, model: str = "", escalated: bool = False) -> Path:
     p = paths.DIARY_DIR / f"{datetime.now():%Y-%m-%d}.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     extra = f" [model={model}{'|cloud' if escalated else ''}]" if model else ""
-    with p.open("a", encoding="utf-8") as f:
-        f.write(f"\n## {datetime.now():%H:%M:%S}{extra}\n{message}\n")
+    from .. import safeio
+    safeio.append_text(p, f"\n## {datetime.now():%H:%M:%S}{extra}\n{message}\n")
     # Queued, not embedded here: the write path must never block on Ollama, and
     # without this a fact stayed semantically unfindable until the 12 h rebuild.
     from . import search as _search

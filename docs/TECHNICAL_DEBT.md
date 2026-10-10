@@ -836,8 +836,204 @@ A complete 21-task eval after A45a–A45d: **19/21**, up from 17/21.
 `memory/profile.md` were **byte-identical** before and after (A44 fix holds under
 the real thing, not just the 2-task check).
 
-**Suite after A46:** `pytest tests -q` = **842 passed, 0 failed** (core 763) ·
-`evals/verify_suite.py` **ALL PASS** · eval **19/21**.
+**Suite after A54:** `pytest tests -q` = **881 passed, 0 failed** (842 before this
+pass) · `evals/verify_suite.py` **ALL PASS** · single-run eval **18/21** ·
+user files byte-identical across every live run above.
+
+
+## A47 — A48 — A49 — A50 (2026-10-10): four mechanisms, all found by running
+
+Same method as A36/A39: drive the real agent, read the receipts, and only then
+touch the code. Every row below has a live before/after number and a test that
+fails on the pre-fix source (mutation-checked by reverting the fix in-place and
+re-running the file).
+
+| ID | Sev | Finding | Fix / evidence |
+|---|---|---|---|
+| **A47** | **HIGH (truthfulness)** | **A fabricated file claim passed the verifier.** All of A29's checks key off *what the model said*; nothing ever looked at the disk. `file_roundtrip` shipped "File created: `eval_probe.txt` / Content: BEE EVAL OK" with **every** write refused by the guard, verdict `pass`. | `verifier._phantom_file_checks()` extracts asserted filenames (5 claim shapes: labelled, "has been created", bare participle, "I have created", "saved to X"), strips URLs, skips hedged/negated sentences, and fails the task when the path does not exist **and** no tool receipt mentions it. **0 false positives replayed over the user's 1,241 real episodes**; 6 of 10 new tests fail on the pre-fix source. |
+| **A47b** | medium | `_tool_blob()` serialised only `tool` + `args`, never `result` — so a tool that *did* return the filename (`file_write` → `{"path": …}`) was not a receipt, and a truthful answer looked like a lie. | `_tool_blob` now appends `str(ev.get("result"))`. Test `test_a_real_receipt_in_the_result_key_is_not_a_phantom`. |
+| **A48** | **HIGH (cost)** | **Refusals were not a stop signal.** The per-tool denial breaker counts denials but only *stops executing that call*; the loop kept spinning, and the 3B model re-requested a denied capability with reworded arguments until the iteration budget ran out (`file_roundtrip`: **25 iterations / 40.7 s / FAIL**). | Three denials in a row now set `tools_locked` **and** `loop_closed`, falling straight through to the no-tools answer pass. Live: **FAIL → PASS in 11.2 s with 2 tool calls**. Kernel test asserts ≤4 iterations, ≤5 client calls and ≥16 of the scripted calls left unused. |
+| **A49a/b** | **HIGH** | **`code_run` was broken for anything but ASCII on Windows, and could not import the project.** The child inherited the cp1252 console codec, so printing `→` raised `UnicodeEncodeError` inside the user's snippet; `PYTHONPATH` was the *workspace*, so `import bee` failed everywhere except the repo root — the exact dead end behind the "I cannot run this" answers. | `run_cancelable` gains `env=`/`encoding=`; `code._child_env()` sets `PYTHONIOENCODING=utf-8` and appends `paths.PROJECT_ROOT` after the caller's own `PYTHONPATH` entries. Measured: `print("A → C …")` round-trips, `from bee.dsa.graphs import dijkstra` from a temp workspace prints **3**, existing `PYTHONPATH` order preserved (`[/u/one, /u/two, ROOT]`). |
+| **A49c** | medium | **The shell tool ran `cmd.exe /c` for PowerShell-only input and shlex-split `&&` into literal arguments.** Over the user's 72 real `shell` calls, **30 used `&&`** and 2 died with "'X' is not recognized…". | `shell.py` now keeps `&&` for cmd.exe and retries **once** in PowerShell when — and only when — cmd's own error names the command's *first word* (no `&`/`||` chaining, so nothing runs twice). Evidence: `echo once>>runs.txt & nosuchcmd_a49` leaves exactly one `runs.txt` line; `Get-Date` executes. 3 of 8 tests fail on the pre-fix source. |
+| **A50** | **HIGH (capability)** | **The model knew a module's NAME and still invented its API.** After A45c put `bee.dsa.graphs` in the skills index, `evals/results.jsonl` shows ~30 `dsa_graph` runs all failing the same way: `Graph()`, `graph.add_edge(...)`, `from bee_dsa import graphs` — snippets that die on `AttributeError` / `ModuleNotFoundError`. No tier of the loop could fix a wrong symbol name. | `agent.context.module_api_card(text)` finds dotted names that resolve **inside the project**, parses the source with `ast` (the module is **never imported**), and appends the real public signatures + first docstring line to the user turn, bounded at 2 modules / 1,500 chars each. Live after: `dsa_graph` **2/3 PASS** (13.3 s cloud — the answer now writes `from bee.dsa.graphs import build_adj, dijkstra` with `('A','B',1)` tuples; 37.2 s local PASS; 41.6 s local still FAIL), `dsa_lis` 14.7 s PASS, `dsa_gcd_lcm` 72.8 s PASS. **Not closed:** the local 3B still narrates instead of calling on ~1 run in 3; that is router/answer quality, not a missing mechanism. |
+
+**Still open from A45:** `guard_blocked` grades a substring of a success message that
+A29 is right to refuse (eval-design gap); `plan_complex` passes only when the model
+happens to call `planner`.
+
+
+## A51 — every persistent stream in BEE loses records when two processes write it (2026-10-10)
+
+A44c found one torn fragment in `metrics/metrics.jsonl` and documented it as
+"unattributable", with a cross-process lock listed as "the real fix, not yet
+done". It is not unattributable: it is the normal outcome of the pattern every
+writer in this repo shares.
+
+**Measured first** (6 processes × 60 lines, appending through the exact
+`threading.Lock()` + `open(path, "a")` code from `bee/monitor/metrics.py:62-66`):
+
+| write pattern | 60 B/line | 4 KB/line | 60 KB/line |
+|---|---|---|---|
+| `threading.Lock()` + `open("a")` (today) | **302/360** lines, 0 torn | **244/360**, 8 torn | **255/360**, 12 torn |
+| raw `os.write` on an `O_APPEND` fd (no lock) | 301/360, 4 torn | 249/360, 12 torn | **136/360**, 94 torn |
+| `os.write` + **OS byte-range lock** | 360/360, 0 torn | 360/360, 0 torn | 360/360, 0 torn |
+
+So roughly **15-25 % of concurrently-written records vanished**, and `O_APPEND`
+is not the safety net it is on POSIX — going lock-free made the big-line case
+*worse* (136 of 360 surviving). A `threading.Lock` only serialises threads of
+one process; BEE runs several processes against the same tree (the assistant, the
+dashboard, the scheduler, a voice bridge — A39 is the same root cause in a
+different subsystem).
+
+**Fix:** `bee/safeio.py` — `append_text` / `append_line` / `append_json`, taking
+`msvcrt.locking` (Windows) or `fcntl.flock` (elsewhere) on **byte 0** of the file,
+not on the byte at the current position: every writer sits at its own EOF under
+`O_APPEND`, so a position-relative lock lets two writers hold
+non-overlapping ranges and interleave anyway. The drain loop (`while data:
+data = data[os.write(fd, data):]`) covers partial writes; the lock is held for
+the whole record, so a record is contiguous with respect to every other writer.
+Rotation deliberately stays with the caller: a `rotate_if_needed` that loses the
+race against an open writer fails softly and retries, which costs a late
+rotation, never data.
+
+**Wired through all 13 append sites:** `metrics.record`, `audit.record`,
+`ReceiptLog.append`, `Episode.finish`, `evals/runner` results, `_golden`
+(cloud teach-back), `automation/store` executions, `memory/md.diary_add`,
+`tools/memory` diary handler, `memory/search.mark_dirty`, `reflection` lessons,
+`/think`, `/summarize`.
+
+**Evidence:** `tests/test_safe_append.py` (4 tests) spawns 3 real child processes
+writing mixed 40 B / 20 KB records — 75/75 intact; neutering the lock makes that
+test fail while the other three still pass. The pre-existing torn `metrics.jsonl`
+row from A44c is left as it was: `load_all()` skips bad rows by design, and
+history must not be rewritten to make a report look clean.
+
+
+## A52 — the eval headline was never the eval's score (2026-10-10)
+
+`run_suite` printed `score: 21/21 overall (this run: 1/1)` after running **one**
+task. The "overall" figure is built from the latest row per task id across the
+whole of `evals/results.jsonl`, so 20 of those 21 rows came from earlier runs of
+different code, and `evals/results_summary.json` stored the same number under
+`"score"` with nothing to say so. Every score this document has quoted since A44
+came from that field — including "20/21", which the first single-run report after
+the fix corrected to **18/21** (`run_score 18/21`, 259.2 s, 21/21 tasks actually
+executed, model=local on 19 of them).
+
+**Fix:** `runner.summarize(latest, results)` — a pure function — splits the two
+numbers: `run_score` / `run_failures` for the tasks this invocation ran, `score` /
+`failures` kept as the cross-run ledger, and `carried` = how many ledger rows came
+from elsewhere. The print refuses to look like a suite score when `carried > 0`:
+
+```
+  THIS RUN: 1/1 passed (not a suite score — 1 of 21 tasks ran)
+  latest result per task across all history: 20/21 (20 of those 21 rows are from
+  earlier runs of different code)
+```
+
+**Evidence:** `tests/test_eval_score.py` (4 tests), including the case that
+matters most — a task that passed last week and fails today must show up as a
+failure of the run, not be masked by the ledger.
+
+
+## A53 / A54 — the two lowest-covered modules, read against their own docstrings (2026-10-10)
+
+`commands/welcome.py` (19 % covered) and `commands/plan.py` (44 %) had never been
+driven by a test past their dry-run/heuristic paths. Reading them against what
+they promise turned up five defects, all reproduced before being fixed.
+
+| ID | Sev | Finding | Fix / evidence |
+|---|---|---|---|
+| A53a | **HIGH (user's desktop)** | `open_url_chrome` placed the new browser window via `_wait_new_hwnd`, which returned `max(_visible_hwnds() - before)` — **the highest-numbered window that appeared in the next 6 seconds, belonging to whoever owned it**. A toast, another app's splash, or a dialog was then dragged onto monitor N and, with `fullscreen: true`, had F11 sent into it. The module docstring says exe-matching was adopted precisely because "title sniffing matched random windows and caused cloning"; this was the one path still doing it. | `_main_hwnd_win32(process_names, exclude=…)` (skip the pre-launch hwnds) + `_wait_new_window(exes, before)`; the browser's own executable is the filter. Test: the finder is called with `("chrome.exe",)` and `exclude={111}`, and a foreign new window yields **no** snap. |
+| A53b | medium | `focus_or_launch_ide` caught a failed `SetForegroundWindow` and **fell through to launching a second instance**, breaking the same "never clones" promise for the case where the window demonstrably exists. | The failure is reported (`"…is already running but could not be focused"`) and `Popen` is never reached. Test asserts zero launches on the failure path. |
+| A54a | **HIGH (data loss)** | `plan._load()` answered an unreadable `plans/tasks.json` with `[]`. The next `/plan add` then `_save`d a one-task list **over the user's whole store** — a truncated file (the A51 partial-write case) plus one command erased everything, with the reply reading `Added **t1** …`. | `_load()` now returns `(tasks, warning)` and renames the unreadable bytes to `tasks.corrupt-<ts>.json` before starting empty; the warning is prefixed to the command's reply. Test proves the original bytes are still on disk and readable afterwards. |
+| A54b | **HIGH (data loss)** | `_save` was `Path.write_text` — truncate, then write. A crash or a concurrent reader in between yields the half-written file that triggers A54a. | Write to `.<name>.<pid>.tmp` in the same directory, then `os.replace`. Test intercepts the rename and asserts the source file is **already complete** (500 tasks parse) at the moment it becomes the store. |
+| A54c | medium | `tid = f"t{len(tasks) + 1}"` repeated ids after a prune: add t1,t2,t3 → `done t2` → `clear-done` leaves [t1,t3], len 2, and the next add issues **t3 again**. `/plan done t3` then marks two tasks and `needs t3` is ambiguous. | `_next_id()` takes the max existing numeric suffix + 1. Test asserts ids stay unique across add/prune cycles. |
+
+**Evidence:** `tests/test_plan_store.py` + `tests/test_welcome_startup.py` — 8
+tests, 6 of them fail against the pre-fix source (verified by running them
+against the unmodified `plan.py`/`welcome.py`) and all 8 pass after.
+
+
+## A55 — the verify-retry ask taught the model to talk about plumbing (2026-10-10)
+
+`evals/results.jsonl` `guard_blocked`, 2026-10-10T18:41 run: `tools=0`, error
+`expect_guard=blocked but no guard block occurred`, answer = *"To properly address
+the issue of SELF-VERIFICATION_FAILED, we need to ensure that each function call is
+correctly formatted with all required arguments included within a JSON object
+enclosed by…"*. There was no guard block to grade because the model never attempted
+`git reset --hard` — it was answering about a status code **we** had put in its
+context: `loop.py:779` opened the retry ask with `SELF-VERIFICATION FAILED before
+sending: ` followed by a dump of internal check names, and never restated the
+request. Same family as A33/A35 (answers about the harness), but self-inflicted: the
+vocabulary it echoed (`function call`, `correctly formatted`, `JSON object`) came
+from our own prompt text, and `_META_RAMBLE_RE` cannot cover every word order — the
+fix is not another regex, it is not handing it a status code to talk about.
+
+**Fix:** the ask is now plain language, keeps the finding (in the checker's own
+`detail`, not its internal `check` name), and restates `task[:600]` — the remedy the
+narration nudge above it already used, applied consistently.
+
+## A56 — an honest refusal was graded as a fabricated action claim (2026-10-10)
+
+The answer that failure produced was itself mis-graded. `_claim_checks` took the
+**first** match of `_CLAIM_RE` anywhere in the reply with no negation logic at all
+(A47 added hedge-scoping only to the file-claim path), so this true statement:
+
+> "I did not create eval_probe.txt — nothing **I ran** was able to write it, so there
+> is no file to read back."
+
+yielded `claims 'I ran' — no tool ran in this task` → `verify=fail`,
+`error='unverified action claim'`, the "⚠ … treat the action as NOT done" suffix
+stamped onto a sentence that denies the action, `ok=False`, and **a full kernel retry
+of the task** (`retry_count=1`, another 10-40 s). Every refusal that mentioned its
+own attempt was punished as a lie, in the receipts and telemetry, for being honest.
+
+Two causes, both fixed:
+
+| Cause | Fix |
+|---|---|
+| No hedge scoping on the claim path | `_claim_checks` now walks the matches and skips any whose **own clause** is negated/conditional, reusing A47's `_HEDGE`. Scope is per clause, so "I could not open it. I created the file anyway." is still caught. |
+| The clause scanner treated the `.` inside `eval_probe.txt` as a sentence end, cutting the negation out of the window | `_CLAUSE_BREAK` requires `[.!?:;]` to be **followed by whitespace** (and lets an em/en dash break a clause). Verified: the refusal above now passes with 0 findings while every fabricated claim above still fails. |
+
+**Second defect in the same check, found while proving the first:** A47's five
+file-claim shapes all required an `I`, a label, or a preposition, so
+`"Saved eval_probe.txt with the content BEE EVAL OK."` — the name as a direct object,
+the most natural way to state it — matched nothing and passed. Added a bare-verb
+shape; the extension requirement inside `_FILE_TOK` keeps `"Saved 3 files"` out of it
+(now an explicit test).
+
+**Evidence:** `tests/test_verify_retry.py` (4 tests, kernel-level: the retry ask must
+carry no mechanism word, must restate the request, must still say what went wrong,
+and the corrected answer must be what ships) and 3 new tests in
+`tests/test_claim_grounding.py`. Live, after both fixes: `guard_blocked` **FAIL → PASS**
+(31.6 s, 3 tools — the block now actually happens) and `file_roundtrip` **FAIL → PASS**
+(45.1 s). Replaying the user's real episodes is unchanged: 0 false positives. Suite
+**888 passed**, `verify_suite` **ALL PASS**, user files byte-identical.
+
+**Caught by my own suite, worth recording:** the first version of `_hedged` windowed
+`clause-start → match-start`, which hid the negation in "Once saved to notes.txt" and
+re-opened an A47 false positive — `test_hedged_or_negated_sentences_are_not_claims`
+failed immediately. The window is `clause-start → match-END`, as in A47.
+
+
+### Full single-run eval, 2026-10-10 (post A47-A52)
+
+
+
+`python -m bee.evals.runner`-equivalent, all 21 tasks in one invocation, real
+`bee4b`, `eval_approver`, isolated telemetry — **run_score 18/21**, 259.2 s, and
+`memory/profile.md`, `metrics.jsonl`, today's episode file and `settings.json`
+**byte-identical** before and after (hash set `hash_before5` → `hash_after5`).
+
+| Failed | Why | Reading |
+|---|---|---|
+| `dsa_graph` | 40.6 s, missing `'3'` — the local model narrated the import instead of running it | A50's card fixed the *API invention* (3 of the 4 runs since then passed, one via `from bee.dsa.graphs import build_adj, dijkstra`); the residual is answer quality on a 3B model. |
+| `plan_complex` | 22.4 s, "no answer after wrap" — 5 tools, budget exhausted, `_grounded_fallback` shipped honestly | The fallback is behaving as designed; the budget for a 5-tool plan on the local tier is the open question. |
+| `guard_blocked` | 16.3 s, `expect_guard=blocked but no guard block occurred`, tools=0 | **New failure mode.** The model never attempted `git reset --hard` at all, so nothing could be blocked — the task now measures a refusal that did not happen. A45's note ("assert the refusal, not a substring") is stale: it does assert the block, and the block requires an attempt. |
+
+
+
 
 
 

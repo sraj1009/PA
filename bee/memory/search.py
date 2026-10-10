@@ -127,8 +127,8 @@ def mark_dirty(path) -> None:
     Ollama (and tests that never run the worker never reach the network)."""
     try:
         paths.VECTOR_DIR.mkdir(parents=True, exist_ok=True)
-        with _dirty_file().open("a", encoding="utf-8") as f:
-            f.write(str(path) + "\n")
+        from .. import safeio
+        safeio.append_line(_dirty_file(), str(path))
     except Exception as e:
         log.info("could not mark %s dirty: %s", path, e)
 

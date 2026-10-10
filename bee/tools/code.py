@@ -3,12 +3,33 @@ For anything heavy/GPU/destructive use sandbox_run (Docker) instead.
 """
 from __future__ import annotations
 
+import os
 import sys
 
+from .. import paths
 from .base import envelope, T
 from .cancelable import run_cancelable
 
 _PY = sys.executable
+
+
+def _child_env() -> dict:
+    """The snippet's interpreter: UTF-8 stdio, and BEE's own package importable.
+
+    Piped, a Windows child writes stdout in cp1252, so `print('✓')` died with
+    UnicodeEncodeError (exit 1) and any answer containing an arrow, a check
+    mark or non-Latin text could not be computed at all. And `python -c` puts
+    only the cwd on sys.path, so with any workspace but the project root
+    `import bee.dsa` — which the skill index tells the model to use — failed.
+    The root goes AFTER the user's own PYTHONPATH so it shadows nothing of theirs."""
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    root = str(paths.PROJECT_ROOT)
+    parts = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
+    if root not in parts:
+        env["PYTHONPATH"] = os.pathsep.join(parts + [root])
+    return env
+
 
 def code_tools():
     def h_code(ctx, code: str, timeout: int = 120):
@@ -19,7 +40,8 @@ def code_tools():
         try:
             cancel = getattr(ctx, "cancel_event", None)
             src, out, err, kind = run_cancelable([_PY, "-c", code], ctx.workspace,
-                                                 timeout, cancel, shell=False)
+                                                 timeout, cancel, shell=False,
+                                                 env=_child_env(), encoding="utf-8")
             if kind == "cancelled":
                 return envelope("python", src, out,
                                 (err + "\n[cancelled: process killed]").strip())

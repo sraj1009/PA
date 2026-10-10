@@ -9,12 +9,17 @@ Legend:
 - **YELLOW** — implemented with known, documented limitations
 - **RED** — incomplete / unverified / unsafe
 
-Test basis (final, post fix-pass 2026-10-09): `pytest tests -q` = **842 passed,
-0 failed** (core 763 · security 135 · integration 460 · unit 310 ·
-windows 88 · ml 65 · voice 45 · livekit 13 — suites overlap by marker);
-`evals/verify_suite.py` = **71,914 checks, ALL PASS** (re-run after every change).
-21-task agent eval: **19/21** on the post-A45/A46 full run (20/21 → 19/21 → 18/21 → 17/21
-→ 16/21 → 15/21 → 14/21 → 11/21 → 10/21 the day before, 5/21 in the pre-fix run).
+Test basis (final, post fix-pass 2026-10-10): `pytest tests -q` = **888 passed,
+0 failed** (was 842 before the A47-A56 pass; suites overlap by marker);
+`evals/verify_suite.py` = **ALL PASS** (re-run after every change).
+21-task agent eval, **one invocation, every task actually run**: **18/21** in
+259.2 s as of A52; A55/A56 then turned `guard_blocked` and `file_roundtrip` from
+FAIL to PASS in single-task live runs (31.6 s / 3 tools and 45.1 s / 3 tools), so
+the remaining failures are `dsa_graph` and `plan_complex` — both the local 3B
+narrating instead of acting, not a missing mechanism. That number is now real: A52
+found that the headline this suite printed was the latest row per task across *all
+history*, so a 1-task run reported "21/21 overall"; every score quoted here before
+2026-10-10 came from that field and is not a single-run result.
 The score moves with
 local-3B answer quality and is stochastic — what is *mechanism-level* stable is
 the deterministic tier: `route_det_math` went from **36.9 s / 13 tool calls /

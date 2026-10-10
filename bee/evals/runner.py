@@ -296,6 +296,27 @@ def check_task(t: dict, r: AgentResult, events: list[dict]) -> tuple[bool, str]:
     return _events_ok(t, events, r)
 
 
+def summarize(latest: dict[str, dict], results: list[dict]) -> dict:
+    """A52: `score` is the latest row per task id over ALL of results.jsonl, so a
+    1-task run printed "21/21 overall" while 20 of those rows came from earlier runs
+    of different code — and that is the number reports kept quoting. The run's own
+    result is now its own field, and the carry-over is stated instead of hidden."""
+    passed = sum(1 for r in latest.values() if r.get("ok"))
+    ran = {str(r.get("id")) for r in results}
+    run_ok = sum(1 for r in results if r.get("ok"))
+    carried = len([i for i in latest if i not in ran])
+    return {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "n": len(latest), "ok": passed, "score": f"{passed}/{len(latest)}",
+        "failures": sorted(str(r.get("id")) for r in latest.values() if not r.get("ok")),
+        "run_n": len(results), "run_ok": run_ok,
+        "run_score": f"{run_ok}/{len(results)}",
+        "run_failures": sorted(str(r.get("id")) for r in results if not r.get("ok")),
+        "carried": carried,
+        "single_run": carried == 0 and len(results) == len(latest),
+    }
+
+
 def _should_skip(t: dict, ctx) -> bool:
     if t.get("skip_if") == "cloud":
         from ..agent.loop import _cloud_up
@@ -408,8 +429,8 @@ def _run_tasks(ctx, model, only) -> list[dict]:
         # persist IMMEDIATELY — background batches can be killed at the 15-min
         # limit; per-task append keeps every finished result
         paths.EVAL_RESULTS.parent.mkdir(parents=True, exist_ok=True)
-        with paths.EVAL_RESULTS.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        from .. import safeio
+        safeio.append_json(paths.EVAL_RESULTS, row)
         # user Ctrl-C during the suite: stop cleanly instead of running the
         # remaining tasks on a poisoned cancel event
         ce = getattr(ctx, "cancel_event", None)
@@ -418,7 +439,8 @@ def _run_tasks(ctx, model, only) -> list[dict]:
             print(f"  (cancelled by user - stopping the suite after {i}/{len(tasks)})")
             break
     # summary over the LATEST result per task id (batch-tolerant: a partial
-    # batch run must not clobber the aggregate picture)
+    # batch run must not clobber the aggregate picture) — but that aggregate is
+    # NOT this run's score, and A52 made sure nobody reads it as one.
     latest: dict[str, dict] = {}
     for ln in paths.EVAL_RESULTS.read_text(encoding="utf-8").splitlines():
         if not ln.strip():
@@ -430,14 +452,16 @@ def _run_tasks(ctx, model, only) -> list[dict]:
         latest.setdefault(row.get("id", "?"), row)
         if latest[row.get("id", "?")].get("ts", "") <= row.get("ts", ""):
             latest[row.get("id", "?")] = row
-    passed = sum(1 for r in latest.values() if r.get("ok"))
-    summary = {
-        "ts": datetime.now().isoformat(timespec="seconds"),
-        "n": len(latest), "ok": passed, "score": f"{passed}/{len(latest)}",
-        "failures": [r.get("id") for r in latest.values() if not r.get("ok")],
-    }
+    summary = summarize(latest, results)
     (paths.EVALS_DIR / "results_summary.json").write_text(
         json.dumps(summary, indent=1), encoding="utf-8")
-    print(f"\n  score: {passed}/{len(latest)} overall (this run: "
-          f"{sum(1 for r in results if r['ok'])}/{len(results)})  (history: {paths.EVAL_RESULTS})")
+    if summary["carried"]:
+        print(f"\n  THIS RUN: {summary['run_score']} passed "
+              f"(not a suite score — {summary['run_n']} of {summary['n']} tasks ran)"
+              f"\n  latest result per task across all history: {summary['score']} "
+              f"({summary['carried']} of those {summary['n']} rows are from earlier "
+              f"runs of different code)")
+    else:
+        print(f"\n  score: {summary['run_score']} — full suite, every task run now")
+    print(f"  (history: {paths.EVAL_RESULTS})")
     return results

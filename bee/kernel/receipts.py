@@ -40,10 +40,10 @@ class ReceiptLog:
         row["error"] = _redact_value(row.get("error") or "")
         try:
             from ..monitor.rotate import rotate_if_needed
+            from .. import safeio
             with _lock:
                 rotate_if_needed(self.path, 2_000_000, 2)   # M13: bounded
-                with self.path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                safeio.append_json(self.path, row)
         except Exception as e:
             log.debug("receipt persist failed (continuing in-memory): %s", e)
         return r

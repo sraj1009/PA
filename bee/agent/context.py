@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+import ast
 import re
 
 from .. import paths
@@ -126,6 +127,102 @@ def _module_hint(body: str, name: str) -> str:
         return ""
     shown = ", ".join(m if len(m) <= 28 else m[:25] + "..." for m in mods)
     return f"  [imports: {shown}; call skill_get(\"{name}\") for the full procedure]"
+
+
+# A50: knowing a module's NAME was not enough — the local model still wrote
+# `Graph()` / `graph.add_edge()` for `bee.dsa.graphs` (~30 failed live runs of
+# `dsa_graph`). When a request names one of BEE's own modules, the model gets the
+# real public signatures, parsed from source with `ast` (the module never runs).
+_DOTTED = re.compile(r"(?<![\w.])([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)")
+_CARD_MODULES = 2
+_CARD_CHARS = 1500
+_CARD_MAX_SRC = 300_000
+_SELF_ARG = re.compile(r"^(?:self|cls)(?:,\s*)?")
+
+
+def _module_source(dotted: str) -> "tuple[str, Path] | None":
+    parts = dotted.split(".")
+    root = paths.PROJECT_ROOT
+    if not (root / parts[0] / "__init__.py").is_file():
+        return None
+    for n in range(len(parts), 1, -1):
+        base = root.joinpath(*parts[:n])
+        for f in (base.parent / f"{base.name}.py", base / "__init__.py"):
+            if f.is_file():
+                return ".".join(parts[:n]), f
+    return None
+
+
+def _sig(node, drop_self: bool = False) -> str:
+    args = ast.unparse(node.args)
+    if drop_self:
+        args = _SELF_ARG.sub("", args)
+    ret = f" -> {ast.unparse(node.returns)}" if node.returns else ""
+    pre = "async " if isinstance(node, ast.AsyncFunctionDef) else ""
+    return f"{pre}{node.name}({args}){ret}"
+
+
+def _doc1(node) -> str:
+    doc = (ast.get_docstring(node) or "").strip()
+    return doc.split("\n", 1)[0][:120]
+
+
+def _api_lines(tree: ast.Module) -> "tuple[list[str], list[str]]":
+    fn = (ast.FunctionDef, ast.AsyncFunctionDef)
+    names: list[str] = []
+    out: list[str] = []
+    for node in tree.body:
+        if getattr(node, "name", "_").startswith("_"):
+            continue
+        if isinstance(node, fn):
+            d = _doc1(node)
+            names.append(node.name)
+            out.append(f"- {_sig(node)}" + (f" — {d}" if d else ""))
+        elif isinstance(node, ast.ClassDef):
+            bases = ", ".join(ast.unparse(b) for b in node.bases)
+            d = _doc1(node)
+            names.append(node.name)
+            out.append(f"- class {node.name}" + (f"({bases})" if bases else "")
+                       + (f" — {d}" if d else ""))
+            for m in node.body:
+                if isinstance(m, fn) and (m.name == "__init__" or not m.name.startswith("_")):
+                    out.append(f"    .{_sig(m, drop_self=True)}")
+    return names, out
+
+
+def module_api_card(text: str) -> str:
+    cards: list[str] = []
+    seen: set[str] = set()
+    for m in _DOTTED.finditer(text or ""):
+        hit = _module_source(m.group(1))
+        if hit is None or hit[0] in seen:
+            continue
+        mod, src = hit
+        seen.add(mod)
+        try:
+            if src.stat().st_size > _CARD_MAX_SRC:
+                continue
+            tree = ast.parse(src.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        names, lines = _api_lines(tree)
+        if not lines:
+            continue
+        head = (f"Real API of `{mod}` (read from its source; use only these names, "
+                f"e.g. `from {mod} import {names[0]}`):")
+        doc = " ".join((ast.get_docstring(tree) or "").split())[:300]
+        body = [head] + ([doc] if doc else [])
+        size = sum(len(x) + 1 for x in body)
+        for ln in lines:
+            if size + len(ln) + 1 > _CARD_CHARS:
+                body.append("- …")
+                break
+            body.append(ln)
+            size += len(ln) + 1
+        cards.append("\n".join(body))
+        if len(cards) >= _CARD_MODULES:
+            break
+    return "\n\n".join(cards)
 
 
 def recent_lessons(cfg: Config, n: int = 3, lines: int = 12) -> str:

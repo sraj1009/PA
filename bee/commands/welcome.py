@@ -46,8 +46,13 @@ def _popen_kwargs() -> dict:
     return kw
 
 
-def _main_hwnd_win32(process_names: tuple[str, ...]) -> int | None:
-    """Largest top-level window of a matching process exe (>=200x200)."""
+def _main_hwnd_win32(process_names: tuple[str, ...],
+                     exclude: "set[int] | None" = None) -> int | None:
+    """Largest top-level window of a matching process exe (>=200x200).
+
+    `exclude` ignores hwnds seen before (e.g. the app's existing windows), so a
+    caller can ask for the window that has just appeared without accepting
+    whatever else the desktop opened in the meantime."""
     if sys.platform != "win32":
         return None
     try:
@@ -60,11 +65,14 @@ def _main_hwnd_win32(process_names: tuple[str, ...]) -> int | None:
         GW_OWNER, GWL_EXSTYLE, GWL_STYLE = 4, -20, -16
         WS_EX_TOOLWINDOW, WS_VISIBLE = 0x80, 0x10000000
         wanted = {n.lower() for n in process_names}
+        skip = exclude or set()
         # (area, hwnd, visible, titled)
         candidates: list[tuple[int, int, bool, bool]] = []
 
         @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         def _enum(hwnd, _lp) -> bool:
+            if int(hwnd) in skip:
+                return True
             if user32.GetWindow(hwnd, GW_OWNER):
                 return True
             if user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW:
@@ -182,12 +190,21 @@ def _visible_hwnds() -> set[int]:
         return set()
 
 
-def _wait_new_hwnd(before: set[int], timeout_s: float = 6.0) -> int | None:
+def _wait_new_window(exes: tuple[str, ...], before: set[int],
+                     timeout_s: float = 6.0) -> int | None:
+    """The largest NEW window belonging to one of `exes`.
+
+    This used to be `max(_visible_hwnds() - before)` — the highest-numbered window
+    that happened to appear in the next six seconds, whatever it belonged to. A
+    toast, another app's splash, or a dialog then got dragged onto a monitor and
+    toggled fullscreen. The exe match is the reason this module exists (see the
+    docstring: title sniffing "caused cloning"), and this was the one path that
+    skipped it."""
     deadline = time.monotonic() + max(0.5, timeout_s)
     while time.monotonic() < deadline:
-        fresh = _visible_hwnds() - before
-        if fresh:
-            return max(fresh)
+        hwnd = _main_hwnd_win32(exes, exclude=before)
+        if hwnd is not None:
+            return hwnd
         time.sleep(0.15)
     return None
 
@@ -251,6 +268,10 @@ def focus_or_launch_ide(cfg=None, fullscreen: bool = False) -> str:
             return f"{label} focused (existing window)."
         except Exception as exc:
             log.debug("focus failed: %s", exc)
+            # A window of the right app DOES exist. Failing to raise it must not
+            # fall through and start a second one — that is the "never clones"
+            # promise this module documents.
+            return f"{label} is already running but could not be focused: {exc}"
 
     exe = (getattr(w, "ide_path", "") or "").strip() if w else ""
     if not exe or not os.path.isfile(exe):
@@ -294,7 +315,7 @@ def open_url_chrome(url: str, monitor: int, fullscreen: bool, label: str) -> str
     except OSError as exc:
         return f"{label} failed: {exc}"
     if sys.platform == "win32":
-        hwnd = _wait_new_hwnd(before)
+        hwnd = _wait_new_window((os.path.basename(chrome).lower(),), before)
         if hwnd is not None:
             _snap_hwnd(hwnd, monitor, fullscreen)
             return f"{label} opened in Chrome on monitor {monitor}{' (fullscreen)' if fullscreen else ''}."

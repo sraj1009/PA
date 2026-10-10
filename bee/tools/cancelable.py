@@ -44,11 +44,20 @@ def _kill_tree(p: subprocess.Popen) -> None:
 
 
 def run_cancelable(cmd, cwd, timeout: int, cancel_event=None,
-                   shell: bool = False):
+                   shell: bool = False, env: dict | None = None,
+                   encoding: str | None = None):
     """Run `cmd`; returns (returncode, stdout, stderr, kind) with kind in
-    {'ok', 'timeout', 'cancelled'}. Never raises for control-flow cases."""
-    kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                  text=True, cwd=str(cwd))
+    {'ok', 'timeout', 'cancelled'}. Never raises for control-flow cases.
+
+    `encoding` decodes the child's pipes with errors='replace' instead of the
+    locale codec (cp1252 here), for children told to write that encoding."""
+    kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(cwd))
+    if encoding:
+        kwargs.update(encoding=encoding, errors="replace")
+    else:
+        kwargs["text"] = True
+    if env is not None:
+        kwargs["env"] = env
     if sys.platform.startswith("win"):
         kwargs["creationflags"] = _NEW_GROUP
     else:

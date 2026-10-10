@@ -41,18 +41,43 @@ def _paths():
     return d, it
 
 
-def _load() -> list[dict]:
+def _load() -> tuple[list[dict], str]:
+    """Return (tasks, warning). A store that cannot be read is moved aside, never
+    reported as empty: the old `except: return []` let the next `/plan add` write a
+    one-task file over the user's whole list (A54)."""
     f = _paths()[0] / "tasks.json"
     if not f.exists():
-        return []
+        return [], ""
     try:
-        return json.loads(f.read_text(encoding="utf-8"))
+        return json.loads(f.read_text(encoding="utf-8")), ""
     except Exception:
-        return []
+        try:
+            keep = f.with_name(f"{f.stem}.corrupt-{datetime.now():%Y%m%d-%H%M%S}.json")
+            f.replace(keep)
+            return [], f"tasks.json was unreadable — kept as {keep.name}, starting empty"
+        except OSError as e:
+            return [], f"tasks.json was unreadable and could not be set aside ({e})"
 
 
 def _save(tasks: list[dict]):
-    (_paths()[0] / "tasks.json").write_text(json.dumps(tasks, indent=1), encoding="utf-8")
+    """Atomic replace: a crash (or a concurrent reader) between the truncate and
+    the write used to leave a half-written store — the exact input that `_load`
+    turned into 'no tasks', which the next add then deleted. `_save` is also what
+    A51 covers for the JSONL streams; this one is a whole-file rewrite."""
+    import os
+    f = _paths()[0] / "tasks.json"
+    tmp = f.with_name(f".{f.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(tasks, indent=1), encoding="utf-8")
+    os.replace(tmp, f)
+
+
+def _next_id(tasks: list[dict]) -> str:
+    """`t{len(tasks) + 1}` collided after a prune: add t1,t2,t3, mark t2 done,
+    clear-done → the list is [t1,t3], len 2, and the next add re-issued `t3`, so
+    `/plan done t3` marked two tasks and `needs t3` stopped meaning one thing."""
+    used = [int(str(t.get("id"))[1:]) for t in tasks
+            if str(t.get("id", "")).startswith("t") and str(t["id"])[1:].isdigit()]
+    return f"t{max(used) + 1}" if used else "t1"
 
 
 def classify(title: str, due: str = "") -> str:
@@ -195,9 +220,13 @@ def _persist(kind: str, text: str):
 @register("plan", "/plan [add|list|done|daily|weekly|monthly|clear-done]",
           "time-boxed itineraries (Eisenhower P1–P4) + task store with deadlines/dependencies/status")
 def plan(ctx, arg: str) -> str:
-    arg = arg.strip()
+    tasks, warn = _load()
+    out = _dispatch(ctx, arg.strip(), tasks)
+    return f"⚠ {warn}\n\n{out}" if warn else out
+
+
+def _dispatch(ctx, arg: str, tasks: list[dict]) -> str:
     try:
-        tasks = _load()
         if not arg or arg.lower() in ("daily", "today"):
             blocks = _daily_blocks(tasks)
             llm = _llm(ctx, "You are an executive scheduler. Convert this task list into a realistic "
@@ -225,7 +254,7 @@ def plan(ctx, arg: str) -> str:
             title = m.group("title").strip()
             due = (m.group("due") or "").lower()
             pri = (m.group("p") or "").upper() or classify(title, due)
-            tid = f"t{len(tasks) + 1}"
+            tid = _next_id(tasks)
             tasks.append({"id": tid, "title": title, "due": due, "priority": pri,
                           "deps": [d.strip() for d in (m.group("deps") or "").split(",") if d.strip()],
                           "status": "todo", "created": date.today().isoformat()})

@@ -59,7 +59,7 @@ def dfs_order(adj: dict, start):
 
 
 def dijkstra(adj: dict, start):
-    """Dijkstra (non-negative weights): (dist, prev). O((V+E) log V)."""
+    """Dijkstra (non-negative weights): returns (dist, prev); dist[node] = shortest distance. O((V+E) log V)."""
     dist = {start: 0}
     prev = {}
     pq = [(0, start)]
@@ -167,4 +167,5 @@ def topological_sort(nodes, edges):
 
 
 def build_adj(nodes=None, edges=None) -> dict:
+    """Undirected adjacency dict from edges [(u, v)] (weight 1) or [(u, v, w)]."""
     return _adj(nodes, edges)

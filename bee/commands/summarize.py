@@ -136,8 +136,8 @@ def summarize(ctx, arg: str) -> str:
         d = Path(__import__("bee", fromlist=["paths"]).paths.WORKSPACE / "sums")
         d.mkdir(parents=True, exist_ok=True)
         f = d / f"{date.today().isoformat()}.md"
-        with open(f, "a", encoding="utf-8") as fh:
-            fh.write(f"\n---\n### {source}\n\n{body}\n")
+        import bee
+        bee.safeio.append_text(f, f"\n---\n### {source}\n\n{body}\n")
         return f"_(source: {source} · appended → sums/{f.name})_\n\n{body}"
     except Exception as e:
         return f"ERROR: /summarize failed safely: {type(e).__name__}: {e}"

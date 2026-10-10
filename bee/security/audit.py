@@ -56,8 +56,8 @@ def record(*, tool: str, args: dict | None, decision, action: str,
             p.parent.mkdir(parents=True, exist_ok=True)
             from ..monitor.rotate import rotate_if_needed
             rotate_if_needed(p, 2_000_000, 2)               # M13: bounded
-            with p.open("a", encoding="utf-8") as f:
-                f.write(line + "\n")
+            from .. import safeio
+            safeio.append_line(p, line)
     except Exception:
         pass  # audit must never break the agent
 

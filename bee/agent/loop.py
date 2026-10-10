@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 from ..config import Config
 from .client import LLMClient, LLMError
-from .context import Context, build_sub_system, build_system_prompt
+from .context import Context, build_sub_system, build_system_prompt, module_api_card
 from .router import route as route_v2, strip_cloud_prefix, CLOUD_PREFIX
 
 from .. import guard, privacy
@@ -352,14 +352,12 @@ def _golden(task: str, res: AgentResult) -> None:
     """Teach-back: a successful CLOUD answer becomes training material for the
     local model (SFT pipeline) and skill distillation (nightly job)."""
     try:
-        import json as _json
-        from .. import paths as _p
+        from .. import paths as _p, safeio as _safeio
         d = _p.TRAIN_DIR / "golden"
         d.mkdir(parents=True, exist_ok=True)
-        with (d / "cloud_golden.jsonl").open("a", encoding="utf-8") as f:
-            f.write(_json.dumps({"task": task[:500], "response": res.output[:4000],
-                                 "model": res.model, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")},
-                                ensure_ascii=False) + "\n")
+        _safeio.append_json(d / "cloud_golden.jsonl",
+                            {"task": task[:500], "response": res.output[:4000],
+                             "model": res.model, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
     except Exception:
         pass
 
@@ -558,6 +556,10 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                 user_content = f"{task}\n\n{mc}"
         except Exception:
             pass
+    if not sub:
+        card = module_api_card(task)
+        if card:
+            user_content = f"{user_content}\n\n{card}"
     messages: list[dict] = [{"role": "system", "content": system}, {"role": "user", "content": user_content}]
     tools = None if sub else tools_litellm()
     registry = tools_by_name() if tools else {}
@@ -772,11 +774,26 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                     vres = {"verdict": "warn", "findings": [{"check": "verifier", "detail": "verifier error"}]}
             if vres["verdict"] == "fail" and verify_rounds < MAX_VERIFY_FIXES and not sub:
                 verify_rounds += 1
+                # Never name the mechanism. This text used to open with an ALL-CAPS
+                # status code followed by a dump of internal check names; the 3B model
+                # made that phrase its SUBJECT and answered about function calls and
+                # JSON formatting instead of the request (live eval `guard_blocked`,
+                # 2026-10-10: tools=0, "To properly address the issue of
+                # SELF-VERIFICATION_FAILED, we need to ensure that each function call
+                # is correctly formatted with all required arguments included within a
+                # JSON object…"). Plain words, and the request restated — the same
+                # remedy the narration nudge above already uses.
+                problems = "; ".join(
+                    str(f.get("detail") or f.get("check") or "")
+                    for f in vres["findings"])[:400].strip()
                 messages.append({"role": "assistant", "content": final_output})
                 messages.append({"role": "user", "content":
-                    "SELF-VERIFICATION FAILED before sending: "
-                    + "; ".join(f["check"] + ": " + f.get("detail", "") for f in vres["findings"])
-                    + "\nRe-check your tool results and give the corrected final answer now."})
+                    "What you just wrote describes something that did not happen. "
+                    + (f"Here is what actually went wrong: {problems}. " if problems else
+                       "Nothing in it is backed by a result you actually received. ")
+                    + "Rewrite the answer using only what the results above show; if a "
+                    "part could not be done, say that plainly. Do not talk about tools, "
+                    f"checks or this message.\n\nRequest:\n{task[:600]}"})
                 continue
             break
 

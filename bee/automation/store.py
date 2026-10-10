@@ -95,8 +95,8 @@ class JobStore:
                 rotate_if_needed(self._exec_path, 2_000_000, 2)
             except Exception:
                 pass
-            with open(self._exec_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(ex.to_dict(), ensure_ascii=False) + "\n")
+            from .. import safeio
+            safeio.append_json(self._exec_path, ex.to_dict())
 
     def _exec_files(self) -> list[Path]:
         """Execution files OLDEST FIRST (.2 -> .1 -> active) — M13 rotation

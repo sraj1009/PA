@@ -66,6 +66,9 @@ _UNIT = [
     "test_router_tiers", "test_secretscan", "test_dsa", "test_extractor",
     "test_capabilities", "test_offline", "test_audit",
     "test_config_precedence", "test_events", "test_providers",
+    "test_plan_store",
+    # A52 (2026-10-10): the eval headline is the run that ran, not the ledger.
+    "test_eval_score",
     # A37 (2026-10-09): the real LLMClient streaming path (only the transport is
     # faked) + the static call-signature contract that catches the A27a/A37a
     # species before a blanket `except` can hide it.
@@ -123,6 +126,24 @@ _INTEGRATION = [
     # (computeruse/monitor/scheduler/model_gate/sandbox.max_output), the
     # app-wide logging handler, num_ctx + workspace resolution.
     "test_audit_fixes",
+    # A47/A48 (2026-10-10): file claims checked against the disk (+ tool results
+    # count as receipts), and three refusals in a row end the loop.
+    "test_claim_grounding",
+    # A49 (2026-10-10): code_run UTF-8 stdio + bee importable from any
+    # workspace; shell is cmd.exe with a first-word PowerShell retry.
+    "test_exec_tools",
+    # A50 (2026-10-10): a request naming a BEE module gets its real signatures
+    # (ast-read, never imported) so the model stops inventing APIs.
+    "test_api_card",
+    # A53/A54 (2026-10-10): the Welcome protocol only touches windows it owns;
+    # /plan never erases a store it cannot read, and task ids stop repeating.
+    "test_welcome_startup", "test_plan_store",
+    # A51 (2026-10-10): the JSONL/markdown appenders are cross-process safe
+    # (OS byte lock); this spawns real child writers to prove it.
+    "test_safe_append",
+    # A55/A56 (2026-10-10): the verify-retry ask names no mechanism and restates
+    # the request; an honest refusal is no longer graded as a fabricated claim.
+    "test_verify_retry",
 ]
 # Files that need OPTIONAL packages / a specific platform — the default CORE
 # suite must not fail because these are absent (Program Phase 7). Phase 7
@@ -157,6 +178,7 @@ MARKERS = {
     ],
     "tools": [
         "test_automate", "test_automation", "test_extractor", "test_sandbox",
+        "test_exec_tools",
     ],
     "voice": [
         "test_voice_engine", "test_stt_device", "test_livekit",

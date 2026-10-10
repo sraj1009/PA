@@ -13,8 +13,8 @@ def memory_tools():
         day = paths.DIARY_DIR / f"{datetime.now():%Y-%m-%d}.md"
         day.parent.mkdir(parents=True, exist_ok=True)
         extra = f" [model={model}{'|cloud' if escalated else ''}]" if model else ""
-        with day.open("a", encoding="utf-8") as f:
-            f.write(f"\n## {datetime.now():%H:%M:%S}{extra}\n{msg}\n")
+        from .. import safeio
+        safeio.append_text(day, f"\n## {datetime.now():%H:%M:%S}{extra}\n{msg}\n")
         return {"ok": True, "file": str(day), "chars": len(msg)}
 
     def h_longterm(ctx, text: str, append: bool = True):

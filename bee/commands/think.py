@@ -80,8 +80,8 @@ def _save(text: str):
     d = paths.WORKSPACE / "thoughts"
     d.mkdir(parents=True, exist_ok=True)
     f = d / f"{date.today().isoformat()}.md"
-    with open(f, "a", encoding="utf-8") as fh:
-        fh.write("\n" + text + "\n")
+    from .. import safeio
+    safeio.append_text(f, "\n" + text + "\n")
     return f"thoughts/{f.name}"
 
 
