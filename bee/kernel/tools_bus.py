@@ -204,21 +204,55 @@ class ToolBus:
         if violations:
             raise MalformedArgsError(
                 f"bad arguments for {name}: " + "; ".join(violations)[:600])
-        # --- 3. capability authorization. MANDATORY whenever a gate exists —
-        # deliberately NOT gated on ctx.guard_on: disabling the legacy
-        # interactive command guard (`/guard off`) is a REPL convenience and
-        # can never bypass capability authorization (Phase-12 N1 invariant,
-        # now enforced at the single dispatcher instead of only in the loop).
+        # --- 3+4. policy pipeline: capability authorization + risk/approval.
+        #
+        # P0 invariant: capability authorization runs FIRST and is NEVER
+        # controlled by ctx.guard_on — turning the legacy interactive command
+        # guard off (`/guard off`) is a REPL convenience for the ask-prompt
+        # layer and can never disable the capability layer (Phase-12 N1).
+        #
+        # The two layers are evaluated together here because a DENY decision
+        # from either must reach the human approver exactly once, with the
+        # kernel's real WAITING_FOR_PERMISSION flow attached. The kernel wires
+        # ctx.capability_gate.confirmer to that flow; when the confirmer grants
+        # the call, the gate records a TASK-SCOPED grant and re-checks — so an
+        # "ask"-policy capability becomes an allow for the rest of the task
+        # while a hard-DENY policy stays denied no matter what anyone approves
+        # (mirrors the pre-bus behaviour where only the guard 'ask' path was
+        # interruptible by the operator).
         gate = getattr(ctx, "capability_gate", None)
         if gate is not None:
             gres = gate.check(name, args,
                               task_id=getattr(ctx, "current_task_id", "") or "",
                               untrusted_context=bool(getattr(ctx, "untrusted_active", False)))
             if not gres.allowed:
-                raise PermissionError(
-                    f"capability {gres.capability_id}: {gres.reason}")
+                # one confirmation attempt through the gate's own confirmer
+                # (kernel permission flow / tests); fail closed if none.
+                conf = getattr(gate, "confirmer", None)
+                granted = False
+                if conf is not None:
+                    try:
+                        caps = gate.required_for(name, args)
+                        target = next((c for c in caps if c.id == gres.capability_id),
+                                      caps[0] if caps else None)
+                        if target is not None:
+                            granted = bool(conf(target, gres.reason))
+                    except Exception:
+                        granted = False
+                if not granted:
+                    raise PermissionError(
+                        f"capability {gres.capability_id}: {gres.reason}")
+                gres = gate.check(name, args,
+                                  task_id=getattr(ctx, "current_task_id", "") or "",
+                                  untrusted_context=bool(getattr(ctx, "untrusted_active", False)))
+                if not gres.allowed:
+                    raise PermissionError(
+                        f"capability {gres.capability_id}: {gres.reason} "
+                        "(still denied after confirmation — policy is DENY)")
         # --- 4. risk/approval policy (the legacy guard layer). This — and
-        # only this — is what ctx.guard_on controls.
+        # only this — is what ctx.guard_on controls. `approver` is the
+        # per-run on_ask the loop sets on ctx (kernel WAITING_FOR_PERMISSION
+        # flow); falls back to the mode's built-in approver when absent.
         from .. import guard as _guard
         if name in _guard.EXEC_TOOLS and getattr(ctx, "guard_on", True):
             cfg = getattr(ctx, "cfg", None)
@@ -227,6 +261,7 @@ class ToolBus:
                 proceed, action, reason = _guard.check(
                     name, args, True, getattr(ctx, "guard_mode", "cli"),
                     approver=getattr(ctx, "approver", None))
+                metrics_action = action
                 if not proceed:
                     raise PermissionError(f"guard ({reason}): command not executed")
         # --- 5. cancellation before execution
