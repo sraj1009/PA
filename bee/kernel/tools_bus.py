@@ -39,6 +39,31 @@ class UnknownToolError(KeyError):
     pass
 
 
+# ------------------------------------------------- indeterminate-outcome registry
+# P1 (audit): when a handler times out and its termination CANNOT be verified,
+# the side effect may still land later. Until the state is checked, a blind
+# retry of the SAME call could duplicate that side effect — so it is blocked.
+# Key: (tool name, sorted repr of args). Cleared when a later call of the same
+# key succeeds (the state WAS effectively checked) or explicitly resolved.
+_INDETERMINATE: dict[tuple, dict] = {}
+_INDETERMINATE_TTL = 1800.0   # seconds; stale entries expire automatically
+
+
+def _prune_indeterminate() -> None:
+    now = time.time()
+    stale = [k for k, v in _INDETERMINATE.items()
+             if now - v.get("epoch", now) > _INDETERMINATE_TTL]
+    for k in stale:
+        _INDETERMINATE.pop(k, None)
+
+
+def resolve_indeterminate(name: str, args: dict) -> None:
+    """Operator/tool-side escape hatch: mark an indeterminate call's state as
+    checked so retries are allowed again."""
+    key = (name, sorted((k, repr(v)) for k, v in (args or {}).items()))
+    _INDETERMINATE.pop(key, None)
+
+
 class MalformedArgsError(TypeError):
     pass
 
@@ -107,14 +132,61 @@ class ToolBus:
                  "function": {"name": d.name, "description": d.description,
                               "parameters": d.schema}} for d in self._defs.values()]
 
-    # --------------------------------------------------------------- call
+    # -------------------------------------------------- indeterminate outcomes
+    # P1 (audit): a timed-out handler ran on a daemon thread the bus cannot
+    # kill. Python threads are not interruptible, so claiming the action was
+    # "stopped" would be a lie. What IS verifiable: cancelable exec tools
+    # (shell/code_run) poll ctx.cancel_event and kill their whole process
+    # tree, so setting that event + waiting briefly gives real termination
+    # evidence. For anything else the side effect may still land later — the
+    # outcome is INDETERMINATE and blind automatic retries of the same call
+    # are blocked until the state is checked (see IndeterminateRegistry).
+    _TERM_GRACE = 5.0   # max wait for a cancel-aware tool to prove termination
+
+    def _terminate(self, ctx, name: str, runner: threading.Thread,
+                   q: "queue.Queue") -> bool:
+        """Attempt verified termination of a still-running handler.
+
+        Returns True ONLY when the handler finished within the grace window
+        after we signalled cancellation (ctx.cancel_event set) — i.e. the
+        underlying action stopped, not merely "we gave up waiting".
+        """
+        ev = getattr(ctx, "cancel_event", None)
+        try:
+            import threading as _th
+            if not isinstance(ev, _th.Event):
+                ev = _th.Event()
+                ctx.cancel_event = ev
+            ev.set()
+        except Exception:
+            pass
+        try:
+            tag, payload = q.get(timeout=self._TERM_GRACE)
+            return True   # handler exited on its own after the cancel signal
+        except queue.Empty:
+            return False  # still running: side effects possible, unverifiable
+
+    @staticmethod
+    def _retry_key(name: str, args: dict) -> tuple:
+        """Hashable, deterministic identity of a (tool, args) call."""
+        return (name, tuple(sorted((k, repr(v)) for k, v in (args or {}).items())))
+
     def call(self, ctx, name: str, args, timeout: float | None = None,
-             stop_check=None):
+             stop_check=None, allow_indeterminate: bool = False):
         """Execute a registered tool. Returns (result, seconds, ok, meta).
 
-        meta: {timed_out: bool, cancelled: bool, error: str}
+        meta: {timed_out: bool, indeterminate: bool, terminated: bool,
+               cancelled: bool, error: str}
         Unknown tool  -> UnknownToolError
         Bad args      -> MalformedArgsError (caller converts to observation)
+
+        Authorization order (every step happens BEFORE any handler runs):
+          1 registration check → 2 strict schema validation →
+          3 capability authorization (mandatory; never controlled by
+          ctx.guard_on) → 4 risk/approval policy (guard) →
+          5 pre-call cancellation check → 6 execution under a bounded
+          timeout with explicit cancellation/termination attempt →
+          7 result → 8 receipt (caller-side; audit + ExecutionReceipt).
         """
         d = self._defs.get(name)
         if d is None:
@@ -124,16 +196,64 @@ class ToolBus:
             args = {}
         if not isinstance(args, dict):
             raise MalformedArgsError(f"arguments for {name} must be an object, got {type(args).__name__}")
+        # --- 2. strict schema validation against the REGISTERED schema.
+        # "is a dict" is insufficient: unknown keys, missing required keys and
+        # wrong types must never reach a privileged handler.
+        from .schema import validate_args
+        violations = validate_args(args, d.schema or {})
+        if violations:
+            raise MalformedArgsError(
+                f"bad arguments for {name}: " + "; ".join(violations)[:600])
+        # --- 3. capability authorization. MANDATORY whenever a gate exists —
+        # deliberately NOT gated on ctx.guard_on: disabling the legacy
+        # interactive command guard (`/guard off`) is a REPL convenience and
+        # can never bypass capability authorization (Phase-12 N1 invariant,
+        # now enforced at the single dispatcher instead of only in the loop).
+        gate = getattr(ctx, "capability_gate", None)
+        if gate is not None:
+            gres = gate.check(name, args,
+                              task_id=getattr(ctx, "current_task_id", "") or "",
+                              untrusted_context=bool(getattr(ctx, "untrusted_active", False)))
+            if not gres.allowed:
+                raise PermissionError(
+                    f"capability {gres.capability_id}: {gres.reason}")
+        # --- 4. risk/approval policy (the legacy guard layer). This — and
+        # only this — is what ctx.guard_on controls.
+        from .. import guard as _guard
+        if name in _guard.EXEC_TOOLS and getattr(ctx, "guard_on", True):
+            cfg = getattr(ctx, "cfg", None)
+            gen = getattr(getattr(cfg, "guard", None), "enabled", True)
+            if gen:
+                proceed, action, reason = _guard.check(
+                    name, args, True, getattr(ctx, "guard_mode", "cli"),
+                    approver=getattr(ctx, "approver", None))
+                if not proceed:
+                    raise PermissionError(f"guard ({reason}): command not executed")
+        # --- 5. cancellation before execution
         if stop_check is not None and stop_check():
             raise PermissionError("cancelled before execution")
+        # --- 1b. refuse blind retries of an indeterminate earlier call
+        _prune_indeterminate()
+        key = self._retry_key(name, args)
+        if not allow_indeterminate and key in _INDETERMINATE:
+            prior = _INDETERMINATE[key]
+            raise PermissionError(
+                f"{name} with these arguments TIMED OUT EARLIER and its "
+                f"outcome is indeterminate (the action may still have run). "
+                f"Blind retry is blocked. First CHECK the current state "
+                f"(read-only verification); if it did not happen, re-issue "
+                f"with allow_indeterminate=True once you have verified. "
+                f"(pending since {prior['ts']})")
         # N3 (debt): a per-tool timeout must actually bound the call. The
         # handler runs in a worker thread; if it outlives the budget the
         # agent is NOT blocked forever — ToolTimeoutError is raised so the
-        # loop records a failed observation and moves on. (Python cannot kill
-        # a thread; the tool's own subprocess/timeout limits still bound the
-        # underlying work, and cancelable tools die via ctx.cancel_event.)
+        # loop records a failed observation and moves on. On top of that
+        # (P1 fix) we now ATTEMPT explicit termination and, when it cannot
+        # be verified, mark the outcome indeterminate instead of pretending
+        # the action was stopped.
         eff_timeout = timeout if timeout is not None else d.timeout
         t0 = time.time()
+        tag = payload = None
         if eff_timeout and eff_timeout > 0:
             q: "queue.Queue" = queue.Queue(maxsize=1)
 
@@ -149,14 +269,41 @@ class ToolBus:
                 else:
                     q.put(("ok", res))
 
-            threading.Thread(target=_runner, daemon=True,
-                             name=f"toolbus-{name}").start()
+            runner = threading.Thread(target=_runner, daemon=True,
+                                      name=f"toolbus-{name}")
+            runner.start()
             try:
                 tag, payload = q.get(timeout=eff_timeout)
             except queue.Empty:
-                raise ToolTimeoutError(
-                    f"{name} timed out after {eff_timeout:.0f}s "
-                    f"(the agent is unblocked; the tool keeps to its own limits)")
+                terminated = self._terminate(ctx, name, runner, q)
+                if not terminated:
+                    _INDETERMINATE[key] = {"tool": name,
+                                          "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                          "epoch": time.time()}
+                    raise ToolTimeoutError(
+                        f"{name} timed out after {eff_timeout:.0f}s — "
+                        "termination NOT verified: the action may still be "
+                        "running or may have had an effect. Outcome marked "
+                        "INDETERMINATE; blind retries of this exact call are "
+                        "blocked until the state is checked.")
+                # termination VERIFIED: the handler exited after our cancel
+                # signal — drain its verdict so receipts record the truth.
+                try:
+                    tag, payload = q.get_nowait()
+                except queue.Empty:
+                    tag, payload = "cancelled", None
+                dt = round(time.time() - t0, 3)
+                if tag == "perm":
+                    raise payload
+                if tag in ("badargs", "error"):
+                    res = {"error": str(payload)}
+                    return res, dt, False, {"timed_out": True, "indeterminate": False,
+                                            "terminated": True, "cancelled": False,
+                                            "timeout": eff_timeout}
+                res = payload if tag == "ok" else (payload or {"cancelled": True})
+                return res, dt, False, {"timed_out": True, "indeterminate": False,
+                                        "terminated": True, "cancelled": True,
+                                        "timeout": eff_timeout}
         else:
             # timeout<=0 / None => unbounded (legacy behavior for opt-out tools)
             try:
@@ -178,8 +325,39 @@ class ToolBus:
                 res = payload
         dt = round(time.time() - t0, 3)
         ok = not (isinstance(res, dict) and (res.get("error") or res.get("blocked")))
-        return res, dt, ok, {"timed_out": False, "cancelled": False,
+        if ok:
+            # a verified successful call of this exact (tool,args) resolves any
+            # earlier indeterminate record for it (the state WAS checked)
+            _INDETERMINATE.pop(key, None)
+        return res, dt, ok, {"timed_out": False, "indeterminate": False,
+                             "terminated": False, "cancelled": False,
                              "timeout": timeout or d.timeout}
 
     def __len__(self):
         return len(self._defs)
+
+
+# ------------------------------------------------------- single dispatcher entry
+def bus_for(ctx, names: list[str] | None = None) -> "ToolBus":
+    """The authoritative dispatcher for `ctx`.
+
+    P0 (audit): EVERY tool-capable route — the LLM loop, deterministic fast
+    paths, snippet verification, planner relay — must dispatch through one
+    ToolBus so registration, schema validation, capability authorization,
+    risk/approval policy and timeout/cancellation management apply uniformly.
+    Kernel-backed contexts reuse the kernel's bus; kernel-less contexts get a
+    cached default bus built from the registered tool modules. There is no
+    longer any code path that executes a privileged tool outside this object.
+    """
+    k = getattr(ctx, "kernel", None)
+    b = getattr(k, "bus", None) if k is not None else None
+    if isinstance(b, ToolBus) and (names is None or all(n in b.names() for n in names)):
+        return b
+    b = getattr(ctx, "_bee_default_bus", None)
+    if not isinstance(b, ToolBus):
+        b = ToolBus().from_default()
+        try:
+            ctx._bee_default_bus = b
+        except Exception:
+            pass
+    return b
