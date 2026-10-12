@@ -1,0 +1,83 @@
+<view class="pg">
+  <view class="card hero">
+    <view class="spread">
+      <view>
+        <view class="t-xl">校园生活</view>
+        <view class="sub js-sub">所有记录只写在这台设备上，没有账号，也没有服务器</view>
+      </view>
+      <mode-badge class="js-mode" mode="{{mode}}" />
+    </view>
+  </view>
+
+  <view class="sec">今天的状态</view>
+
+  <view class="card stat">
+    <view class="spread">
+      <text class="stat-t">今日安排</text>
+      <text class="muted tiny js-plan-meta">{{planMeta}}</text>
+    </view>
+    <view wx:if="{{hasPlan}}" class="stat-b js-plan">{{planText}}</view>
+    <empty-state
+      wx:else
+      class="js-plan-empty"
+      title="今天还没排过日程"
+      desc="规划只用本机记下的任务和可用时间算，排不下的会直接说排不下。"
+      action="去规划"
+      bind:action="onGoPlanner"
+    />
+  </view>
+
+  <view class="card stat">
+    <view class="spread">
+      <text class="stat-t">本地探索打卡</text>
+      <text class="muted tiny js-check-meta">{{checkMeta}}</text>
+    </view>
+    <view class="stat-b js-check">{{checkText}}</view>
+  </view>
+
+  <view class="card stat">
+    <view class="spread">
+      <text class="stat-t">心情</text>
+      <text class="muted tiny js-mood-meta">{{moodMeta}}</text>
+    </view>
+    <view wx:if="{{hasMood}}" class="stat-b js-mood">{{moodText}}</view>
+    <empty-state
+      wx:else
+      class="js-mood-empty"
+      title="还没有心情记录"
+      desc="雷达上的六个维度全部由你自己的记录算出来，没有本机记录就是空的。"
+      action="去心情雷达"
+      bind:action="onGoRadar"
+    />
+  </view>
+
+  <view class="sec">社交互动</view>
+  <view class="navs js-social">
+    <nav-card
+      wx:for="{{social}}"
+      wx:key="title"
+      class="js-nav js-{{item.key}}"
+      glyph="{{item.glyph}}"
+      title="{{item.title}}"
+      desc="{{item.desc}}"
+      url="{{item.url}}"
+      tab="{{item.tab}}"
+    />
+  </view>
+
+  <view class="sec">本地生活工具</view>
+  <view class="navs js-tools">
+    <nav-card
+      wx:for="{{tools}}"
+      wx:key="title"
+      class="js-tool js-{{item.key}}"
+      glyph="{{item.glyph}}"
+      title="{{item.title}}"
+      desc="{{item.desc}}"
+      url="{{item.url}}"
+      tab="{{item.tab}}"
+    />
+  </view>
+
+  <view class="local-only">内容仅存于本机 · 智能体是本地模型还是离线模式，看顶部那枚标注</view>
+</view>

@@ -1,0 +1,6 @@
+{
+  "navigationBarTitleText": "心情雷达",
+  "usingComponents": {
+    "mood-radar": "../../components/mood-radar/index"
+  }
+}

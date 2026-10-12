@@ -1,0 +1,3 @@
+.probe { padding: var(--s-4); }
+.hd { color: var(--brand); font-size: var(--fs-lg); }
+.row { color: var(--ink-2); }

@@ -1,0 +1,4 @@
+<view class="probe">
+  <view class="hd" bindtap="onTap">{{title}}</view>
+  <view class="row" wx:for="{{rows}}" wx:key="id">{{item.id}}</view>
+</view>

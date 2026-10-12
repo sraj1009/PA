@@ -1,0 +1,15 @@
+{
+  "name": "campus-life",
+  "version": "1.0.0",
+  "private": true,
+  "description": "校园生活微信小程序 — 本地化社交互动 + 本地生活工具",
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch"
+  },
+  "devDependencies": {
+    "jest": "^30.5.2",
+    "jest-environment-jsdom": "^30.5.0",
+    "miniprogram-simulate": "^1.6.2"
+  }
+}

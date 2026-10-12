@@ -1,0 +1,82 @@
+<view class="pg">
+  <view class="card head">
+    <view class="t-xl">心情雷达</view>
+    <view class="muted">近 {{days}} 天读到你记了 {{count}} 条内容</view>
+  </view>
+
+  <view class="chips">
+    <view
+      class="chip js-days {{days === item ? 'chip--on' : ''}}"
+      wx:for="{{windows}}"
+      wx:key="*this"
+      data-days="{{item}}"
+      bindtap="onDays"
+    >近 {{item}} 天</view>
+  </view>
+
+  <view wx:if="{{hasData}}" class="card radar-card">
+    <mood-radar axes="{{axes}}" size="{{520}}" />
+  </view>
+
+  <view wx:else class="card zero">
+    <view class="zero-t">近 {{days}} 天还没有记录</view>
+    <view class="muted">去树洞写一句，或在下面记一笔心情，六个角会自己长出来。这里不会替你编一个"看起来正常"的数字。</view>
+    <view class="local-only">内容仅存于本机</view>
+  </view>
+
+  <block wx:if="{{hasData}}">
+    <view class="section-title">六个维度</view>
+    <view class="card rows">
+      <view class="row" wx:for="{{axes}}" wx:key="axis">
+        <text class="row-n">{{item.axis}}</text>
+        <view class="track"><view class="fill" style="width:{{item.value}}%"></view></view>
+        <text class="row-v">{{item.value}}</text>
+        <text class="row-e">{{item.label}}</text>
+      </view>
+    </view>
+
+    <block wx:if="{{series.length > 1}}">
+      <view class="section-title">每日心情走势</view>
+      <view class="card trend">
+        <view class="tl">
+          <view class="tcol" wx:for="{{series}}" wx:key="id">
+            <view class="tbar" style="height:{{item.value}}%"></view>
+            <text class="tm">{{item.count}}</text>
+          </view>
+        </view>
+        <view class="muted tiny">{{series[0].day}} 起 · 只画有记录的日子，空日子不补零</view>
+      </view>
+    </block>
+  </block>
+
+  <view class="section-title">记一笔心情</view>
+  <view class="card form">
+    <view class="lab">现在的感觉</view>
+    <view class="chips">
+      <view
+        class="chip js-mood {{moodPick === item.value ? 'chip--on' : ''}}"
+        wx:for="{{moodOptions}}"
+        wx:key="value"
+        data-v="{{item.value}}"
+        bindtap="onPickMood"
+      >{{item.label}}</view>
+    </view>
+
+    <view class="lab">为什么（可以留空）</view>
+    <input class="tinput js-note" placeholder="例如：熬到两点才睡着" value="{{note}}" bindinput="onNote" />
+    <view class="btn js-save" bindtap="onSave">记下</view>
+    <view class="muted tiny">这只写进本机的心情记录，不会发给任何人。</view>
+  </view>
+
+  <view class="section-title">最近的记录</view>
+  <view wx:if="{{!records.length}}" class="card empty">还没有任何记录。</view>
+  <view class="card rec" wx:for="{{records}}" wx:key="id">
+    <view class="spread">
+      <text class="rec-t">{{item.text}}</text>
+      <text class="tag">{{item.moodText}}</text>
+    </view>
+    <view class="muted tiny">{{item.when}} · 来自{{item.from}}</view>
+  </view>
+
+  <view class="local-only">内容仅存于本机 · 六个维度由本地算法从你自己的记录算出</view>
+</view>

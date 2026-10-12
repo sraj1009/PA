@@ -1,0 +1,32 @@
+.pg { padding: var(--s-3) var(--s-3) var(--s-6); }
+.card { margin-bottom: var(--s-3); }
+
+.hero-n { font-size: 64rpx; font-weight: 700; color: var(--brand); line-height: 1.1; }
+.hero-side { text-align: right; }
+.hero-p { font-size: var(--fs-xl); font-weight: 600; color: var(--brand-3); }
+
+.bar { height: 12rpx; border-radius: var(--r-pill); background: var(--line); overflow: hidden; margin: var(--s-3) 0 var(--s-2); }
+.bar-fill { height: 100%; background: linear-gradient(90deg, var(--brand), var(--brand-2)); }
+
+.gps { margin-top: var(--s-1); }
+.dot { width: 14rpx; height: 14rpx; border-radius: 50%; background: var(--muted); display: inline-block; margin-right: 8rpx; }
+.dot--on { background: var(--mint); }
+
+.empty { text-align: center; padding: var(--s-6) var(--s-4); }
+.empty-t { font-size: var(--fs-lg); font-weight: 600; margin-bottom: var(--s-1); }
+
+.spot { padding: var(--s-3) var(--s-4); }
+.spot-n { font-size: var(--fs-body); font-weight: 600; }
+.badge { margin-left: var(--s-2); font-size: var(--fs-xs); color: var(--brand-2); background: rgba(34, 199, 214, 0.12); padding: 4rpx 12rpx; border-radius: var(--r-pill); }
+
+.btn-check {
+  flex-shrink: 0;
+  min-width: 128rpx;
+  text-align: center;
+  padding: 12rpx 20rpx;
+  border-radius: var(--r-pill);
+  background: var(--brand);
+  color: #fff;
+  font-size: var(--fs-sm);
+}
+.btn-check--done { background: var(--surface); color: var(--brand); border: 2rpx solid var(--line); }

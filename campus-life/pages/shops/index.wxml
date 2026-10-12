@@ -1,0 +1,43 @@
+<view class="pg">
+  <view class="card bar">
+    <input class="tinput js-q" placeholder="搜店名、类别或关键词" value="{{q}}" bindinput="onSearch" />
+    <view class="chips">
+      <view wx:for="{{cats}}" wx:key="id" class="chip {{item.on ? 'chip--on' : ''}}" data-id="{{item.id}}" bindtap="onToggleCat">{{item.label}}</view>
+    </view>
+    <view class="chips">
+      <view class="chip js-open {{openOnly ? 'chip--on' : ''}}" bindtap="onToggleOpen">营业中</view>
+      <view wx:for="{{sorts}}" wx:key="key" class="chip {{sort === item.key ? 'chip--on' : ''}}" data-k="{{item.key}}" bindtap="onSort">{{item.label}}</view>
+      <view wx:for="{{ranges}}" wx:key="value" class="chip js-range {{range === item.value ? 'chip--on' : ''}}" data-v="{{item.value}}" bindtap="onRange">{{item.label}}</view>
+    </view>
+    <view class="row gap-2 sumline">
+      <text class="muted">共 {{list.length}} / {{total}} 家 · 距离按{{distSource}}计算</text>
+      <text wx:if="{{favCount}}" class="muted">已收藏 {{favCount}}</text>
+    </view>
+  </view>
+
+  <view wx:if="{{empty}}" class="card empty">
+    <view class="empty-t">没有符合条件的店</view>
+    <view class="muted">先把筛选放宽一点试试。</view>
+    <view class="btn btn--ghost js-reset" bindtap="onReset">重置筛选</view>
+  </view>
+
+  <view wx:for="{{list}}" wx:key="id" class="card shop js-shop" data-id="{{item.id}}" bindtap="onOpen">
+    <view class="spread">
+      <view class="grow">
+        <view class="s-name">
+          <text>{{item.name}}</text>
+          <text class="badge {{item.openNow ? 'badge--on' : 'badge--off'}}">{{item.openNow ? '营业中' : '已打烊'}}</text>
+        </view>
+        <view class="muted">{{item.catText}} · {{item.hours}}</view>
+        <view class="s-meta">
+          <text class="rate">{{item.ratingText}}</text>
+          <text class="price">{{item.priceText}}</text>
+          <text class="dist">{{item.distText}}</text>
+        </view>
+      </view>
+      <view class="star js-fav {{item.fav ? 'star--on' : ''}}" data-id="{{item.id}}" catchtap="onFav">{{item.fav ? '★' : '☆'}}</view>
+    </view>
+  </view>
+
+  <view class="local-only">内容仅存于本机 · 商户信息为示例数据</view>
+</view>

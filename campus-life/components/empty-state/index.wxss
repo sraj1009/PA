@@ -1,0 +1,16 @@
+/* app.wxss 的选择器样式进不了自定义组件（默认样式隔离），所以这里自带一份按钮。 */
+.empty { text-align: center; padding: var(--s-5) var(--s-4); }
+.t { font-size: var(--fs-lg); font-weight: 600; }
+.d { margin-top: var(--s-2); font-size: var(--fs-sm); color: var(--muted); line-height: 1.6; }
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 64rpx;
+  margin-top: var(--s-4);
+  padding: 0 var(--s-4);
+  border-radius: var(--r-pill);
+  background: var(--brand);
+  color: #fff;
+  font-size: var(--fs-sm);
+}

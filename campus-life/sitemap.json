@@ -1,0 +1,9 @@
+{
+  "desc": "本文件的详细规则请查看微信小程序 sitemap 官方文档",
+  "rules": [
+    {
+      "action": "disallow",
+      "page": "*"
+    }
+  ]
+}

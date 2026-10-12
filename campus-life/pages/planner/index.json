@@ -1,0 +1,7 @@
+{
+  "navigationBarTitleText": "时间管理智能规划",
+  "enablePullDownRefresh": false,
+  "usingComponents": {
+    "mode-badge": "../../components/mode-badge/index"
+  }
+}

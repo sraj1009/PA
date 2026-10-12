@@ -1,0 +1,39 @@
+<view class="radar" style="width:{{size}}rpx;height:{{size}}rpx">
+  <view
+    class="ring"
+    wx:for="{{rings}}"
+    wx:key="*this"
+    style="width:{{item * 2}}rpx;height:{{item * 2}}rpx;left:{{center - item}}rpx;top:{{center - item}}rpx"
+  ></view>
+
+  <view
+    class="spoke"
+    wx:for="{{spokes}}"
+    wx:key="index"
+    style="width:{{item.len}}rpx;left:{{item.x}}rpx;top:{{item.y - 1}}rpx;transform:rotate({{item.angle}}deg)"
+  ></view>
+
+  <view
+    class="edge"
+    wx:for="{{edges}}"
+    wx:key="index"
+    style="width:{{item.len}}rpx;left:{{item.x}}rpx;top:{{item.y - 2}}rpx;transform:rotate({{item.angle}}deg)"
+  ></view>
+
+  <view
+    class="dot"
+    wx:for="{{points}}"
+    wx:key="axis"
+    style="left:{{item.x - 6}}rpx;top:{{item.y - 6}}rpx"
+  ></view>
+
+  <view
+    class="axis"
+    wx:for="{{points}}"
+    wx:key="axis"
+    style="left:{{item.labelX}}rpx;top:{{item.labelY}}rpx"
+  >
+    <text class="axis-n">{{item.axis}}</text>
+    <text class="axis-v">{{item.value}}</text>
+  </view>
+</view>

@@ -1,0 +1,33 @@
+page {
+  --brand: #3B6EF6;
+  --brand-2: #22C7D6;
+  --brand-3: #7A5AF8;
+  --mint: #2ED3A7;
+  --ink: #101B33;
+  --ink-2: #37476b;
+  --muted: #7B89A6;
+  --surface: #FFFFFF;
+  --canvas: #F2F5FB;
+  --line: #E3E9F4;
+
+  --shadow-1: 0 6rpx 24rpx rgba(16, 27, 51, 0.06);
+  --shadow-2: 0 12rpx 40rpx rgba(59, 110, 246, 0.14);
+
+  --r-sm: 8rpx;
+  --r-md: 16rpx;
+  --r-lg: 24rpx;
+  --r-pill: 999rpx;
+
+  --s-1: 4rpx;
+  --s-2: 8rpx;
+  --s-3: 16rpx;
+  --s-4: 24rpx;
+  --s-5: 32rpx;
+  --s-6: 48rpx;
+
+  --fs-xs: 22rpx;
+  --fs-sm: 26rpx;
+  --fs-body: 30rpx;
+  --fs-lg: 34rpx;
+  --fs-xl: 44rpx;
+}

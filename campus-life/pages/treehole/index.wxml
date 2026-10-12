@@ -1,0 +1,48 @@
+<view class="pg">
+  <view class="card composer">
+    <view class="spread">
+      <view class="t-head">校园树洞</view>
+      <text class="badge {{modeText === '本地模型' ? 'badge--llm' : ''}}">{{modeText}}</text>
+    </view>
+    <textarea
+      class="ta js-draft"
+      placeholder="说点什么吧，这里没有实名，也没有观众。"
+      value="{{draft}}"
+      maxlength="200"
+      bindinput="onDraft"
+    ></textarea>
+    <view class="spread tail">
+      <text class="muted tiny">{{draft.length}}/200 · 心情标注由{{modeText}}完成</text>
+      <view class="btn js-publish {{busy ? 'btn--off' : ''}}" bindtap="onPublish">{{busy ? '标注中…' : '发布'}}</view>
+    </view>
+  </view>
+
+  <view class="chips">
+    <view
+      class="chip js-filter {{filter === item.value ? 'chip--on' : ''}}"
+      wx:for="{{filters}}"
+      wx:key="value"
+      data-v="{{item.value}}"
+      bindtap="onFilter"
+    >{{item.label}} {{item.value === 'all' ? total : (counts[item.value] || 0)}}</view>
+  </view>
+
+  <view wx:if="{{empty}}" class="card empty">
+    <view>这个筛选下还没有内容。</view>
+    <view class="muted tiny">树洞里的话只有你自己看得见，也只在心情雷达里被算一次。</view>
+  </view>
+
+  <view class="card post" wx:for="{{rows}}" wx:key="id">
+    <view class="spread">
+      <text class="anon">{{item.anon}}</text>
+      <text class="tag tag--{{item.moodValue}}">{{item.moodText}}</text>
+    </view>
+    <view class="body">{{item.text}}</view>
+    <view class="spread foot">
+      <text class="muted tiny">{{item.when}} · {{item.taggedBy}}</text>
+      <text class="close js-close" data-id="{{item.id}}" bindtap="onClose">收回</text>
+    </view>
+  </view>
+
+  <view class="local-only">内容仅存于本机 · 没有服务器，也没有别人能看到</view>
+</view>

@@ -1,0 +1,9 @@
+<view class="nav" bindtap="onGo">
+  <text class="glyph">{{glyph}}</text>
+  <view class="body">
+    <view class="t">{{title}}</view>
+    <view class="d" wx:if="{{desc}}">{{desc}}</view>
+    <view class="m" wx:if="{{meta}}">{{meta}}</view>
+  </view>
+  <text class="arrow">›</text>
+</view>

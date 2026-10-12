@@ -1,0 +1,26 @@
+/* app.wxss 的选择器样式进不了自定义组件，这里自带一份。 */
+.nav {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+}
+.glyph {
+  flex-shrink: 0;
+  width: 64rpx;
+  height: 64rpx;
+  line-height: 64rpx;
+  text-align: center;
+  border-radius: var(--r-md);
+  background: rgba(59, 110, 246, 0.1);
+  color: var(--brand);
+  font-size: var(--fs-body);
+}
+.body { flex: 1; }
+.t { font-size: var(--fs-body); font-weight: 600; }
+.d { margin-top: 2rpx; font-size: var(--fs-sm); color: var(--muted); line-height: 1.5; }
+.m { margin-top: var(--s-1); font-size: var(--fs-xs); color: var(--brand-2); }
+.arrow { flex-shrink: 0; color: var(--muted); font-size: var(--fs-lg); }

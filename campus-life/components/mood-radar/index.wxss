@@ -1,0 +1,43 @@
+.radar { position: relative; margin: 0 auto; }
+
+.ring {
+  position: absolute;
+  border: 2rpx solid var(--line);
+  border-radius: 50%;
+}
+
+.spoke {
+  position: absolute;
+  height: 2rpx;
+  background: var(--line);
+  transform-origin: 0 50%;
+}
+
+.edge {
+  position: absolute;
+  height: 4rpx;
+  border-radius: 2rpx;
+  background: var(--brand);
+  opacity: 0.85;
+  transform-origin: 0 50%;
+}
+
+.dot {
+  position: absolute;
+  width: 12rpx;
+  height: 12rpx;
+  border-radius: 50%;
+  background: var(--brand-3);
+}
+
+.axis {
+  position: absolute;
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-1);
+  transform: translate(-50%, -50%);
+  white-space: nowrap;
+}
+
+.axis-n { font-size: var(--fs-sm); color: var(--ink); }
+.axis-v { font-size: var(--fs-xs); color: var(--brand); font-weight: 600; }

@@ -1,0 +1,14 @@
+.pg { padding: var(--s-3) var(--s-3) var(--s-6); }
+.card { margin-bottom: var(--s-3); }
+
+.hero { border-left: 8rpx solid var(--brand-2); }
+.t-xl { font-size: var(--fs-xl); font-weight: 600; }
+.sub { margin-top: var(--s-1); font-size: var(--fs-sm); color: var(--muted); line-height: 1.5; }
+
+.sec { font-size: var(--fs-sm); color: var(--muted); margin: var(--s-5) var(--s-1) var(--s-2); }
+
+.stat-t { font-size: var(--fs-body); font-weight: 600; }
+.stat-b { margin-top: var(--s-2); font-size: var(--fs-sm); color: var(--ink-2); line-height: 1.6; }
+.tiny { font-size: var(--fs-xs); }
+
+.navs { display: flex; flex-direction: column; gap: var(--s-3); }

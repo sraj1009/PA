@@ -1,0 +1,44 @@
+<view class="pg">
+  <view class="hero card">
+    <view class="spread">
+      <view>
+        <view class="hero-n">{{streak}}</view>
+        <view class="muted">连续打卡天数</view>
+      </view>
+      <view class="hero-side">
+        <view class="hero-p coverage">{{coveragePct}}</view>
+        <view class="muted">已探索 {{visited}}/{{total}}</view>
+      </view>
+    </view>
+    <view class="bar"><view class="bar-fill" style="width:{{coverageRatio * 100}}%"></view></view>
+    <view class="row gap-2 gps">
+      <text class="dot {{gpsOn ? 'dot--on' : ''}}"></text>
+      <text class="muted">{{gpsOn ? '定位已开启' : '未开启定位：仍可手动打卡'}}</text>
+    </view>
+  </view>
+
+  <view wx:if="{{empty}}" class="empty card">
+    <view class="empty-t">还没有打卡记录</view>
+    <view class="muted">下面的示例地点先在校园里走一走，再逐个解锁。</view>
+  </view>
+
+  <block wx:for="{{zones}}" wx:key="zone" wx:for-item="group">
+    <view class="section-title">{{group.label}}</view>
+    <view class="spot card" wx:for="{{group.spots}}" wx:key="id" wx:for-item="s">
+      <view class="spread">
+        <view class="grow">
+          <view class="spot-n">
+            <text>{{s.name}}</text>
+            <text wx:if="{{s.visited}}" class="badge">已打卡 · {{s.when}}</text>
+          </view>
+          <view class="muted">{{s.tip}}</view>
+        </view>
+        <view class="btn-check js-check {{s.visited ? 'btn-check--done' : ''}}" data-id="{{s.id}}" bindtap="onCheck">
+          {{s.visited ? '再打卡' : '打卡'}}
+        </view>
+      </view>
+    </view>
+  </block>
+
+  <view class="local-only">内容仅存于本机 · 地点为示例数据</view>
+</view>

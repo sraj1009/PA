@@ -1,0 +1,43 @@
+{
+  "pages": [
+    "pages/index/index",
+    "pages/explore/index",
+    "pages/planner/index",
+    "pages/shops/index",
+    "pages/shop/index",
+    "pages/treehole/index",
+    "pages/groups/index",
+    "pages/chat/index",
+    "pages/radar/index"
+  ],
+  "window": {
+    "backgroundTextStyle": "light",
+    "navigationBarBackgroundColor": "#3B6EF6",
+    "navigationBarTitleText": "校园生活",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#F2F5FB",
+    "enablePullDownRefresh": false
+  },
+  "tabBar": {
+    "color": "#7B89A6",
+    "selectedColor": "#3B6EF6",
+    "backgroundColor": "#FFFFFF",
+    "borderStyle": "white",
+    "list": [
+      { "pagePath": "pages/index/index", "text": "首页" },
+      { "pagePath": "pages/explore/index", "text": "探索" },
+      { "pagePath": "pages/planner/index", "text": "规划" },
+      { "pagePath": "pages/shops/index", "text": "好店" },
+      { "pagePath": "pages/treehole/index", "text": "树洞" }
+    ]
+  },
+  "permission": {
+    "scope.userLocation": {
+      "desc": "仅用于本地计算好店距离与探索打卡，位置不会上传到任何服务器。"
+    }
+  },
+  "requiredPrivateInfos": ["getLocation"],
+  "sitemapLocation": "sitemap.json",
+  "style": "v2",
+  "lazyCodeLoading": "requiredComponents"
+}

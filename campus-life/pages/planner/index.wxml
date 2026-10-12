@@ -1,0 +1,68 @@
+<view class="pg">
+  <view class="card form">
+    <view class="section-title t-head">今天要做点什么</view>
+    <input class="tinput" placeholder="例如：写完高数作业" value="{{title}}" bindinput="onTitle" />
+
+    <view class="lab">时长</view>
+    <view class="chips">
+      <view wx:for="{{durations}}" wx:key="*this" class="chip {{durationMin === item ? 'chip--on' : ''}}" data-v="{{item}}" bindtap="onPickDuration">{{item}} 分</view>
+    </view>
+
+    <view class="lab">优先级</view>
+    <view class="chips">
+      <view wx:for="{{priorities}}" wx:key="value" class="chip {{priority === item.value ? 'chip--on' : ''}}" data-v="{{item.value}}" bindtap="onPickPriority">{{item.label}}</view>
+    </view>
+
+    <view class="lab">截止</view>
+    <view class="chips">
+      <view wx:for="{{deadlines}}" wx:key="label" class="chip {{deadlineLabel === item.label ? 'chip--on' : ''}}" data-v="{{item.value}}" bindtap="onPickDeadline">{{item.label}}</view>
+    </view>
+
+    <view class="btn js-add" bindtap="onAdd">加入待办</view>
+  </view>
+
+  <view class="section-title">待办清单</view>
+  <view wx:if="{{empty}}" class="card empty">还没有待办，先加一条。</view>
+  <view wx:for="{{tasks}}" wx:key="id" class="card task">
+    <view class="spread">
+      <view class="grow">
+        <view class="task-t {{item.done ? 'task-t--done' : ''}}">
+          <text>{{item.title}}</text>
+          <text class="tag tag--p{{item.priority}}">{{item.priorityLabel}}</text>
+          <text wx:if="{{item.fixed}}" class="tag">{{item.when}}</text>
+        </view>
+        <view class="muted">{{item.durationMin}} 分钟 · 截止 {{item.deadlineLabel}}</view>
+      </view>
+      <view class="del" data-id="{{item.id}}" bindtap="onDel">删除</view>
+    </view>
+  </view>
+
+  <view class="btn js-gen big" bindtap="onGenerate">生成今日安排</view>
+
+  <block wx:if="{{hasPlan}}">
+    <view class="section-title">今日安排 <text class="muted">{{generatedAt}}</text></view>
+    <view class="card sum row gap-3">
+      <view>占用 <text class="b">{{busyLabel}}</text></view>
+      <view class="muted">{{freeLabel}}</view>
+    </view>
+    <view wx:for="{{slots}}" wx:key="taskId" class="card slot">
+      <view class="slot-r">{{item.range}}</view>
+      <view class="slot-t">{{item.title}}</view>
+    </view>
+    <view wx:if="{{overflow.length}}" class="card over">
+      <view class="over-t">今天放不下的：</view>
+      <view wx:for="{{overflow}}" wx:key="*this" class="over-i">{{item}}</view>
+    </view>
+
+    <view class="btn btn--ghost js-explain" bindtap="onExplain">{{explainBusy ? '正在写…' : '让 AI 说明这份安排'}}</view>
+    <view wx:if="{{advice}}" class="card advice">
+      <view class="spread advice-h">
+        <text class="muted">这段说明是谁写的</text>
+        <mode-badge class="js-advice-mode" mode="{{adviceMode}}" />
+      </view>
+      <view class="advice-t">{{advice}}</view>
+    </view>
+  </block>
+
+  <view class="local-only">内容仅存于本机 · 安排由本地算法生成</view>
+</view>

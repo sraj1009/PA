@@ -1,0 +1,66 @@
+.pg { padding: var(--s-3) var(--s-3) var(--s-6); }
+.card { margin-bottom: var(--s-3); }
+
+.t-head { margin-top: 0; }
+.lab { font-size: var(--fs-sm); color: var(--muted); margin: var(--s-3) 0 var(--s-2); }
+
+.tinput {
+  height: 80rpx;
+  padding: 0 var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--canvas);
+  border: 2rpx solid var(--line);
+  font-size: var(--fs-body);
+}
+
+.chips { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.chip {
+  padding: 10rpx 22rpx;
+  border-radius: var(--r-pill);
+  background: var(--canvas);
+  border: 2rpx solid var(--line);
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+}
+.chip--on { background: var(--brand); border-color: var(--brand); color: #fff; }
+
+.js-add { width: 100%; margin-top: var(--s-4); }
+.big { width: 100%; height: 88rpx; font-size: var(--fs-lg); }
+
+.empty { text-align: center; padding: var(--s-5) var(--s-4); }
+
+.task { padding: var(--s-3) var(--s-4); }
+.task-t { font-size: var(--fs-body); font-weight: 600; }
+.task-t--done { color: var(--muted); text-decoration: line-through; }
+.tag {
+  margin-left: var(--s-2);
+  padding: 2rpx 12rpx;
+  border-radius: var(--r-pill);
+  background: rgba(59, 110, 246, 0.1);
+  color: var(--brand);
+  font-size: var(--fs-xs);
+}
+.tag--p3 { background: rgba(122, 90, 248, 0.14); color: var(--brand-3); }
+.tag--p1 { background: rgba(123, 137, 166, 0.16); color: var(--muted); }
+.del { flex-shrink: 0; color: var(--muted); font-size: var(--fs-sm); padding: var(--s-2); }
+
+.sum { font-size: var(--fs-sm); }
+.b { font-weight: 600; color: var(--brand); }
+
+.slot {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  border-left: 6rpx solid var(--brand-2);
+}
+.slot-r { flex-shrink: 0; font-size: var(--fs-sm); color: var(--brand-2); font-weight: 600; }
+.slot-t { font-size: var(--fs-body); }
+
+.over { padding: var(--s-3) var(--s-4); background: rgba(123, 137, 166, 0.1); }
+.over-t { font-size: var(--fs-sm); color: var(--muted); margin-bottom: var(--s-1); }
+.over-i { font-size: var(--fs-body); color: var(--ink-2); }
+
+.advice { border-left: 6rpx solid var(--brand-3); }
+.advice-h { margin-bottom: var(--s-2); }
+.advice-t { font-size: var(--fs-body); color: var(--ink-2); line-height: 1.6; }

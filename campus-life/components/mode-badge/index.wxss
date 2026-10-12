@@ -1,0 +1,9 @@
+.badge {
+  padding: 4rpx 18rpx;
+  border-radius: var(--r-pill);
+  background: rgba(123, 137, 166, 0.18);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+.badge--on { background: rgba(46, 211, 167, 0.16); color: #17a97f; }
+.note { color: var(--muted); }

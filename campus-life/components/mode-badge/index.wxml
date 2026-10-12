@@ -1,0 +1,1 @@
+<text class="badge {{on ? 'badge--on' : ''}}">{{text}}<text class="note" wx:if="{{noteText}}"> {{noteText}}</text></text>

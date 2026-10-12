@@ -1,0 +1,6 @@
+<view class="box">
+  <text class="n">{{marks.length}}</text>
+  <text class="tail">{{marks.join(' / ')}}</text>
+  <view class="btn js-tap" bindtap="onTap">点一下</view>
+  <view class="btn js-go" bindtap="go">去规划</view>
+</view>

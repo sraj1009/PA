@@ -1,0 +1,5 @@
+<view class="empty">
+  <view class="t">{{title}}</view>
+  <view class="d" wx:if="{{desc}}">{{desc}}</view>
+  <view class="btn js-action" wx:if="{{action}}" bindtap="onTap">{{action}}</view>
+</view>

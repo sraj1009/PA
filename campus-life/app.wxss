@@ -1,0 +1,44 @@
+@import "theme/tokens.wxss";
+
+page {
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: var(--fs-body);
+  line-height: 1.55;
+}
+
+view, text { box-sizing: border-box; }
+
+.card {
+  background: var(--surface);
+  border-radius: var(--r-lg);
+  padding: var(--s-4);
+  box-shadow: var(--shadow-1);
+}
+
+.muted { color: var(--muted); font-size: var(--fs-sm); }
+
+.row { display: flex; align-items: center; }
+.col { display: flex; flex-direction: column; }
+.spread { display: flex; align-items: center; justify-content: space-between; }
+.gap-2 { gap: var(--s-2); }
+.gap-3 { gap: var(--s-3); }
+.grow { flex: 1; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 72rpx;
+  padding: 0 var(--s-5);
+  border-radius: var(--r-pill);
+  background: var(--brand);
+  color: #fff;
+  font-size: var(--fs-body);
+}
+.btn--ghost { background: transparent; color: var(--brand); border: 2rpx solid var(--brand); }
+.btn--off { background: var(--line); color: var(--muted); }
+
+.section-title { font-size: var(--fs-lg); font-weight: 600; margin: var(--s-5) 0 var(--s-3); }
+.local-only { color: var(--muted); font-size: var(--fs-xs); padding: var(--s-3) 0; text-align: center; }

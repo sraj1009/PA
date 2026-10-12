@@ -1,0 +1,75 @@
+<view class="pg">
+  <view class="card head">
+    <view class="spread">
+      <view class="t-head">匿名一对一聊天</view>
+      <text class="badge badge--ai">模拟/AI</text>
+    </view>
+    <view class="muted">对面不是真人，是这台设备里的模拟同伴；说的话只存在本机，没有别人能看到。</view>
+    <view class="spread meta">
+      <text class="tiny">说话方式：{{personaLabel}}</text>
+      <text class="badge mode-badge {{modeText === '本地模型' ? 'badge--llm' : ''}}">{{modeText}}</text>
+    </view>
+  </view>
+
+  <view wx:if="{{!hasSession}}" class="card start">
+    <view class="zero-t">还没有会话</view>
+    <view class="muted">先挑一种说话方式，再开始。5 分钟没有新消息，会话会自动关闭。</view>
+    <view class="chips">
+      <view
+        class="chip js-persona {{persona === item.value ? 'chip--on' : ''}}"
+        wx:for="{{personas}}"
+        wx:key="value"
+        data-v="{{item.value}}"
+        bindtap="onPersona"
+      >{{item.label}}</view>
+    </view>
+    <view wx:if="{{joinedCount}}" class="topics">
+      <text class="tiny">共同话题（来自你加入的 {{joinedCount}} 个示例社群）</text>
+      <text class="topic" wx:for="{{topics}}" wx:key="*this">{{item}}</text>
+    </view>
+    <view wx:else class="muted tiny">还没加入社群，所以 TA 没有预设话题，也不会替你编一个。</view>
+    <view class="btn js-open" bindtap="onOpen">开始聊天</view>
+  </view>
+
+  <block wx:else>
+    <view class="count {{warn ? 'count--warn' : ''}}">
+      <text wx:if="{{closed}}">{{closedText}}</text>
+      <text wx:elif="{{warn}}" class="warn">还有 {{remaining}} 没有消息就自动关闭</text>
+      <text wx:else>本次会话剩余 {{remaining}}</text>
+      <text wx:if="{{lastSource && !closed}}" class="tiny">{{lastSource}}</text>
+    </view>
+
+    <view class="card b {{item.isMe ? 'b--me' : 'b--peer'}}" wx:for="{{rows}}" wx:key="i">
+      <view class="spread b-head">
+        <text class="who">{{item.who}}</text>
+        <text class="ai" wx:if="{{!item.isMe}}">模拟/AI</text>
+        <text class="tiny at">{{item.at}}</text>
+      </view>
+      <view class="txt">{{item.text}}</view>
+    </view>
+
+    <view wx:if="{{!rows.length && !closed}}" class="card empty">
+      <view class="muted">会话已经开好了，先说第一句。TA 不会主动搭话——它不是真人，也不该装成在等你。</view>
+    </view>
+
+    <view wx:if="{{closed}}" class="card again">
+      <view class="muted">上一条记录还留在本机，也可以重新开始一段。</view>
+      <view class="btn js-open" bindtap="onOpen">重新开始</view>
+    </view>
+
+    <view wx:else class="card compose">
+      <input
+        class="in js-draft"
+        placeholder="说点什么…"
+        value="{{draft}}"
+        maxlength="200"
+        confirm-type="send"
+        bindinput="onDraft"
+        bindconfirm="onSend"
+      />
+      <view class="btn js-send {{busy ? 'btn--off' : ''}}" bindtap="onSend">{{busy ? '思考中…' : '发送'}}</view>
+    </view>
+  </block>
+
+  <view class="local-only">内容仅存于本机 · 匿名聊天没有服务器，对方是本机模拟同伴</view>
+</view>

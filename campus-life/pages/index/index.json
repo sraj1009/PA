@@ -1,0 +1,8 @@
+{
+  "navigationBarTitleText": "校园生活",
+  "usingComponents": {
+    "mode-badge": "../../components/mode-badge/index",
+    "empty-state": "../../components/empty-state/index",
+    "nav-card": "../../components/nav-card/index"
+  }
+}

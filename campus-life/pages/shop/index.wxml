@@ -1,0 +1,50 @@
+<view class="pg">
+  <block wx:if="{{found}}">
+    <view class="card hero">
+      <view class="h-name">{{shop.name}}</view>
+      <view class="row gap-2 h-tags">
+        <text class="badge {{shop.openNow ? 'badge--on' : 'badge--off'}}">{{shop.openNow ? '营业中' : '已打烊'}}</text>
+        <text class="tag">{{shop.catText}}</text>
+      </view>
+      <view class="h-desc">{{shop.desc}}</view>
+    </view>
+
+    <view class="card">
+      <view wx:for="{{rows}}" wx:key="k" class="mrow">
+        <text class="mkey">{{item.k}}</text>
+        <text class="mval">{{item.v}}</text>
+      </view>
+    </view>
+
+    <view class="card">
+      <view class="section-title t-in">去这里的人常说</view>
+      <view wx:for="{{shop.tips}}" wx:key="*this" class="tip">· {{item}}</view>
+      <view class="chips">
+        <view wx:for="{{shop.tags}}" wx:key="*this" class="chip">{{item}}</view>
+      </view>
+    </view>
+
+    <view class="btn js-fav big {{fav ? 'btn--on' : ''}}" bindtap="onFav">{{fav ? '★ 已收藏' : '☆ 收藏这家店'}}</view>
+    <view class="btn btn--ghost js-back big" bindtap="onBack">返回列表</view>
+
+    <view class="section-title">附近同类</view>
+    <view wx:for="{{near}}" wx:key="id" class="card near js-near" data-id="{{item.id}}" bindtap="onNear">
+      <view class="spread">
+        <view class="grow">
+          <view class="near-n">{{item.name}}</view>
+          <view class="muted">{{item.catText}}</view>
+        </view>
+        <view class="near-d">{{item.distText}}</view>
+      </view>
+    </view>
+    <view wx:if="{{!near.length}}" class="card muted t-in">附近没有其它同类示例店铺。</view>
+  </block>
+
+  <view wx:else class="card empty">
+    <view class="empty-t">没找到这家店</view>
+    <view class="muted">可能是示例数据被清理了，返回列表重新挑一家。</view>
+    <view class="btn btn--ghost js-back" bindtap="onBack">返回列表</view>
+  </view>
+
+  <view class="local-only">内容仅存于本机 · 店名与评分均为示例数据</view>
+</view>

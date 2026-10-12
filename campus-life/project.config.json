@@ -1,0 +1,22 @@
+{
+  "description": "校园生活小程序 — 本地化社交互动 + 本地生活工具",
+  "projectname": "campus-life",
+  "appid": "touristappid",
+  "compileType": "miniprogram",
+  "libVersion": "3.5.5",
+  "setting": {
+    "urlCheck": false,
+    "es6": true,
+    "enhance": true,
+    "postcss": true,
+    "minified": true,
+    "coverView": false,
+    "nodeModules": false,
+    "checkInvalidKey": true
+  },
+  "condition": {},
+  "editorSetting": {
+    "tabIndent": "insertSpaces",
+    "tabSize": 2
+  }
+}

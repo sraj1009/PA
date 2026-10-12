@@ -1,0 +1,45 @@
+<view class="pg">
+  <view class="card head">
+    <view class="spread">
+      <view class="t-xl">兴趣社群匹配</view>
+      <text class="badge">本地算法</text>
+    </view>
+    <view class="muted">先勾几个你有兴趣的事，下面按「对上了几个标签」排序。匹配只在本机算，不发给任何地方。</view>
+  </view>
+
+  <view class="section-title">你的兴趣 <text class="muted tiny">已选 {{picked.length}} 项</text></view>
+  <view class="card chips">
+    <view
+      class="chip js-interest {{item.on ? 'chip--on' : ''}}"
+      wx:for="{{chips}}"
+      wx:key="t"
+      data-t="{{item.t}}"
+      bindtap="onToggle"
+    >{{item.t}}</view>
+    <view wx:if="{{hasProfile}}" class="chip chip--clear js-clear" bindtap="onClear">清空</view>
+  </view>
+
+  <view wx:if="{{!hasProfile}}" class="card zero">
+    <view class="zero-t">还没勾兴趣</view>
+    <view class="muted">没勾之前，这里一个推荐都不会列。没有输入就没有匹配，编出来的排名不是推荐，是假话。</view>
+  </view>
+
+  <block wx:else>
+    <view class="section-title">匹配结果 <text class="muted tiny">对上了 {{hits}} 个社群 · 已加入 {{joinedCount}} 个</text></view>
+
+    <view class="card row {{item.matched ? 'row--hit' : ''}}" wx:for="{{rows}}" wx:key="id">
+      <view class="spread">
+        <text class="name">{{item.name}}</text>
+        <text class="state js-join {{item.joined ? 'state--on' : ''}}" data-id="{{item.id}}" bindtap="onJoinToggle">{{item.joined ? '已加入 · 退出' : '加入'}}</text>
+      </view>
+      <view class="line">{{item.line}}</view>
+      <view class="why">
+        <text class="why-t {{item.matched ? 'why-t--hit' : ''}}">{{item.matchText}}</text>
+        <text class="why-i" wx:for="{{item.reasons}}" wx:for-item="why" wx:key="*this">{{why}}</text>
+      </view>
+      <view class="muted tiny">{{item.tagsText}}{{item.place ? ' · ' + item.place : ''}}{{item.time ? ' · ' + item.time : ''}}</view>
+    </view>
+  </block>
+
+  <view class="local-only">内容仅存于本机 · 社群为示例数据，没有真实人数</view>
+</view>
