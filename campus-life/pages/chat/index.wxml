@@ -58,15 +58,18 @@
     </view>
 
     <view wx:else class="card compose">
-      <input
-        class="in js-draft"
-        placeholder="说点什么…"
-        value="{{draft}}"
-        maxlength="200"
-        confirm-type="send"
-        bindinput="onDraft"
-        bindconfirm="onSend"
-      />
+      <view class="grow col">
+        <input
+          class="in js-draft"
+          placeholder="说点什么…"
+          value="{{draft}}"
+          maxlength="{{maxLen}}"
+          confirm-type="send"
+          bindinput="onDraft"
+          bindconfirm="onSend"
+        />
+        <text class="muted tiny cnt">{{draft.length}}/{{maxLen}}</text>
+      </view>
       <view class="btn js-send {{busy ? 'btn--off' : ''}}" bindtap="onSend">{{busy ? '思考中…' : '发送'}}</view>
     </view>
   </block>

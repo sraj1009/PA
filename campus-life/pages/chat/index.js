@@ -1,7 +1,7 @@
 // 匿名一对一聊天：对面永远只有一个本机的模拟同伴，页面把这件事写在屏幕上。
 // 关闭时间是 core/chat.js 里那条硬编码的 300000 毫秒，倒计时只是把它读给人看；
 // 定时器必须在 onUnload 里清掉，否则人走了 toast 还在响。
-const { store, tzOffsetMin } = require('../../adapters/local');
+const { store, save, tzOffsetMin } = require('../../adapters/local');
 const chat = require('../../core/chat');
 const fmt = require('../../core/format');
 const agent = require('../../agent/index');
@@ -42,6 +42,7 @@ Page({
     draft: '',
     lastSource: '',
     modeText: '离线模式',
+    maxLen: chat.maxLen,
   },
 
   onLoad() {
@@ -97,10 +98,12 @@ Page({
     }
 
     // 到点就关掉、说明一次，然后停表：同一次关闭不该反复弹提示。
-    store().write((d) => { chat.reap(d, now); });
-    this.refresh();
-    wx.showToast({ title: '5 分钟没有新消息，会话已自动关闭', icon: 'none' });
+    const saved = save((d) => { chat.reap(d, now); });
     this.stopTimer();
+    this.refresh();
+    // 只有关闭真的写进了本机才说「已自动关闭」；写不成时 save 已经说过那句人话，
+    // 屏幕上留着的仍然是开启中的会话——和存储里的一致。
+    if (saved.ok) wx.showToast({ title: '5 分钟没有新消息，会话已自动关闭', icon: 'none' });
   },
 
   refresh() {
@@ -151,9 +154,10 @@ Page({
 
   onOpen() {
     const ts = Date.now();
-    store().write((d) => {
+    const saved = save((d) => {
       chat.open(d, { ts, persona: this.data.persona, topics: chat.topics(d, POOL) });
     });
+    if (!saved.ok) return; // 会话没落进本机就没有「开始聊天」可宣布
     this.refresh();
     wx.showToast({ title: '开始聊天 · 对面是本机模拟同伴', icon: 'none' });
   },
@@ -176,7 +180,8 @@ Page({
     const topicPool = this.data.topics;
 
     let res = null;
-    store().write((d) => { res = chat.send(d, id, text, Date.now()); });
+    const sent = save((d) => { res = chat.send(d, id, text, Date.now()); });
+    if (!sent.ok) return; // 我这条都没落进本机：草稿留着，别说发出去了
     if (!res.ok) {
       this.refresh();
       wx.showToast({ title: res.reason, icon: 'none' });
@@ -189,9 +194,10 @@ Page({
     if (!this.alive) return; // 页面已经走了：不写盘、不 setData、不 toast
 
     let put = null;
-    store().write((d) => { put = chat.peer(d, id, r.text, Date.now()); });
+    const replied = save((d) => { put = chat.peer(d, id, r.text, Date.now()); });
     this.setData({ busy: false, lastSource: r.source === 'llm' ? '本地模型回复' : '离线词库回复' });
     this.refresh();
+    if (!replied.ok) return; // TA 的话没存下，save 已经说过那句人话
     if (!put.ok) wx.showToast({ title: '会话刚好关闭，回复没留下', icon: 'none' });
   },
 });

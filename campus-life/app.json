@@ -24,11 +24,11 @@
     "backgroundColor": "#FFFFFF",
     "borderStyle": "white",
     "list": [
-      { "pagePath": "pages/index/index", "text": "首页" },
-      { "pagePath": "pages/explore/index", "text": "探索" },
-      { "pagePath": "pages/planner/index", "text": "规划" },
-      { "pagePath": "pages/shops/index", "text": "好店" },
-      { "pagePath": "pages/treehole/index", "text": "树洞" }
+      { "pagePath": "pages/index/index", "text": "首页", "iconPath": "assets/tabbar/index.png", "selectedIconPath": "assets/tabbar/index-on.png" },
+      { "pagePath": "pages/explore/index", "text": "探索", "iconPath": "assets/tabbar/explore.png", "selectedIconPath": "assets/tabbar/explore-on.png" },
+      { "pagePath": "pages/planner/index", "text": "规划", "iconPath": "assets/tabbar/planner.png", "selectedIconPath": "assets/tabbar/planner-on.png" },
+      { "pagePath": "pages/shops/index", "text": "好店", "iconPath": "assets/tabbar/shops.png", "selectedIconPath": "assets/tabbar/shops-on.png" },
+      { "pagePath": "pages/treehole/index", "text": "树洞", "iconPath": "assets/tabbar/treehole.png", "selectedIconPath": "assets/tabbar/treehole-on.png" }
     ]
   },
   "permission": {

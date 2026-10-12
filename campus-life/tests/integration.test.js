@@ -6,6 +6,7 @@ const {
 const { store, resetStore, storage } = require('../adapters/local');
 const { KEY } = require('../core/schema');
 const agent = require('../agent/index');
+const { freeze, unfreeze } = require('./helpers/clock');
 
 jest.setTimeout(60000);
 
@@ -27,9 +28,11 @@ beforeEach(() => {
   resetWxState();
   resetStore();
   agent.reset();
+  freeze(9, 0); // 规划器按「今天还剩多少分钟」排班：不钉住时钟，这条用例晚上跑必挂
 });
 
 afterEach(() => {
+  unfreeze();
   while (mounted.length) mounted.pop().detach();
 });
 

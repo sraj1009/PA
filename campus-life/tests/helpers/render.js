@@ -4,16 +4,18 @@ const shim = require('./shim');
 
 const simulate = shim.simulate;
 const ROOT = path.join(__dirname, '..', '..');
+const FIXTURES = path.join(__dirname, '..', 'fixtures');
 
 let seq = 0;
 const compiled = new Map(); // simulate can only load a given file once per process
 
-function compile(kind, name) {
-  const key = kind + ':' + name;
+function compile(kind, name, root) {
+  const base = root || ROOT;
+  const key = base + '|' + kind + ':' + name;
   if (!compiled.has(key)) {
-    const file = path.join(ROOT, kind, name, 'index');
+    const file = path.join(base, kind, name, 'index');
     const tag = kind.slice(0, 2) + '-' + name.replace(/[^a-z0-9]/gi, '') + '-' + ++seq;
-    compiled.set(key, { id: simulate.load(file, tag, { rootPath: ROOT }), file });
+    compiled.set(key, { id: simulate.load(file, tag, { rootPath: base }), file });
   }
   return compiled.get(key);
 }
@@ -41,6 +43,19 @@ function loadComponent(name, props) {
   shim.install();
   const { id, file } = compile('components', name);
   const comp = simulate.render(id, props || {});
+  if (!comp) throw new Error('simulate.render returned nothing for ' + file);
+  comp.attach(container());
+  return comp;
+}
+
+/**
+ * 只服务于测试脚手架的假页面：从 tests/fixtures/pages 挂载。
+ * 探针页留在产品 pages/ 里会被小程序打包带上设备，而它永远不该出现在设备上。
+ */
+function loadFixture(name, query) {
+  shim.install();
+  const { id, file } = compile('pages', name, FIXTURES);
+  const comp = simulate.render(id, { launchQuery: query || {} });
   if (!comp) throw new Error('simulate.render returned nothing for ' + file);
   comp.attach(container());
   return comp;
@@ -79,6 +94,34 @@ async function input(node, selector, value) {
   return el;
 }
 
+/**
+ * simulate 派发事件是异步的，agent 的探测/降级还要再走一跳本机请求。
+ * 固定 sleep 在空闲机器上够用，在满载（例如 --coverage）下就会抢跑：
+ * page-planner 的「让 AI 说明」曾在 sleep(10) 之后读不到 .advice-t。
+ * 所以这里轮询到断言成立为止，用次数而不是墙钟计时——helpers/clock 把
+ * Date 钉死了，Date.now() 量不出经过的时间。
+ */
+async function waitFor(assertion, tries) {
+  const limit = tries == null ? 200 : tries; // 200 × 10ms ≈ 2 秒真实上限
+  let last = null;
+  for (let i = 0; i < limit; i += 1) {
+    await simulate.sleep(10);
+    try {
+      return assertion();
+    } catch (e) {
+      last = e;
+    }
+  }
+  throw last;
+}
+
+/**
+ * 读渲染出来的文字。
+ * 注意 simulate 的坑：每个页面 load 时都会给它声明的子组件重新注册一次，而同一份
+ * 组件源码只有第一个抢到注册的页面能真的渲染；后面的页面里那个标签的 innerHTML 恒为空。
+ * 所以同一个测试文件里如果两页共用一个组件（现在是 mode-badge：首页 + 规划页），
+ * 先挂载的那一页才断言屏幕文字，后挂载的请断言 page.instance.data.<字段>。
+ */
 function text(node, selector) {
   return find(node, selector).dom.textContent || '';
 }
@@ -150,6 +193,7 @@ module.exports = {
   simulate,
   loadPage,
   loadComponent,
+  loadFixture,
   tap,
   tapN,
   tapInner,
@@ -158,6 +202,7 @@ module.exports = {
   input,
   text,
   allText,
+  waitFor,
   html,
   classes,
   classAt,

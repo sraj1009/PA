@@ -1,4 +1,4 @@
-const { store, locate } = require('../../adapters/local');
+const { store, save, locate } = require('../../adapters/local');
 const api = require('../../core/shops');
 const { ORIGIN, cats, shops } = require('../../data/shops');
 
@@ -135,7 +135,7 @@ Page({
 
   onFav(e) {
     const id = e.currentTarget.dataset.id;
-    store().write((d) => { d.favourites.shops = api.toggleFav(d.favourites.shops, id); });
+    if (!save((d) => { d.favourites.shops = api.toggleFav(d.favourites.shops, id); }).ok) return; // 没落进本机就不重画星标
     this.refresh();
   },
 

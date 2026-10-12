@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const {
   loadPage, tap, tapN, input, text, allText, html, count, classAt,
   wxState, resetWxState, simulate,
@@ -136,5 +138,33 @@ test('发布 with nothing typed says so and stores nothing', async () => {
 
   expect(wxState().toasts).toContain('先写点什么再发');
   expect(storage.get(KEY)).toBe(''); // 连库都没开过：空内容不该留下任何记录
+  expect(count(page, '.post')).toBe(0);
+});
+
+// built-in 组件在这个框架里只渲染出 <wx-textarea class="…">，maxlength 根本不进 DOM，
+// 所以这里钉的是三件看得见的事：屏幕上的分母、页面 data 里绑出去的那个数、
+// 以及模板里没有再手抄一份硬编码的数字。
+test('the counter and the input limit come from core, not from a copied number', async () => {
+  const page = await openHole();
+  const draft = '晚'.repeat(posts.maxLen - 10);
+  await input(page, '.js-draft', draft);
+
+  expect(text(page, '.tail')).toContain(draft.length + '/' + posts.maxLen);
+  expect(page.instance.data.maxLen).toBe(posts.maxLen);
+
+  const wxml = fs.readFileSync(path.join(__dirname, '..', 'pages', 'treehole', 'index.wxml'), 'utf8');
+  expect(wxml).toContain('maxlength="{{maxLen}}"');
+  expect(wxml).not.toMatch(/maxlength="\d/);
+});
+
+test('a draft longer than the advertised limit is refused instead of quietly accepted', async () => {
+  const page = await openHole();
+  await input(page, '.js-draft', '晚'.repeat(posts.maxLen + 1));
+  await tap(page, '.js-publish');
+  await settle();
+
+  expect(wxState().toasts.join('')).toContain('最长 ' + posts.maxLen + ' 字');
+  expect(wxState().toasts.join('')).not.toContain('已发出');
+  expect(storage.get(KEY)).toBe(''); // 拒了就是什么都没写
   expect(count(page, '.post')).toBe(0);
 });

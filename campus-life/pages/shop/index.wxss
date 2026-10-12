@@ -4,6 +4,7 @@
 .h-name { font-size: var(--fs-xl); font-weight: 700; color: var(--brand); }
 .h-tags { margin: var(--s-2) 0 var(--s-3); }
 .h-desc { color: var(--ink-2); font-size: var(--fs-sm); }
+.h-src { margin-top: var(--s-2); }
 
 .badge { padding: 4rpx 14rpx; border-radius: var(--r-pill); font-size: var(--fs-xs); }
 .badge--on { background: rgba(46, 211, 167, 0.16); color: #14876a; }

@@ -18,6 +18,22 @@ function store() {
 // Tests clear device storage between cases; the cached snapshot must go too.
 function resetStore() { singleton = null; }
 
+/**
+ * 页面写本机存储只走这一道门。
+ * core/store 在「裁掉最旧的聊天记录 → 丢掉已收回的树洞」两次自救之后仍然写不进去时抛
+ * QuotaError，而本机存储写满是真实会发生的故障。让它冒过 bindtap 的话，按钮会永远停在
+ * 「标注中…」，人只看到屏幕毫无反应（实测 busy 卡死、零提示）。
+ * 所以这里换成一句人话，并用返回值决定要不要继续宣布成功。
+ */
+function save(mutator) {
+  try {
+    return { ok: true, state: store().write(mutator) };
+  } catch (e) {
+    wx.showToast({ title: '本机空间已满 · 这条没存下', icon: 'none' });
+    return { ok: false, error: e };
+  }
+}
+
 /** Resolves to {lat,lng} or rejects; callers must handle denial. */
 function locate() {
   // wx hands back latitude/longitude; the core only speaks {lat,lng} (haversine's shape),
@@ -63,4 +79,4 @@ function tzOffsetMin() {
   return -new Date().getTimezoneOffset();
 }
 
-module.exports = { storage, store, resetStore, locate, request, tzOffsetMin };
+module.exports = { storage, store, resetStore, save, locate, request, tzOffsetMin };

@@ -2,6 +2,9 @@
 // 分类（agent.classify）发生在页面里，core 不碰 wx，也不碰网络。
 const DAY_MS = 86400000;
 
+// 屏幕上那个「/200」写的就是这个数：规则放在 core，页面只读它，不另抄一遍。
+const MAX_LEN = 200;
+
 // 代号取自固定词表，只由"哪一天"决定：既不需要设备号，也不需要在服务端存作者表。
 const WORDS = ['梧桐', '晚风', '路灯', '书架', '操场', '银杏', '萤火', '潮汐', '白昼', '云梯', '钟楼', '喷泉'];
 
@@ -25,13 +28,27 @@ function anonId(ts, tz) {
 }
 
 /**
+ * 一条树洞能不能发，规则只写在这里这一处。
+ * 页面上的「/200」、发送前的拒绝、add 内部的拒绝读的都是它——抄第二份一定会漂。
+ * 页面在花钱问模型之前先问一次 validate，是因为超线的内容发不出去，没必要为此调一次本地模型。
+ */
+function validate(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return { ok: false, reason: '先写点什么再发' };
+  // 发出去的东西不能悄悄被剪掉尾巴：超线就整条拒收，让页面把原因说给人听。
+  if (text.length > MAX_LEN) return { ok: false, reason: '最长 ' + MAX_LEN + ' 字，现在 ' + text.length + ' 字' };
+  return { ok: true, text };
+}
+
+/**
  * opts.mood / opts.intensity 是调用方从 agent.classify 拿到的结果；
  * 分类没跑成（比如还没探完）就留 null，页面上显示"未标注"，不猜一个情绪。
  */
 function add(state, opts) {
   const o = opts || {};
-  const text = String(o.text || '').trim();
-  if (!text) return { ok: false, reason: '先写点什么再发' };
+  const v = validate(o.text);
+  if (!v.ok) return v;
+  const text = v.text;
 
   const ts = typeof o.ts === 'number' ? o.ts : Date.now();
   const post = {
@@ -74,4 +91,4 @@ function counts(state) {
   return out;
 }
 
-module.exports = { WORDS, anonId, add, feed, close, counts, dayKey };
+module.exports = { WORDS, maxLen: MAX_LEN, validate, anonId, add, feed, close, counts, dayKey };

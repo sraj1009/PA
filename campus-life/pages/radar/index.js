@@ -1,4 +1,4 @@
-const { store, tzOffsetMin } = require('../../adapters/local');
+const { store, save, tzOffsetMin } = require('../../adapters/local');
 const moodscore = require('../../core/moodscore');
 const mood = require('../../core/mood');
 const fmt = require('../../core/format');
@@ -92,9 +92,10 @@ Page({
   onSave() {
     const text = this.data.note.trim();
     const ts = Date.now();
-    store().write((d) => {
+    const saved = save((d) => {
       d.moods.push({ id: 'm_' + ts, ts: ts, mood: this.data.moodPick, intensity: null, text: text });
     });
+    if (!saved.ok) return; // 这条心情没落进本机：文本留着让人再试，别说「已记下」
     this.setData({ note: '' });
     this.refresh();
     wx.showToast({ title: '已记下 ' + mood.label(this.data.moodPick), icon: 'success' });

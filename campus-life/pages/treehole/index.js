@@ -1,4 +1,4 @@
-const { store, tzOffsetMin } = require('../../adapters/local');
+const { store, save, tzOffsetMin } = require('../../adapters/local');
 const posts = require('../../core/posts');
 const mood = require('../../core/mood');
 const fmt = require('../../core/format');
@@ -23,6 +23,7 @@ Page({
     empty: true,
     busy: false,
     modeText: '离线模式',
+    maxLen: posts.maxLen,
   },
 
   onLoad() {
@@ -64,20 +65,21 @@ Page({
   },
 
   async onPublish() {
-    const text = this.data.draft.trim();
-    if (!text) {
-      wx.showToast({ title: '先写点什么再发', icon: 'none' });
+    const check = posts.validate(this.data.draft);
+    // 规则只有 core 那一处；在这里先问一次，是为了不为一条注定发不出去的内容多调一次模型。
+    if (!check.ok) {
+      wx.showToast({ title: check.reason, icon: 'none' });
       return;
     }
     if (this.data.busy) return;
     this.setData({ busy: true });
 
     // 分类只经过 agent/index：模型不可达时它自己降级，树洞照样能发出去。
-    const tag = await agent.classify(text);
+    const tag = await agent.classify(check.text);
     const ts = Date.now();
-    store().write((d) => {
+    const saved = save((d) => {
       posts.add(d, {
-        text,
+        text: check.text,
         ts,
         tz: tzOffsetMin(),
         mood: tag.mood,
@@ -85,6 +87,10 @@ Page({
         source: tag.source,
       });
     });
+    if (!saved.ok) { // 没落进本机存储就不能报「已发出」：草稿留在屏幕上，人还能改。
+      this.setData({ busy: false });
+      return;
+    }
 
     this.setData({ draft: '', busy: false });
     this.refresh();
@@ -98,7 +104,7 @@ Page({
       content: '信息流里不再显示，心情雷达也不再算它。记录只在你本机。',
       success: (res) => {
         if (!res.confirm) return;
-        store().write((d) => { posts.close(d, id); });
+        if (!save((d) => { posts.close(d, id); }).ok) return; // 没写进本机就不能宣布「已收回」
         this.refresh();
         wx.showToast({ title: '已收回', icon: 'success' });
       },

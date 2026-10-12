@@ -5,6 +5,7 @@
   "description": "校园生活微信小程序 — 本地化社交互动 + 本地生活工具",
   "scripts": {
     "test": "jest",
+    "test:night": "jest --config jest.night.config.js",
     "test:watch": "jest --watch"
   },
   "devDependencies": {

@@ -1,4 +1,4 @@
-const { store } = require('../../adapters/local');
+const { store, save } = require('../../adapters/local');
 const groups = require('../../core/groups');
 const { INTERESTS, groups: pool } = require('../../data/groups');
 
@@ -43,25 +43,27 @@ Page({
 
   onToggle(e) {
     const t = e.currentTarget.dataset.t;
-    store().write((d) => {
+    const saved = save((d) => {
       const list = d.profile.interests || [];
       d.profile.interests = list.indexOf(t) >= 0 ? list.filter((x) => x !== t) : list.concat([t]);
     });
+    if (!saved.ok) return; // 没写进本机就不重画：屏幕上留着的仍然是存储里那一套
     this.refresh();
   },
 
   onClear() {
-    store().write((d) => { d.profile.interests = []; });
+    if (!save((d) => { d.profile.interests = []; }).ok) return;
     this.refresh();
   },
 
   onJoinToggle(e) {
     const id = e.currentTarget.dataset.id;
     const joined = (store().read().favourites.groups || []).indexOf(id) >= 0;
-    store().write((d) => {
+    const saved = save((d) => {
       if (joined) groups.leave(d, id);
       else groups.join(d, id, pool);
     });
+    if (!saved.ok) return; // 加入/退出没落到本机，就没有「已加入 / 已退出」可说
     this.refresh();
     if (joined) {
       wx.showToast({ title: '已退出', icon: 'none' });

@@ -1,4 +1,4 @@
-const { store, locate } = require('../../adapters/local');
+const { store, save, locate } = require('../../adapters/local');
 const api = require('../../core/shops');
 const { ORIGIN, cats, shops } = require('../../data/shops');
 
@@ -30,9 +30,10 @@ Page({
 
   onLoad(query) {
     this.shopId = (query || {}).id || '';
+    // 定位回来之前先按示例坐标渲染一次：详情页不该为了等 GPS 而空着一屏。
     locate()
-      .then((c) => { this.coords = c; this.setData({ distSource: '当前定位' }); })
-      .catch(() => { this.coords = null; this.setData({ distSource: '示例坐标' }); })
+      .then((c) => { this.coords = c; })
+      .catch(() => { this.coords = null; })
       .then(() => this.refresh());
     this.refresh();
   },
@@ -40,6 +41,8 @@ Page({
   refresh() {
     const state = store().read();
     const favs = state.favourites.shops || [];
+    // 距离的出处只有一个来源：有没有拿到定位。列表页就是这么标的，详情页不能只给数字。
+    const src = this.coords ? '当前定位' : '示例坐标';
     const origin = this.coords || ORIGIN;
     const withDist = (s) =>
       Object.assign({}, s, {
@@ -49,7 +52,7 @@ Page({
 
     const raw = shops.find((s) => s.id === this.shopId);
     if (!raw) {
-      this.setData({ found: false, shop: null, rows: [], near: [] });
+      this.setData({ found: false, shop: null, rows: [], near: [], distSource: src });
       return;
     }
     const s = withDist(raw);
@@ -58,6 +61,7 @@ Page({
 
     this.setData({
       found: true,
+      distSource: src,
       fav: favs.indexOf(s.id) >= 0,
       shop: {
         id: s.id,
@@ -75,7 +79,7 @@ Page({
       rows: [
         { k: '类别', v: s.catText },
         { k: '营业时间', v: hourLabel(s.open[0]) + ' - ' + hourLabel(s.open[1]) },
-        { k: '距离', v: dist },
+        { k: '距离', v: dist + ' · 按' + src },
         { k: '消费', v: PRICE_WORDS[s.price] || '未填写' },
         { k: '示例评分', v: s.rating.toFixed(1) + ' / 5.0' },
       ],
@@ -95,7 +99,7 @@ Page({
 
   onFav() {
     const id = this.shopId;
-    store().write((d) => { d.favourites.shops = api.toggleFav(d.favourites.shops, id); });
+    if (!save((d) => { d.favourites.shops = api.toggleFav(d.favourites.shops, id); }).ok) return; // 没落进本机就不重画星标
     this.refresh();
   },
 

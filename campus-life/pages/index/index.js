@@ -1,6 +1,7 @@
 // 首页是一块只读本机的仪表盘：三个状态卡 + 两个模块入口。
-// 这里不写任何数据，也不编任何统计——没有记录的地方就直说没有记录。
-const { store, tzOffsetMin } = require('../../adapters/local');
+// 这里只写一样东西——智能体引擎偏好（settings.agentMode），别的数据一条都不编、
+// 没有记录的地方就直说没有记录。
+const { store, save, tzOffsetMin } = require('../../adapters/local');
 const checkin = require('../../core/checkin');
 const posts = require('../../core/posts');
 const mood = require('../../core/mood');
@@ -21,6 +22,19 @@ const TOOLS = [
   { key: 'shops', glyph: '店', title: '周边好店聚合', desc: '距离按当前定位算，内容为示例', url: '/pages/shops/index', tab: true },
 ];
 
+// 只给「自动」和「只用离线」两个常驻选项：'llm' 意味着屏幕上要写「本地模型」，
+// 而那四个字必须由一次真的回答换来，所以它只能通过下面的测试按钮得到。
+const MODES = [
+  { value: 'auto', label: '自动' },
+  { value: 'local', label: '只用离线' },
+];
+
+function noteText(v) {
+  if (v === 'local') return '当前：只用离线 · 完全不碰网络';
+  if (v === 'llm') return '当前：本地模型 · 刚才真的回答过一次';
+  return '当前：自动 · 连得上就用本机模型';
+}
+
 Page({
   data: {
     mode: 'offline',
@@ -34,6 +48,10 @@ Page({
     moodMeta: '',
     social: SOCIAL,
     tools: TOOLS,
+    agentMode: 'auto',
+    modes: MODES,
+    agentNote: noteText('auto'),
+    probing: false,
   },
 
   onLoad() {
@@ -65,6 +83,8 @@ Page({
 
     this.setData({
       mode: agent.mode(),
+      agentMode: (state.settings || {}).agentMode || 'auto',
+      agentNote: noteText((state.settings || {}).agentMode || 'auto'),
       hasPlan: !!plan,
       planText: plan ? plan.slots.length + ' 段安排 · 占 ' + busy + ' 分钟'
         + (plan.unscheduled.length ? ' · 还有 ' + plan.unscheduled.length + ' 件没排下' : '') : '',
@@ -79,4 +99,37 @@ Page({
 
   onGoPlanner() { wx.switchTab({ url: '/pages/planner/index' }); },
   onGoRadar() { wx.navigateTo({ url: '/pages/radar/index' }); },
+
+  /**
+   * 引擎偏好的唯一写入口：屏幕、本机存储、agent 内存三处只能有一个说法。
+   * 写不进本机（存储满）就退回本机里真的那条，而不是让芯片亮着、重启后又变回去。
+   */
+  syncMode(next) {
+    const saved = save((d) => { d.settings.agentMode = next; });
+    const v = saved.ok ? next : ((store().read().settings || {}).agentMode || 'auto');
+    agent.setPreference(v);
+    this.setData({ agentMode: v, agentNote: noteText(v), mode: agent.mode() });
+    agent.ready().then(() => this.setData({ mode: agent.mode() }));
+  },
+
+  /** 选「只用离线」后一次网络都不该再发生，所以这里只切换偏好，不探测。 */
+  onPickMode(e) {
+    this.syncMode(e.currentTarget.dataset.v === 'local' ? 'local' : 'auto');
+  },
+
+  // 「本地模型」这四个字只能用一次真的回答换来：先按 llm 偏好问一次，答不上就退回自动。
+  onProbeLlm() {
+    if (this.data.probing) return;
+    this.setData({ probing: true });
+    agent.setPreference('llm'); // 这一步只改内存，不落盘：真的答了才写本机
+    agent.classify('今天心情还行').then((r) => {
+      const ok = r.source === 'llm';
+      this.setData({ probing: false });
+      this.syncMode(ok ? 'llm' : 'auto');
+      wx.showToast({
+        title: ok ? '本地模型可用，已切换' : '连不上本机模型，仍用离线词库',
+        icon: 'none',
+      });
+    });
+  },
 });

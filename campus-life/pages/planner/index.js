@@ -1,4 +1,4 @@
-const { store, tzOffsetMin } = require('../../adapters/local');
+const { store, save, tzOffsetMin } = require('../../adapters/local');
 const planner = require('../../core/planner');
 const fmt = require('../../core/format');
 const agent = require('../../agent/index');
@@ -104,7 +104,7 @@ Page({
       return;
     }
     const ts = Date.now();
-    store().write((d) => {
+    const saved = save((d) => {
       d.tasks.push({
         id: 't_' + ts,
         title,
@@ -114,13 +114,14 @@ Page({
         createdAt: ts,
       });
     });
+    if (!saved.ok) return; // 没存进本机就留着这行字，别把人的输入擦掉
     this.setData({ title: '' });
     this.refresh();
   },
 
   onDel(e) {
     const id = e.currentTarget.dataset.id;
-    store().write((d) => { d.tasks = d.tasks.filter((t) => t.id !== id); });
+    if (!save((d) => { d.tasks = d.tasks.filter((t) => t.id !== id); }).ok) return;
     this.refresh();
   },
 
@@ -132,11 +133,12 @@ Page({
     }
     const plan = planner.solve({ tasks, now: minutesNow(new Date()), workWindow: WINDOW });
     const entry = { id: 'plan_' + Date.now(), ts: Date.now(), slots: plan.slots, unscheduled: plan.unscheduled };
-    store().write((d) => {
+    const saved = save((d) => {
       const today = fmt.day(Date.now(), tzOffsetMin());
       d.plans = d.plans.filter((p) => p.day !== today);
       d.plans.push(Object.assign({ day: today }, entry));
     });
+    if (!saved.ok) return; // 安排没存进本机：不摆上屏，更不说「已生成」
     this.renderPlan(plan);
     // 说明永远只属于生成它的那份安排：重排一次就得收回，否则屏幕上留下的是上一天的话。
     this.setData({ advice: '', adviceMode: 'offline', explainBusy: false });

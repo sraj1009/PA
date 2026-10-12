@@ -1,10 +1,11 @@
 const {
-  loadPage, tapInner, text, html, count, simulate, wxState, resetWxState,
+  loadPage, tap, tapN, tapInner, text, html, count, classAt, simulate, wxState, resetWxState, waitFor,
 } = require('./helpers/render');
 const { store, resetStore, storage, tzOffsetMin } = require('../adapters/local');
 const { KEY } = require('../core/schema');
 const fmt = require('../core/format');
 const agent = require('../agent/index');
+const { freeze, unfreeze } = require('./helpers/clock');
 
 jest.setTimeout(60000);
 
@@ -44,9 +45,11 @@ beforeEach(() => {
   resetWxState();
   resetStore();
   agent.reset();
+  freeze(9, 0); // 「今天」的两端（种进去的时间、页面读到的时间）必须钉在同一天
 });
 
 afterEach(() => {
+  unfreeze();
   global.Date = REAL_DATE;
 });
 
@@ -201,5 +204,65 @@ test('the badge only claims 本地模型 after the probe actually reached the mo
 
   expect(text(page, '.js-mode')).toContain('本地模型');
   expect(text(page, '.js-mode')).not.toContain('不联网也能用');
+  page.detach();
+});
+
+// 首页这块是 agent.setPreference 唯一的入口：适配层能切换却没有界面，切换就等于不存在。
+test('the dashboard lets you pick the engine and stops probing once you choose 只用离线', async () => {
+  const page = await openHome();
+  expect(count(page, '.js-mode-chip')).toBe(2);
+  expect(classAt(page, '.js-mode-chip', 0)).toContain('chip--on'); // 默认自动
+  const probed = wxState().requests.length; // 自动模式下打开过一次 /api/tags
+  expect(probed).toBe(1);
+
+  await tapN(page, '.js-mode-chip', 1);
+  expect(storage.get(KEY).settings.agentMode).toBe('local');
+  expect(classAt(page, '.js-mode-chip', 1)).toContain('chip--on');
+  expect(text(page, '.js-mode')).toContain('离线模式');
+  expect(text(page, '.js-agent-note')).toContain('只用离线');
+  expect(wxState().requests.length).toBe(probed); // 选了离线就不该再碰网络
+  page.detach();
+});
+
+test('the engine choice survives a restart', async () => {
+  const page = await openHome();
+  await tapN(page, '.js-mode-chip', 1);
+  page.detach();
+
+  const probed = wxState().requests.length; // 第一次打开是自动模式，探测过一次
+  agent.reset(); // 模拟杀掉进程：适配层只能从本机存储里把偏好读回来
+  const again = await openHome();
+  expect(storage.get(KEY).settings.agentMode).toBe('local');
+  expect(classAt(again, '.js-mode-chip', 1)).toContain('chip--on');
+  expect(text(again, '.js-mode')).toContain('离线模式');
+  expect(wxState().requests.length).toBe(probed); // 重启之后仍然一次网络都不碰
+  again.detach();
+});
+
+test('测一下本地模型 does not claim the model unless it actually answered', async () => {
+  const page = await openHome();
+  await tap(page, '.js-probe-llm');
+  // 这一次点击的结尾是「问完本机模型、拿不到答案、退回自动」，固定 sleep 只是碰巧赶得上。
+  await waitFor(() => expect(wxState().toasts.join('')).toContain('连不上'));
+
+  expect(storage.get(KEY).settings.agentMode).toBe('auto'); // 验证失败就退回自动
+  expect(text(page, '.js-mode')).toContain('离线模式');
+  page.detach();
+});
+
+test('a model that really answers switches the badge to 本地模型', async () => {
+  const page = await openHome();
+  const real = global.wx.request;
+  global.wx.request = (o) => {
+    setTimeout(() => o.success(o.url.endsWith('/api/tags')
+      ? { statusCode: 200, data: { models: [{ name: 'qwen2.5:3b' }] } }
+      : { statusCode: 200, data: { message: { content: '{"mood":"calm","intensity":0.5}' } } }), 0);
+  };
+  await tap(page, '.js-probe-llm');
+  await waitFor(() => expect(wxState().toasts.join('')).toContain('已切换'));
+  global.wx.request = real;
+
+  expect(storage.get(KEY).settings.agentMode).toBe('llm');
+  expect(text(page, '.js-mode')).toContain('本地模型');
   page.detach();
 });

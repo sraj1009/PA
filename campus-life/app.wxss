@@ -18,6 +18,7 @@ view, text { box-sizing: border-box; }
 }
 
 .muted { color: var(--muted); font-size: var(--fs-sm); }
+.tiny { font-size: var(--fs-xs); }
 
 .row { display: flex; align-items: center; }
 .col { display: flex; flex-direction: column; }

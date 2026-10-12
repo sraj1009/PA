@@ -92,3 +92,16 @@ test('two posts in the same millisecond still get different ids', () => {
   expect(s.posts[0].id).not.toBe(s.posts[1].id);
   expect(posts.feed(s).length).toBe(2);
 });
+
+// 屏幕上那个「/200」不是装饰：它就是 core 真正在执行的那条线，所以数字只能有一个出处。
+test('the limit the tree hole advertises is the limit core enforces', () => {
+  const s = S();
+  expect(posts.maxLen).toBe(200);
+
+  expect(posts.add(s, { text: '字'.repeat(posts.maxLen), ts: T(1) }).ok).toBe(true);
+
+  const r = posts.add(s, { text: '字'.repeat(posts.maxLen + 1), ts: T(2) });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toContain('200');
+  expect(s.posts.length).toBe(1); // 超限的那条一个字都不该落库
+});

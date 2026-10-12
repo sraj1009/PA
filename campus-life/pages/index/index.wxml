@@ -9,6 +9,25 @@
     </view>
   </view>
 
+  <view class="sec">智能体</view>
+  <view class="card agent">
+    <view class="spread">
+      <text class="stat-t">回答来自哪里</text>
+      <text class="muted tiny js-agent-note">{{agentNote}}</text>
+    </view>
+    <view class="chips">
+      <view
+        wx:for="{{modes}}"
+        wx:key="value"
+        class="chip js-mode-chip {{agentMode === item.value ? 'chip--on' : ''}}"
+        data-v="{{item.value}}"
+        bindtap="onPickMode"
+      >{{item.label}}</view>
+    </view>
+    <view class="btn btn--ghost js-probe-llm" bindtap="onProbeLlm">{{probing ? '正在问它…' : '测一下本地模型'}}</view>
+    <view class="muted tiny js-agent-hint">「本地模型」这四个字只在它真的回答过一次之后才会出现；手机上访问不了本机端口，那里会一直是离线词库。</view>
+  </view>
+
   <view class="sec">今天的状态</view>
 
   <view class="card stat">

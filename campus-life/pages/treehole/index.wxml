@@ -8,11 +8,11 @@
       class="ta js-draft"
       placeholder="说点什么吧，这里没有实名，也没有观众。"
       value="{{draft}}"
-      maxlength="200"
+      maxlength="{{maxLen}}"
       bindinput="onDraft"
     ></textarea>
     <view class="spread tail">
-      <text class="muted tiny">{{draft.length}}/200 · 心情标注由{{modeText}}完成</text>
+      <text class="muted tiny">{{draft.length}}/{{maxLen}} · 心情标注由{{modeText}}完成</text>
       <view class="btn js-publish {{busy ? 'btn--off' : ''}}" bindtap="onPublish">{{busy ? '标注中…' : '发布'}}</view>
     </view>
   </view>

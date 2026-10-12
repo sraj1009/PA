@@ -91,4 +91,7 @@
   border: 2rpx solid var(--line);
   font-size: var(--fs-body);
 }
+/* 输入框外面套了一列（下面就是字数），所以它不再靠 flex: 1 撑高度。 */
+.compose .in { flex: none; }
+.cnt { margin-top: var(--s-1); padding-left: var(--s-3); }
 .js-send { flex-shrink: 0; }

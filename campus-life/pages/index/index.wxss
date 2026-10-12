@@ -11,4 +11,19 @@
 .stat-b { margin-top: var(--s-2); font-size: var(--fs-sm); color: var(--ink-2); line-height: 1.6; }
 .tiny { font-size: var(--fs-xs); }
 
+.agent { border-left: 6rpx solid var(--brand-3); }
+.agent .chips { margin: var(--s-3) 0 var(--s-4); }
+.chips { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.chip {
+  padding: 10rpx 22rpx;
+  border-radius: var(--r-pill);
+  background: var(--canvas);
+  border: 2rpx solid var(--line);
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+}
+.chip--on { background: var(--brand); border-color: var(--brand); color: #fff; }
+.js-probe-llm { width: 100%; }
+.js-agent-hint { margin-top: var(--s-3); line-height: 1.5; }
+
 .navs { display: flex; flex-direction: column; gap: var(--s-3); }

@@ -15,6 +15,20 @@
     "checkInvalidKey": true
   },
   "condition": {},
+  "packOptions": {
+    "ignore": [
+      { "type": "folder", "value": "node_modules" },
+      { "type": "folder", "value": "tests" },
+      { "type": "folder", "value": "coverage" },
+      { "type": "folder", "value": "docs" },
+      { "type": "folder", "value": "tools" },
+      { "type": "file", "value": "jest.config.js" },
+      { "type": "file", "value": "jest.night.config.js" },
+      { "type": "file", "value": "package.json" },
+      { "type": "file", "value": "package-lock.json" },
+      { "type": "file", "value": "README.md" }
+    ]
+  },
   "editorSetting": {
     "tabIndent": "insertSpaces",
     "tabSize": 2

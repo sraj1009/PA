@@ -1,4 +1,4 @@
-const { store, locate, tzOffsetMin } = require('../../adapters/local');
+const { store, save, locate, tzOffsetMin } = require('../../adapters/local');
 const checkin = require('../../core/checkin');
 const fmt = require('../../core/format');
 const { spots } = require('../../data/spots');
@@ -59,9 +59,10 @@ Page({
     const id = e.currentTarget.dataset.id;
     const ts = Date.now();
     let result = null;
-    store().write((draft) => {
+    const saved = save((draft) => {
       result = checkin.doCheckin(draft, { spots, spotId: id, ts, coords: this.coords || null });
     });
+    if (!saved.ok) return; // 没落进本机就不能再宣布打卡成功，save 已经说过那句人话
     this.refresh();
     if (!result.ok) {
       wx.showToast({ title: result.reason, icon: 'none' });

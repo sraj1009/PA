@@ -1,4 +1,4 @@
-const { loadPage, tap, tapN, input, text, innerText, count, classes, classAt, wxState, resetWxState } = require('./helpers/render');
+const { loadPage, tap, tapN, input, text, innerText, count, classes, classAt, wxState, resetWxState, waitFor } = require('./helpers/render');
 const { freeze, unfreeze } = require('./helpers/clock');
 const { store, resetStore, storage } = require('../adapters/local');
 const { KEY } = require('../core/schema');
@@ -7,6 +7,13 @@ jest.setTimeout(60000);
 
 function seed(tasks) {
   store().write((d) => { d.tasks = tasks; });
+}
+
+/** 「让 AI 说明」先要走完一次本机请求才渲染：sleep(10) 在满载时会抢在结果之前读屏幕。 */
+async function waitAdvice(page) {
+  await waitFor(() => {
+    if (!text(page, '.advice-t')) throw new Error('说明还没写上屏幕');
+  });
 }
 
 beforeEach(() => {
@@ -168,6 +175,7 @@ test('让 AI 说明 rewrites the solver output into sentences and labels the eng
   const page = await loadPage('planner');
   await tap(page, '.js-gen');
   await tap(page, '.js-explain');
+  await waitAdvice(page);
 
   expect(text(page, '.advice-t')).toContain('今天安排 3 段');
   expect(text(page, '.advice-t')).toContain('09:00 - 10:30 复习高数');
@@ -184,6 +192,7 @@ test('the prose names the work that did not fit instead of hiding it', async () 
   const page = await loadPage('planner');
   await tap(page, '.js-gen');
   await tap(page, '.js-explain');
+  await waitAdvice(page);
 
   expect(text(page, '.advice-t')).toContain('今天放不下：写完课程大作业');
   expect(text(page, '.advice-t')).not.toContain('t1'); // solver 的 id 不许念给人听
@@ -195,6 +204,7 @@ test('re-generating drops the prose written about the previous plan', async () =
   const page = await loadPage('planner');
   await tap(page, '.js-gen');
   await tap(page, '.js-explain');
+  await waitAdvice(page);
   expect(count(page, '.advice')).toBe(1);
 
   await tap(page, '.js-gen');

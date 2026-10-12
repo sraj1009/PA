@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const {
   loadPage, tap, tapN, input, text, allText, count, classAt,
   wxState, resetWxState, simulate,
@@ -206,4 +208,27 @@ test('an old session stays visible with its own closed banner until a new one op
   expect(allText(page, '.b')).toContain('那条没回完的');
   expect(count(page, '.b--me')).toBe(1);
   expect(text(page, '.again')).toContain('上一条记录还留在本机');
+});
+
+// maxlength 在这套框架里进不了 DOM（built-in 只留下 class），所以模板契约单独钉一次；
+// 真正能被观察的是屏幕上那行字数，和 core 切断消息的那个长度。
+test('the compose box shows the same limit core cuts messages at', async () => {
+  const page = await openChat();
+  await tap(page, '.js-open');
+  await settle();
+
+  expect(page.instance.data.maxLen).toBe(chat.maxLen);
+  const wxml = fs.readFileSync(path.join(__dirname, '..', 'pages', 'chat', 'index.wxml'), 'utf8');
+  expect(wxml).toContain('maxlength="{{maxLen}}"');
+  expect(wxml).not.toMatch(/maxlength="\d/);
+
+  await input(page, '.js-draft', '哈'.repeat(chat.maxLen + 50));
+  expect(text(page, '.cnt')).toBe((chat.maxLen + 50) + '/' + chat.maxLen);
+
+  await tap(page, '.js-send');
+  await settle();
+
+  const saved = storage.get(KEY).chats[0].messages;
+  expect(saved[0].from).toBe('me');
+  expect(saved[0].text.length).toBe(chat.maxLen); // 截到线上，不整条吞掉
 });
