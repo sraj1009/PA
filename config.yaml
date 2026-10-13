@@ -14,8 +14,20 @@ ollama:
   max_tokens: 1024
   temperature: 0.2
   timeout: 300
-  num_ctx: 4096            # lean KV cache so bee4b stays fully on-GPU (fast first token)
+  # 8192 = the largest window that is both *sufficient* and *fully on-GPU*.
+  # Measured 2026-10-13 with the real system prompt + the 30 shipped tool schemas:
+  # a genuine agent turn is 5875-7010 tokens, so 4096 made Ollama evaluate only
+  # 2050 of them (29-35%) — the model answered without ever seeing its own tool
+  # results. 8192 delivers 100% at 3.25-4.28 s/call. Above it the KV cache leaves
+  # VRAM on this 4 GB card (/api/ps: 12288 -> 0.46 GB off-GPU, 16384 -> 0.61 GB),
+  # which is where the "stays fully on-GPU" concern actually bites — at 8192 the
+  # model is still entirely resident (size 2.31 GB == size_vram 2.31 GB).
+  num_ctx: 8192
   keep_alive: "60s"        # unload the local model 60 s after last use ("" = Ollama's 5 min)
+  # Start `ollama serve` at boot if nothing is answering base_url (BEE's own local
+  # tier is otherwise silently skipped after a reboot). Background thread, never
+  # blocks startup, never kills a server it did not start, localhost only.
+  autostart: true
 
 # Hybrid cloud fallback. Provider prefix formats (LiteLLM):
 #   gemini/gemini-3.6-flash         (GOOGLE_API_KEY)  <- primary (verified live)

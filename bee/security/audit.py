@@ -24,7 +24,7 @@ _lock = threading.Lock()
 
 def audit_path() -> Path:
     from .. import paths
-    return paths.PROJECT_ROOT / "audit.jsonl"
+    return paths.AUDIT_FILE
 
 
 def record(*, tool: str, args: dict | None, decision, action: str,

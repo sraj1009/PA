@@ -64,7 +64,7 @@ Statuses below are re-verified against the 2026-10-08 tree.
 
 | Capability | Evidence |
 |---|---|
-| Local-first 3B model pipeline (`bee4b` on Ollama, `num_ctx=8192` pinned for 8 GB VRAM) | client.py; model bench in `evals/bench_model.json` |
+| Local-first 3B model pipeline (`bee4b` on Ollama, `num_ctx=8192` = largest fully-resident window on the 4 GB card) | client.py; model bench in `evals/bench_model.json` |
 | Dual routing: 536-line regex fastpaths + ML router (TF-IDF/LogReg, 408 episodes, CV 0.9975, complexity floor) | fastpaths.py; brain/mlrouter.py; router suite 6,000 checks 100% |
 | Think/act/observe loop with repeat guard, fail-streak breaker, empty-completion retry, forced wrap-up | loop.py (636); 202 pytest green |
 | Permission guard (allow/ask/deny, 3 modes) | guard.py; 4,204 guard checks 100% |

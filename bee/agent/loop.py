@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 from ..config import Config
 from .client import LLMClient, LLMError
-from .context import Context, build_sub_system, build_system_prompt, module_api_card
+from .context import Context, build_sub_system, build_system_prompt, module_api_card, compact_messages
 from .router import route as route_v2, strip_cloud_prefix, CLOUD_PREFIX
 
 from .. import guard, privacy
@@ -526,6 +526,12 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
 
     # ------------------------------------------------- availability / fallback chain
     local_up = ctx.client.ollama_up()      # public provider API (Phase 6)
+    if not local_up:
+        # A launch started at boot may still be in flight (A60): give the server the
+        # second it needs instead of degrading the task because the probe raced it.
+        # Returns instantly when BEE never attempted a launch.
+        from . import localserver
+        local_up = localserver.grace(cfg)
     cloud_up = _cloud_up(cfg)
     if name == "local" and not local_up:
         if cloud_up:
@@ -566,7 +572,19 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
     meta = tools_meta() if tools else {}
 
     def llm_call(cur_name: str):
-        if cur_name != "local" and cfg.privacy.redact_cloud and ctx.privacy_on:
+        # A59/A60: Ollama silently truncates to ~num_ctx/2 when the prompt does not
+        # fit. Compact old tool history *before* the call so the model at least keeps
+        # the most recent context, and so the truncation is logged rather than hidden.
+        info = cfg.get_llm(cur_name)
+        if not info.get("cloud") and cfg.ollama.num_ctx:
+            compacted, compact_info = compact_messages(messages, tools, cfg.ollama.num_ctx,
+                                                        completion_reserve=cfg.ollama.max_tokens)
+            if compacted is not messages:
+                messages[:] = compacted
+            if compact_info.get("compacted"):
+                metrics.record("context_compact", model=cur_name, **compact_info)
+                emit({"type": "context_compact", **compact_info})
+        if info.get("cloud") and cfg.privacy.redact_cloud and ctx.privacy_on:
             msgs, n = _redact_for_cloud(messages)
             if n:
                 metrics.record("redact", n=n, model=cur_name)

@@ -164,7 +164,7 @@ capability denies have no side effect (blocked before dispatch).
 
 | Aspect | Assumption |
 |---|---|
-| LLM | Ollama at `localhost:11434` with local model `bee4b` (SFT, 8 GB VRAM, `num_ctx=8192`); cloud optional via provider-matched env keys; **offline deterministic mode** keeps the assistant useful without either (verified path: `_offline_result`) |
+| LLM | Ollama at `localhost:11434` with local model `bee4b` (SFT, 3.1 B Q4_K_M on a 4 GB RTX 3050, `num_ctx=8192`); cloud optional via provider-matched env keys; **offline deterministic mode** keeps the assistant useful without either (verified path: `_offline_result`) |
 | OS | Windows-first: `taskkill /F /T` (with `killpg` fallback), `msg.com` toasts (with `osascript`/`notify-send` fallbacks), PowerShell launchers, SAPI TTS fallback — all platform-guarded; POSIX paths exist but are untested in-field |
 | Voice uploads | `ffmpeg` required for non-WAV (checked at runtime, 501 otherwise) |
 | Sandbox | Docker optional |

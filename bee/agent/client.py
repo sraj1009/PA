@@ -137,6 +137,7 @@ class LLMClient:
             kwargs["api_base"] = info["base_url"]
         if info["cloud"] and info.get("api_key"):
             kwargs["api_key"] = info["api_key"]
+        self._apply_local_options(info, kwargs)
 
         emitted = {"n": 0, "text": ""}
 
@@ -291,9 +292,7 @@ class LLMClient:
             kwargs["api_base"] = info["base_url"]
         if info["cloud"] and info.get("api_key"):
             kwargs["api_key"] = info["api_key"]
-        if not info["cloud"] and HAS_LITELLM and self.cfg.ollama.keep_alive:
-            # release the local model from RAM/VRAM after keep_alive (memory saver)
-            kwargs["extra_body"] = {"keep_alive": self.cfg.ollama.keep_alive}
+        self._apply_local_options(info, kwargs)
 
         last_err: Exception | None = None
         for attempt in range(max_retries + 1):
@@ -394,6 +393,31 @@ class LLMClient:
         if info["cloud"]:
             return info["name"]
         return f"ollama_chat/{info['name']}" if HAS_LITELLM else info["name"]
+
+    def _apply_local_options(self, info: dict, kwargs: dict) -> None:
+        """Put the Ollama *server* options onto the primary (litellm) request.
+
+        A58: num_ctx was only ever sent by the native fallbacks (`_native_ollama`,
+        `_ollama_stream`), and keep_alive only by `chat()` — so in the shipped
+        configuration the local model ran on Ollama's own context default (this box:
+        13.3k tokens of prompt delivered as 2050) and the streaming surfaces left it
+        loaded for Ollama's 5 minutes instead of `cfg.ollama.keep_alive`.
+
+        The FORM was measured against the live server, not guessed: num_ctx must be a
+        top-level litellm param (it maps into Ollama's `options`), while
+        `extra_body={"num_ctx": …}` arrives as a bare body field Ollama ignores, and
+        `extra_body={"options": {…}}` replaces litellm's own options dict — which
+        dropped max_tokens (8 requested, 289 produced). keep_alive by contrast IS
+        read at the body top level, so it stays in extra_body.
+
+        Local-only: a cloud provider raises UnsupportedParamsError on an unknown
+        param (BEE does not set litellm.drop_params).
+        """
+        if info.get("cloud") or not HAS_LITELLM:
+            return
+        kwargs["num_ctx"] = int(info.get("num_ctx", 8192))
+        if self.cfg.ollama.keep_alive:
+            kwargs["extra_body"] = {"keep_alive": self.cfg.ollama.keep_alive}
 
     @staticmethod
     def _norm_messages(messages: list[dict]) -> list[dict]:

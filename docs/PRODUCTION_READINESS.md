@@ -264,8 +264,10 @@ multi-user, no network exposure).
 - **OS/runtime:** Windows 10/11 x64; Python 3.11+; PowerShell 5.1+
 - **Core:** `pip install -r requirements.txt` (FastAPI/uvicorn, litellm,
   pydantic, etc.)
-- **Local model (recommended, offline-capable):** Ollama + `bee4b`
-  (Qwen3-8B fine-tune, `num_ctx=8192` pinned for 8GB VRAM); nomic-embed-text
+- **Local model (recommended, offline-capable):** Ollama + `bee4b` (a
+  **Qwen2.5-3B** fine-tune — `/api/show` reports family `qwen2`, 3.1 B params,
+  Q4_K_M; `num_ctx=8192`, the largest window that stays entirely in this box's
+  4 GB RTX 3050 VRAM); nomic-embed-text
   for RAG embeddings. Without Ollama: cloud or offline-deterministic mode
 - **Voice (optional):** `pip install -r requirements-voice.txt`
   (faster-whisper, edge-tts, pyttsx3) + ffmpeg on PATH

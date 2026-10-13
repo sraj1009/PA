@@ -74,6 +74,99 @@ def test_the_isolation_covers_every_append_only_stream():
     src = inspect.getsource(runner._isolated_telemetry)
     for key in ("METRICS_DIR", "METRICS_FILE", "EPISODES_DIR", "SKILLS_DIR"):
         assert key in src, f"_isolated_telemetry no longer redirects {key}"
+    src = inspect.getsource(runner._isolated_memory)
+    for key in ("SESSIONS_DIR", "RECEIPTS_FILE", "AUDIT_FILE"):
+        assert key in src, (f"_isolated_memory no longer redirects {key} — a scored "
+                            "run then writes the user's audit trail")
+
+
+def test_the_audit_path_resolves_through_paths_so_it_can_be_redirected():
+    """`audit_path()` returned `paths.PROJECT_ROOT / "audit.jsonl"` inline.
+    PROJECT_ROOT is the checkout and is never redirected, so no caller could move
+    the stream — the eval's tool rows landed in the user's audit file (3142 rows
+    with no session field, i.e. unrecoverable after the fact)."""
+    from bee.security import audit
+    real = paths.AUDIT_FILE
+    assert audit.audit_path() == real
+    with runner._isolated_memory() as root:
+        assert audit.audit_path() != real
+        # root is the memory COPY; the audit file lives one level up, in the
+        # same throwaway tree the context manager rmtree's on exit
+        assert str(audit.audit_path()).startswith(str(root.parent)), audit.audit_path()
+    assert audit.audit_path() == real
+
+
+def test_a_kernel_built_inside_the_isolation_uses_the_copy(tmp_path):
+    """`_run_suite` documents that the kernel resolves its sessions and receipts at
+    construction time so they point at the copy. Both were hardcoded to
+    PROJECT_ROOT/memory, so the promise was false: measured 2026-10-13, 1568 of 1571
+    live receipt rows and 2540 of 2543 rotated ones carry an `eval-*` session id,
+    plus 23 memory/sessions/eval-*.json files from runs that only meant to score."""
+    from bee.kernel import AgentKernel
+    ctx = _SpyCtx(tmp_path)
+    saved = (paths.SESSIONS_DIR, paths.RECEIPTS_FILE)
+    with runner._isolated_memory() as root:
+        k = AgentKernel(ctx, approver=lambda *a, **kw: False)
+        assert str(k.sessions_dir).startswith(str(root)), k.sessions_dir
+        assert str(k.receipts.path).startswith(str(root)), k.receipts.path
+    # compare against what the run found, not a literal: conftest already moved
+    # the suite off the user's real memory tree, so the hardcoded path here would
+    # assert the harness's own redirect back into place.
+    assert (paths.SESSIONS_DIR, paths.RECEIPTS_FILE) == saved
+
+
+def test_the_pytest_harness_itself_keeps_the_audit_streams_off_the_real_tree():
+    """Making SESSIONS_DIR/RECEIPTS_FILE module constants is what exposed the
+    second half of this bug: conftest's memory isolation listed the older names
+    only, so a kernel built anywhere in the suite without an explicit
+    `sessions_dir=` appended to the user's real receipts. Pinned as a static
+    check because the leak is in the harness, not in a product call path."""
+    real = paths.PROJECT_ROOT / "memory"
+    assert not str(paths.SESSIONS_DIR).startswith(str(real)), paths.SESSIONS_DIR
+    assert not str(paths.RECEIPTS_FILE).startswith(str(real)), paths.RECEIPTS_FILE
+    assert not str(paths.AUDIT_FILE).startswith(str(paths.PROJECT_ROOT)), paths.AUDIT_FILE
+
+
+def _digest(root) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    base = pathlib.Path(root)
+    for p in sorted(base.rglob("*")):
+        if p.is_file():
+            h.update(p.name.encode())
+            h.update(p.read_bytes())
+    return h.hexdigest()
+
+
+def _user_state_snapshot() -> tuple:
+    """Everything a scored run must leave byte-for-byte alone."""
+    real_memory = paths.PROJECT_ROOT / "memory"
+    audit = paths.PROJECT_ROOT / "audit.jsonl"
+    return (_digest(real_memory),
+            audit.read_bytes() if audit.exists() else b"")
+
+
+def test_a_real_scored_run_leaves_the_users_audit_state_byte_identical(tmp_path, monkeypatch):
+    """Drives the REAL stack (run_suite -> AgentKernel -> run_agent) and fakes only
+    the model. Every earlier test in this file faked `run_suite` or wrote from inside
+    the context manager, so none of them could see a path the kernel resolved itself."""
+    from bee.agent.context import create_context
+    from bee.config import load_config
+    from tests.test_kernel_integration import ScriptedClient
+
+    ctx = create_context(load_config(), client=ScriptedClient([
+        "There are 25 prime numbers between 1 and 100."]))
+    ctx.workspace = pathlib.Path(tmp_path)
+    before = _user_state_snapshot()
+    monkeypatch.setattr(runner, "_restore_workspace", lambda p: _null())
+
+    rows = runner.run_suite(ctx, only=["math_sieve"])
+
+    assert rows and rows[0]["ok"], rows
+    assert _user_state_snapshot() == before, (
+        "the scored run wrote into the user's real audit state (memory/sessions, "
+        "memory/receipts.jsonl, memory/checkpoints or audit.jsonl) — see "
+        "paths.SESSIONS_DIR / paths.RECEIPTS_FILE / paths.AUDIT_FILE")
 
 
 class _SpyCtx:

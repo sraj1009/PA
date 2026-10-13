@@ -385,7 +385,8 @@ Consolidation (scheduler.py nightly): LLM-summarizes old diary entries, then
 
 - `client.py` (226): litellm primary; native Ollama HTTP fallback on error;
   `LLMError` classification (auth/quota/network/timeout); `num_ctx=8192` pinned
-  client-side so the 3B local model fits 8 GB VRAM (hidden assumption).
+  client-side so the 3B local model fits the 4 GB RTX 3050 in this box
+  (hidden assumption; A59 measured the residency limit at 8192 exactly).
 - `engines.py` (102): engine names → model aliases from models.yaml
   (8 models incl. `:cloud` aliases); settings.json holds the active engine;
   module-global state.

@@ -10,6 +10,7 @@ Run:  python -m bee.pipeline.build_sft [--loose] [--out train/sft_v1.jsonl]
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -45,6 +46,11 @@ def load_golden() -> list[dict]:
         except Exception:
             continue
     return rows
+
+
+def _task_key(task: str) -> str:
+    """Stable, collision-resistant dedupe key."""
+    return hashlib.sha256((task or '').encode()).hexdigest()[:32]
 
 
 def quality_score(row: dict) -> float:
@@ -99,19 +105,37 @@ def paraphrase_augment(rows: list[dict], n: int, gen_fn) -> list[dict]:
     return out
 
 
-def row_to_messages(row: dict) -> list[dict] | None:
-    """Chat messages with `loss` flags from a stored episode row."""
+def row_to_messages(row: dict) -> tuple[list[dict] | None, int]:
+    """Chat messages with `loss` flags from a stored episode row.
+
+    Returns (messages, dropped_bad_events). Events that failed or were blocked
+    are skipped: training the model to reproduce a guard-denied command or a
+    broken tool call would teach the wrong behaviour.
+    """
     if not row.get("ok") or not (row.get("output") or "").strip():
-        return None
+        return None, 0
     msgs = [{"role": "user", "content": row["task"], "loss": False}]
+    dropped = 0
     for ev in row.get("events", []):
+        if not ev.get("ok"):
+            dropped += 1
+            continue
+        tc_id = f"call_{len([m for m in msgs if m.get('role') == 'assistant' and m.get('tool_calls')])}"
+        args = ev.get("args", "{}")
+        if not isinstance(args, str):
+            try:
+                args = json.dumps(args)
+            except Exception:
+                args = "{}"
         msgs.append({"role": "assistant", "content": "",
-                     "tool_calls": [{"function": {"name": ev.get("tool"), "arguments": ev.get("args", "{}")}}],
+                     "tool_calls": [{"id": tc_id, "type": "function",
+                                     "function": {"name": ev.get("tool"), "arguments": args}}],
                      "loss": True})
-        msgs.append({"role": "tool", "name": ev.get("tool"),
+        msgs.append({"role": "tool", "tool_call_id": tc_id,
+                     "name": ev.get("tool"),
                      "content": (ev.get("result") or "")[:2000], "loss": False})
     msgs.append({"role": "assistant", "content": row["output"], "loss": True})
-    return msgs
+    return msgs, dropped
 
 
 def build(keep_unknown: bool = False, workspace: Path | None = None,
@@ -123,7 +147,8 @@ def build(keep_unknown: bool = False, workspace: Path | None = None,
     seen: dict[str, dict] = {}
     stats = {"episodes": len(rows), "golden": len(golden), "golden_in": 0,
              "by_verdict": {}, "dropped_dup": 0, "redactions": 0,
-             "dropped_low_quality": 0, "paraphrases": 0, "quality_dist": {}}
+             "dropped_bad_events": 0, "dropped_low_quality": 0,
+             "paraphrases": 0, "quality_dist": {}}
     for row in rows:
         v = validate.validate(row, workspace)
         stats["by_verdict"][v["verdict"]] = stats["by_verdict"].get(v["verdict"], 0) + 1
@@ -131,7 +156,7 @@ def build(keep_unknown: bool = False, workspace: Path | None = None,
             continue
         if v["verdict"] == "unknown" and not keep_unknown:
             continue
-        key = row.get("task", "")[:500]
+        key = _task_key(row.get("task", ""))
         if key in seen:
             stats["dropped_dup"] += 1
             continue
@@ -140,7 +165,7 @@ def build(keep_unknown: bool = False, workspace: Path | None = None,
     # they are included directly (deduped against episodes, still PII-scrubbed)
     # — this is how the local model learns what the cloud already answered well.
     for row in golden:
-        key = (row.get("task") or "").strip()[:500]
+        key = _task_key((row.get("task") or "").strip())
         if not key or not (row.get("response") or "").strip():
             continue
         if key in seen:
@@ -154,7 +179,7 @@ def build(keep_unknown: bool = False, workspace: Path | None = None,
     if n_paraphrase > 0 and gen_fn is not None:
         base = [r for r in seen.values() if not r.get("augmented")]
         for pr in paraphrase_augment(base, n_paraphrase, gen_fn):
-            key = pr["task"][:500]
+            key = _task_key(pr["task"])
             if key not in seen:
                 seen[key] = pr
                 stats["paraphrases"] += 1
@@ -168,7 +193,8 @@ def build(keep_unknown: bool = False, workspace: Path | None = None,
             aug = bool(row.get("augmented"))
             clean, n_red = sanitize.scrub_episode(row)
             stats["redactions"] += n_red
-            msgs = row_to_messages(clean)
+            msgs, n_bad = row_to_messages(clean)
+            stats["dropped_bad_events"] += n_bad
             if not msgs:
                 continue
             q = quality_score(clean)

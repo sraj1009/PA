@@ -166,6 +166,10 @@ Metrics JSONL history, episodes JSONL, diary files, LanceDB table (see H4),
 local model or GPU silently breaks the assumption; it is not surfaced in
 config.
 **Fix:** move to models.yaml with per-model context + VRAM note (Phase 5).
+*(A59, 2026-10-13: the figure was wrong twice over — the card is a 4 GB RTX 3050,
+and while every doc claimed 8192 the shipped `config.yaml` had drifted to 4096,
+which is what actually governed the local tier. `num_ctx` now reaches the server on
+the primary path, and the shipped value is pinned by a measured test.)*
 
 ### M12. Potential cycles masked by lazy imports
 `cli ↔ webapp` and `livekit.agent ↔ agent/voice` use function-level imports
@@ -1031,6 +1035,177 @@ failed immediately. The window is `clause-start → match-END`, as in A47.
 | `dsa_graph` | 40.6 s, missing `'3'` — the local model narrated the import instead of running it | A50's card fixed the *API invention* (3 of the 4 runs since then passed, one via `from bee.dsa.graphs import build_adj, dijkstra`); the residual is answer quality on a 3B model. |
 | `plan_complex` | 22.4 s, "no answer after wrap" — 5 tools, budget exhausted, `_grounded_fallback` shipped honestly | The fallback is behaving as designed; the budget for a 5-tool plan on the local tier is the open question. |
 | `guard_blocked` | 16.3 s, `expect_guard=blocked but no guard block occurred`, tools=0 | **New failure mode.** The model never attempted `git reset --hard` at all, so nothing could be blocked — the task now measures a refusal that did not happen. A45's note ("assert the refusal, not a substring") is stale: it does assert the block, and the block requires an attempt. |
+
+## A57 — the eval *and* the test suite wrote the user's audit trail (2026-10-13)
+
+A31b's `_isolated_memory()` docstring promises the kernel's "sessions + receipts"
+follow the copy. They did not: the kernel built them from
+`paths.PROJECT_ROOT / "memory" / ...` written out inline, and `PROJECT_ROOT` is the
+checkout — a path that **cannot be redirected**. Same for
+`bee.security.audit.audit_path()` (`PROJECT_ROOT / "audit.jsonl"`). A44 redirected
+metrics/episodes/skills and stopped there, so the three streams the kernel itself
+owns kept taking every scored run's writes as if they were real work.
+
+Measured on 2026-10-13, in the user's files, after ~4 days of eval + suite runs:
+
+| Stream | Polluted | Total | Real content |
+|---|---|---|---|
+| `memory/receipts.jsonl` | 1569 rows with an `eval-*` session id | 1572 | 3 rows (`repl`) |
+| `memory/receipts.jsonl.1` (rotated) | 2540 | 2596 | 56 |
+| `memory/sessions/` | 23 `eval-*.json` files | 26 | 3 (`repl`, `probe`, `live-check`) |
+| `memory/checkpoints/` | 3 of 3 (each stores its own `session_id`) | 3 | 0 |
+| `audit.jsonl` | unknown — **the row has no session/task field at all** | 3142 | indistinguishable |
+
+The receipts are the worst of these for the user: `/audit` and the dashboard render
+them, so hundreds of synthetic `code_run` failures and guard denials read as things
+that happened on their machine. `audit.jsonl` is the one that cannot be cleaned:
+`record()` stores `ts/tool/action/ok/blocked/seconds/source/risk/args` — nothing that
+ties a row to a run — which is why the fix had to make the path redirectable instead
+of learning to filter it later.
+
+| Cause | Fix |
+|---|---|
+| Kernel resolved its own paths inline | `paths.SESSIONS_DIR`, `paths.RECEIPTS_FILE`, `paths.AUDIT_FILE` are module constants now (the A41 pattern: *"a module-level path so the test suite can redirect it"*); `AgentKernel.__init__` and `audit_path()` read them. `SESSIONS_DIR` added to `ensure_core_dirs()`. |
+| Nothing covered the trio | `_isolated_memory()` redirects all three. `bee/monitor/rotate.py` had hardcoded `PROJECT_ROOT/"memory"/"receipts.jsonl"` and `PROJECT_ROOT/"audit.jsonl"` in its target list — the nightly rotation was about to rotate the *eval's* output and leave the user's real streams unbounded. |
+| The harness itself leaked | conftest's memory isolation listed the pre-A57 names, so making them constants exposed a **second** leak: every plain `pytest tests` run appended receipts for any kernel built without an explicit `sessions_dir=`. conftest now redirects all three (copied, so `recent(n)` readers still see the real trail). |
+
+**Cleanup (reversible, attributable-only):** backup to
+`%TEMP%/bee-fix-backup/A57/` first, then drop rows whose **own** `session_id` starts
+with `eval-` — no substring heuristics (the loose rule would also have deleted the
+user's 3 `repl` rows and the 56 rotated ones). `audit.jsonl` history was left alone:
+its rows are not attributable, and per the standing rule, history that cannot be
+attributed is not "fixed". Post-cleanup the product still reads its own state:
+`ReceiptLog.recent()` → 3 rows, `AgentSession.load("repl")` → 30 turns.
+
+**Evidence — every test was run against the pre-fix file to prove it bites:**
+
+- `test_a_kernel_built_inside_the_isolation_uses_the_copy` and
+  `test_a_real_scored_run_leaves_the_users_audit_state_byte_identical` (drives
+  `run_suite → AgentKernel → run_agent`, fakes only the model, hashes the real
+  `memory/` tree **and** `audit.jsonl`): **2 failed** with the old `kernel.py`, 6 passed after.
+- `test_the_pytest_harness_itself_keeps_the_audit_streams_off_the_real_tree`:
+  **1 failed** with the conftest line commented out.
+- `test_the_audit_path_resolves_through_paths...` + the pinned-stream test:
+  **3 failed** with the old `audit.py`/`runner.py`.
+- Static pins in `test_the_isolation_covers_every_append_only_stream` now list
+  `SESSIONS_DIR / RECEIPTS_FILE / AUDIT_FILE`, so the *list itself* is guarded — the
+  defect class is "a stream nobody thought to redirect".
+
+Live, after the fix: core suite **815 passed**, and the user's streams ended the run
+at exactly the post-cleanup counts (`audit.jsonl` 3142, `receipts.jsonl` 3, sessions
+3 files, checkpoints empty, metrics 33262, no new episode file) — i.e. 815 tests wrote
+nothing the user can see.
+
+The same isolation then survived a **full 21-task live eval**: `memory/`, `metrics/`,
+`train/` and `skills/` were SHA-256'd before and after the run (13:57 → 14:05, 295 s,
+46 model calls) and all four trees came back byte-identical.
+
+
+## A58 — the configured context window never reached the model (2026-10-13)
+
+`cfg.ollama.num_ctx` was read by the **native fallback** payloads only
+(`_native_ollama`, `_ollama_stream`) — the primary litellm path never sent it, so
+whatever the user configured was ignored on every normal call and Ollama's own
+default governed the turn. Streaming was worse: `_litellm_stream` built its kwargs
+without `num_ctx` *or* `keep_alive`, so the voice/`/talk` surface (always streaming)
+got the server default window **and** ignored `keep_alive: 60s`, leaving the weights
+resident for Ollama's 5 minutes.
+
+| Cause | Fix |
+|---|---|
+| Options were attached per-transport instead of once | `LLMClient._apply_local_options(info, kwargs)` — one place, called from `chat()` and `chat_stream()`, no-op for cloud. |
+| The wire **form** is not guessable | Measured against the live server: `num_ctx` must be a top-level litellm kwarg (its ollama provider maps it into `options`); `extra_body={"num_ctx": …}` arrives as a bare body field Ollama ignores. `keep_alive` is the opposite — it is not a litellm parameter at all, so it must go in `extra_body`. |
+| Cloud providers reject unknown params | `drop_params` is not set, so a stray `num_ctx` would break every cloud call with `UnsupportedParamsError` — the local branch is guarded by `info["cloud"]`. |
+
+Tests (`tests/test_engine_speed.py`, faking only the litellm transport):
+`test_num_ctx_reaches_the_primary_litellm_path`,
+`test_num_ctx_applies_to_the_streaming_path_too`,
+`test_local_only_params_are_never_sent_to_a_cloud_provider`. Each was run against the
+pre-fix `client.py` first — the two positive ones fail there (`KeyError`-ish absence of
+the key, `assert None == 8192`), which is the point: they guard a regression that
+produced no error message.
+
+
+## A59 — BEE shipped a context window half the size of a real turn (2026-10-13)
+
+A58 made `num_ctx` *work*; it then exposed that the shipped value was wrong, and how
+Ollama fails when a prompt does not fit. `config.yaml` said 4096 with the reason
+"lean KV cache so bee4b stays fully on-GPU (fast first token)".
+
+**The failure is silent and it is a cliff.** Ollama returns HTTP 200 either way, and
+`prompt_eval_count` reports what was actually evaluated:
+
+| prompt (tokens) | `num_ctx` | evaluated | verdict |
+|---|---|---|---|
+| 5779 | 8192 | **5779** | full |
+| 5779 | 4096 | **2050** | 35% — the model never saw the rest |
+| 12 500 (approx.) | 8192 | **4098** | collapses to `num_ctx / 2` |
+| 12 500 | 4096 | **2050** | collapses to `num_ctx / 2` |
+
+So a prompt either fits in the window whole, or llama.cpp keeps **half of it** — not
+"as much as fits". `prompt_eval_count` is a trustworthy truncation signal: the same
+5779-token call twice reports 5779 both times (only `prompt_eval_duration` drops,
+4922 ms → 57 ms), i.e. the prompt cache changes speed, not the reported size.
+
+**How big is a real BEE turn?** Measured live, not modelled: the full 21-task eval with
+`LLMClient.chat/chat_stream` wrapped, then each task's largest call *replayed* against
+the native server at `num_ctx=12288, num_predict=1` to learn the true size of the
+prompt BEE had built (real system prompt + 30 tool schemas + history):
+
+| task | calls | delivered | required | kept |
+|---|---|---|---|---|
+| cloud_redaction | 5 | 6336 | 6336 | 100% |
+| dsa_gcd_lcm | 2 | 5886 | 5886 | 100% |
+| dsa_lis | 2 | 5951 | 5951 | 100% |
+| file_roundtrip | 7 | 6193 | 6193 | 100% |
+| guard_blocked | 2 | 5850 | 5850 | 100% |
+| math_sieve | 1 | 5772 | 5798 | 100% (26-token replay artifact) |
+| plan_complex | 10 | 6584 | 6584 | 100% |
+| shell_echo | 2 | 5830 | 5830 | 100% |
+| web_search_tool | 6 | **7339** | 7339 | 100% |
+| dsa_graph | 4 | 6168 | 6168 | 100% |
+
+Every model-using task now delivers its whole prompt; before, all of them evaluated
+2050. **Why 8192 and not more** — the VRAM argument in the old comment was real, but
+pointed at the wrong threshold (`/api/ps`, model + KV cache, 4 GB RTX 3050):
+
+| `num_ctx` | size | size_vram | off-GPU | per-call latency |
+|---|---|---|---|---|
+| 8192 | 2.31 GB | **2.31 GB** | none | 3.25–4.28 s |
+| 12288 | 2.77 GB | 2.31 GB | 0.46 GB | 4.96–5.63 s |
+| 16384 | 2.93 GB | 2.32 GB | 0.61 GB | 5.0–5.6 s |
+
+8192 is the largest window that is both fully resident and sufficient for the biggest
+turn measured (7339). Pinned by
+`test_shipped_local_num_ctx_holds_a_real_agent_turn` (`tests/test_config_precedence.py`),
+whose floor is that 7339 — a *measured* floor, not a round number, so the test fails if
+someone re-leans the setting.
+
+**Mechanism deltas, same eval, before → after** (score is not the interesting part):
+suite **516 s → 295 s**, model calls **70 → 46**, and per task —
+`guard_blocked` 136.3 s/3 tools → 12.0 s/1, `shell_echo` 28.8 s/3 → 8.8 s/1,
+`dsa_gcd_lcm` 39.2 s → 12.0 s, `math_sieve` 49.3 s → 33.8 s,
+`web_search_tool` 33.3 s → 17.3 s. Tasks stopped re-asking because they could read
+their own tool results. Score stayed **18/21** and that is honest: the three failures
+(`file_list_ws`, `dsa_lis`, `dsa_graph`) are answer quality on a 3B model, and `dsa_lis`
+passed in the 9-task rerun — per-task outcomes on `bee4b` are stochastic, which is why
+the numbers above are mechanisms, not grades. (Docs note: `JARVIS_BASELINE.md` claims
+"8 GB VRAM" for this box; the card is a 4 GB RTX 3050 and `size_vram` above is the
+evidence.)
+
+**Open, deliberately not patched here:** headroom over the largest measured turn is
+~850 tokens, so one unusually large tool dump puts a turn back over the cliff — and it
+loses 50%, gracefully-truncated it is not. The fix is prompt-budget-aware compaction of
+old tool results in `bee/agent/context.py`, not a bigger number (bigger costs VRAM and
+latency, and the cliff moves with it). No speculative per-call estimator was added:
+`chars/4` under-counted these turns by ~22% and would have produced a warning that
+mostly lied.
+
+**Verified, not bugs** (recorded so they are not re-chased): the `KeyError: 'type'` /
+400 `Value looks like object, but can't find closing '}' symbol` seen from probe
+scripts were *probe* artifacts — native `/api/chat` wants `tool_calls[].function.arguments`
+as an **object** with a `type` tag, while BEE sends the OpenAI shape (JSON *string*,
+`loop.py:801`) and litellm translates it. The product path was correct.
 
 
 

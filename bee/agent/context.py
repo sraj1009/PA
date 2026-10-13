@@ -5,10 +5,13 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 import ast
+import logging
 import re
 
 from .. import paths
 from ..config import Config
+
+log = logging.getLogger("bee.context")
 
 
 @dataclass
@@ -299,3 +302,78 @@ def build_sub_system(ctx: Context) -> str:
         f"Workspace: {ctx.workspace}. Return only a concise final answer/report. "
         f"Do not ask questions; make reasonable assumptions."
     )
+
+
+def _token_estimate(messages: list[dict], tools: list | None) -> int:
+    """Cheap prompt-size estimator used for history budgeting.
+
+    A59 showed `chars/4` under-counts real BEE turns by ~22% against the model's
+    tokenizer, so the estimate is scaled up. It only has to be directionally
+    correct to choose which *old* message pairs to drop first.
+    """
+    n = 0
+    for m in messages:
+        n += len(m.get("content") or "") // 4
+        for tc in m.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            args = fn.get("arguments") or ""
+            n += (len(fn.get("name", "")) + len(args if isinstance(args, str) else str(args))) // 4
+            n += 4   # id / type / overhead
+    if tools:
+        for t in tools:
+            n += len(str(t)) // 4 + 4
+    return int(n * 1.3) + len(messages) * 2
+
+
+def compact_messages(messages: list[dict], tools: list | None, num_ctx: int,
+                     completion_reserve: int = 1024,
+                     min_recent_pairs: int = 2) -> tuple[list[dict], dict]:
+    """Drop oldest tool-history pairs before the model drops them for us.
+
+    Ollama silently truncates to roughly `num_ctx / 2` when a prompt does not
+    fit (A59). This is *intentional* compaction of old history so the most
+    recent system/task/tool results are preserved, and so the event is logged
+    rather than hidden inside the server's KV cache math.
+
+    The first two messages (system + task) are never dropped. From the rest we
+    drop the oldest `assistant tool_call` + `tool result` pairs, but always keep
+    the most recent `min_recent_pairs` pairs so the model still has evidence of
+    what just happened.
+    """
+    if not num_ctx or len(messages) <= 2:
+        return messages, {"compacted": False}
+    budget = max(1024, num_ctx - completion_reserve)
+    before = _token_estimate(messages, tools)
+    if before <= budget:
+        return messages, {"compacted": False}
+
+    def count_pairs(msgs):
+        return sum(1 for j in range(2, len(msgs) - 1)
+                   if msgs[j].get("role") == "assistant" and msgs[j].get("tool_calls")
+                   and msgs[j + 1].get("role") == "tool")
+
+    kept = list(messages)
+    removed = 0
+    i = 2
+    while i < len(kept) - 1 and _token_estimate(kept, tools) > budget:
+        # assistant tool-call turn followed by its tool result
+        if (kept[i].get("role") == "assistant" and kept[i].get("tool_calls")
+                and kept[i + 1].get("role") == "tool"):
+            if count_pairs(kept) <= min_recent_pairs:
+                break
+            del kept[i:i + 2]
+            removed += 2
+        # any orphaned tool result older than recent history
+        elif kept[i].get("role") == "tool":
+            del kept[i]
+            removed += 1
+        else:
+            i += 1
+
+    if removed:
+        after = _token_estimate(kept, tools)
+        log.warning("compacted prompt history: dropped %d messages (%d -> %d est tokens)",
+                    removed, before, after)
+        return kept, {"compacted": True, "removed": removed,
+                      "estimate_before": before, "estimate_after": after}
+    return messages, {"compacted": False, "estimate": before, "budget": budget}

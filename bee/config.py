@@ -44,10 +44,17 @@ class OllamaCfg:
     # box that means ~2 GB of bee4b squatting in VRAM between tasks.
     # "60s" unloads it shortly after the last local call. "" = Ollama default.
     keep_alive: str = "60s"
-    # KV-cache context window. A big ctx (8192) suits an 8B that already fits in
-    # VRAM, but for a 4B on a 4 GB card a leaner 4096 keeps the whole model + KV
-    # cache on-GPU (fully accelerated, no CPU offload) — faster first token.
+    # KV-cache context window. Must hold a WHOLE agent turn: with the real system
+    # prompt + 30 tool schemas a turn is 5772-7339 tokens (A59, measured), and
+    # Ollama does not degrade gracefully when it does not fit — it evaluates half
+    # the window and answers anyway. 8192 is also the largest setting that stays
+    # entirely in this box's 4 GB VRAM (/api/ps: 12288 offloads 0.46 GB and is
+    # ~35% slower per call). Kept in sync with config.yaml, which ships it.
     num_ctx: int = 8192
+    # Start `ollama serve` at boot when the server is not already running. BEE's
+    # local tier is the product; until A60 nothing could bring the server up, so a
+    # reboot silently relegated every task to cloud/deterministic mode.
+    autostart: bool = True
 
 
 @dataclass

@@ -40,6 +40,20 @@ LESSONS_DIR = MEMORY_DIR / "lessons"
 PROFILE_MD = MEMORY_DIR / "profile.md"
 LONGTERM_MD = MEMORY_DIR / "longterm.md"
 SYSTEM_MD = MEMORY_DIR / "system.md"
+# The kernel's two append-only audit streams. Module-level (not `PROJECT_ROOT /
+# "memory" / ...` written out at each call site) because a hardcoded path cannot
+# be redirected: every scored eval run rebuilt its kernel inside `_isolated_memory()`
+# expecting sessions + receipts to follow, and they did not — 1568 of 1571 rows in
+# the user's receipts.jsonl and 23 eval-*.json files in memory/sessions/ came from
+# eval runs (measured 2026-10-13).
+SESSIONS_DIR = MEMORY_DIR / "sessions"
+RECEIPTS_FILE = MEMORY_DIR / "receipts.jsonl"
+# Same reason, different stream: bee.security.audit.audit_path() used to build
+# `PROJECT_ROOT / "audit.jsonl"` inline. PROJECT_ROOT is the checkout and is never
+# redirected, so neither the suite nor the eval could move it and every scored run's
+# tool rows appended to the user's audit file (3142 rows measured 2026-10-13, with no
+# session field in the row — so the residue was not even removable afterwards).
+AUDIT_FILE = PROJECT_ROOT / "audit.jsonl"
 
 SKILLS_DIR = PROJECT_ROOT / "skills"
 MODELS_YAML = PROJECT_ROOT / "models.yaml"
@@ -72,6 +86,7 @@ def ensure_core_dirs() -> None:
         MEMORY_DIR,
         DIARY_DIR,
         LESSONS_DIR,
+        SESSIONS_DIR,
         SKILLS_DIR,
         VECTOR_DIR,
         EVALS_DIR,

@@ -1,8 +1,8 @@
-"""QLoRA fine-tuning of Qwen3-8B for BEE — single 8 GB GPU friendly.
+"""QLoRA fine-tuning of Qwen2.5-3B-Instruct for BEE — single 4 GB GPU friendly.
 
 Data:    train/sft_v1.jsonl  (bee.pipeline.build_sft output; messages w/ loss flags)
 Out:     models/<name>/  (adapter + config.json)
-Hardware: RTX 3050 8 GB — 4-bit base (~4.7 GB) + LoRA r=16 (~0.2 GB) +
+Hardware: RTX 3050 4 GB — 4-bit base (~1.9 GB) + LoRA r=16 (~0.2 GB) +
           activations (grad-ckpt, seq 4096) fits with headroom.
 Time estimate (honest ranges, 3050): 10k samples ≈ 1–3 days; 2k samples ≈ 4–10 h.
 
@@ -32,7 +32,7 @@ def load_samples(path: Path) -> list[dict]:
             row = json.loads(ln)
             msgs = row.get("messages")
             assert msgs and isinstance(msgs, list), "missing messages"
-            assert all(m.get("role") in ("user", "assistant", "tool") for m in msgs)
+            assert all(m.get("role") in ("system", "user", "assistant", "tool") for m in msgs)
             assert any(m.get("loss") for m in msgs), "no loss=True turns"
             out.append(row)
         except Exception as e:
@@ -58,7 +58,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--base", default="Qwen/Qwen3-8B")
+    ap.add_argument("--base", default="Qwen/Qwen2.5-3B-Instruct")
     ap.add_argument("--r", type=int, default=16)
     ap.add_argument("--alpha", type=int, default=32)
     ap.add_argument("--seq", type=int, default=4096)

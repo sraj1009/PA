@@ -920,6 +920,15 @@ def main(argv=None):
     except Exception:
         pass
 
+    # Same shape for the local model server: if Ollama is not already answering,
+    # start it on a background thread so the first task does not silently degrade
+    # to cloud/deterministic mode because of a reboot (A60).
+    try:
+        from .agent import localserver
+        localserver.start_background(cfg)
+    except Exception:
+        pass
+
     if args.mode == "repl":
         _repl(cfg)
     elif args.mode == "voice":

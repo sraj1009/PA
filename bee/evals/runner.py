@@ -48,7 +48,8 @@ def _isolated_memory():
     premise is still in the data the run reads) while discarding what the run
     created."""
     keys = ("MEMORY_DIR", "DIARY_DIR", "LESSONS_DIR", "VECTOR_DIR",
-            "PROFILE_MD", "LONGTERM_MD", "SYSTEM_MD")
+            "PROFILE_MD", "LONGTERM_MD", "SYSTEM_MD",
+            "SESSIONS_DIR", "RECEIPTS_FILE", "AUDIT_FILE")
     saved = {k: getattr(paths, k) for k in keys}
     tmp = Path(tempfile.mkdtemp(prefix="bee_eval_memory_"))
     try:
@@ -64,6 +65,18 @@ def _isolated_memory():
         paths.PROFILE_MD = root / "profile.md"
         paths.LONGTERM_MD = root / "longterm.md"
         paths.SYSTEM_MD = root / "system.md"
+        # The kernel builds its ReceiptLog/sessions dir at construction time, and
+        # `_run_suite` builds the kernel inside this context manager — so these two
+        # have to be redirected here or the run writes the user's audit trail
+        # (measured 2026-10-13: 1568 of 1571 live receipt rows and 2540 of 2543
+        # rotated ones carry an `eval-*` session id, plus 23 eval session files).
+        paths.SESSIONS_DIR = root / "sessions"
+        paths.RECEIPTS_FILE = root / "receipts.jsonl"
+        # audit.jsonl is the third stream of that trio (one row per exec-tool call
+        # and per guard decision). It lives at the project root, so it needs its own
+        # entry — and unlike the receipts it stores no session id, so a run's rows
+        # cannot be found and removed afterwards.
+        paths.AUDIT_FILE = tmp / "audit.jsonl"
         yield root
     finally:
         for k, v in saved.items():

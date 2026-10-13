@@ -43,7 +43,10 @@ def run_checks(cfg) -> list[dict]:
         if missing:
             add(False, "required models", "missing: " + ", ".join(missing) + " — ollama pull <name>")
     except Exception as e:
-        add(False, "ollama", f"OFFLINE ({str(e)[:60]}) — start Ollama")
+        # A60: BEE can start this server itself, so the advice depends on whether it
+        # tried and what happened — a plain "start Ollama" was wrong half the time.
+        from ..agent import localserver
+        add(False, "ollama", f"OFFLINE ({str(e)[:40]}) — {localserver.offline_hint(cfg)}")
 
     has_key = bool(cfg.cloud.api_key)
     add(bool(cfg.cloud.enabled and cfg.cloud.llm and has_key),

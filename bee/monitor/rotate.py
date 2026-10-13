@@ -77,8 +77,8 @@ def rotate_all(workspace=None) -> dict:
     ws = Path(workspace) if workspace else paths.PROJECT_ROOT
     targets = [
         (paths.METRICS_FILE, CAP_METRICS, 2),
-        (paths.PROJECT_ROOT / "audit.jsonl", CAP_AUDIT, 2),
-        (paths.PROJECT_ROOT / "memory" / "receipts.jsonl", CAP_RECEIPTS, 2),
+        (paths.AUDIT_FILE, CAP_AUDIT, 2),
+        (paths.RECEIPTS_FILE, CAP_RECEIPTS, 2),
         (ws / "automation" / "executions.jsonl", CAP_EXECUTIONS, 2),
     ]
     report: dict[str, str] = {}

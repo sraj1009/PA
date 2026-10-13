@@ -67,6 +67,9 @@ _UNIT = [
     "test_capabilities", "test_offline", "test_audit",
     "test_config_precedence", "test_events", "test_providers",
     "test_plan_store",
+    # A60 (2026-10-13): Ollama autostart — the launch, its gating, and the
+    # router seam that used to degrade a task because nothing could start the server.
+    "test_localserver",
     # A52 (2026-10-10): the eval headline is the run that ran, not the ledger.
     "test_eval_score",
     # A37 (2026-10-09): the real LLMClient streaming path (only the transport is
@@ -323,12 +326,34 @@ def _isolate_append_only_streams():
         memroot = root / "memory"
         shutil.copytree(paths.MEMORY_DIR, memroot, dirs_exist_ok=True)
         for attr, sub in (("MEMORY_DIR", ""), ("DIARY_DIR", "diary"),
-                          ("LESSONS_DIR", "lessons"), ("VECTOR_DIR", "vectors")):
+                          ("LESSONS_DIR", "lessons"), ("VECTOR_DIR", "vectors"),
+                          # the kernel's audit streams. They live under memory/ but
+                          # are their own module constants now, so a list of the
+                          # older names silently misses them: every kernel built
+                          # without an explicit sessions_dir appended to the user's
+                          # real receipts.jsonl (measured 2026-10-13: 1569 of 1572
+                          # rows carry an `eval-*` session id).
+                          ("SESSIONS_DIR", "sessions")):
             _STREAM_MP.setattr(paths, attr, memroot / sub if sub else memroot)
         for attr, fn in (("PROFILE_MD", "profile.md"),
                          ("LONGTERM_MD", "longterm.md"),
-                         ("SYSTEM_MD", "system.md")):
+                         ("SYSTEM_MD", "system.md"),
+                         ("RECEIPTS_FILE", "receipts.jsonl")):
             _STREAM_MP.setattr(paths, attr, memroot / fn)
+    except Exception:
+        pass
+
+    # audit.jsonl sits at the project ROOT, not under memory/, so the block above
+    # cannot reach it. Copied so `recent(n)` readers (the /audit view, the
+    # dashboard) still see the real trail while writes go to the copy.
+    try:
+        import shutil
+
+        if paths.AUDIT_FILE.exists():
+            shutil.copy2(paths.AUDIT_FILE, root / "audit.jsonl")
+        for rot in sorted(paths.AUDIT_FILE.parent.glob(paths.AUDIT_FILE.name + ".*")):
+            shutil.copy2(rot, root / rot.name)
+        _STREAM_MP.setattr(paths, "AUDIT_FILE", root / "audit.jsonl")
     except Exception:
         pass
 

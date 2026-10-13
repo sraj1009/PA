@@ -56,3 +56,41 @@ def test_build_min_quality_filters(tmp_path, monkeypatch):
     for line in out.read_text(encoding="utf-8").splitlines():
         md = json.loads(line)["metadata"]
         assert "quality" in md and 0.0 <= md["quality"] <= 1.0
+
+
+def test_failed_or_blocked_tool_calls_are_not_trained(monkeypatch, tmp_path):
+    """A guard-blocked or broken tool call must not become the desired behaviour in
+    the SFT dataset — A60. The episode recovers, so validate passes, but the bad
+    event is still dropped by the message builder."""
+    bad_row = {
+        "task": "do the thing", "output": "done", "ok": True, "events": [
+            {"tool": "shell", "args": "{}", "ok": True, "result": "ok output"},
+            {"tool": "shell", "args": "{}", "ok": False,
+             "result": "{\"blocked\": true, \"reason\": \"guard\"}"},
+            {"tool": "shell", "args": "{}", "ok": True, "result": "recovered output"},
+        ], "model": "local", "date": "2026-10-13",
+    }
+    monkeypatch.setattr(build_sft, "load_episodes", lambda: [bad_row])
+    monkeypatch.setattr(build_sft, "load_golden", lambda: [])
+    out = tmp_path / "sft.jsonl"
+    stats = build_sft.build(out=out)
+    assert stats["dropped_bad_events"] == 1
+    sample = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+    tool_contents = [m.get("content") for m in sample["messages"] if m["role"] == "tool"]
+    assert "ok output" in tool_contents
+    assert "recovered output" in tool_contents
+    assert "{\"blocked\": true" not in str(tool_contents)
+
+
+def test_tool_messages_carry_matching_tool_call_ids(monkeypatch, tmp_path):
+    row = {"task": "t", "output": "ok", "ok": True, "events": [
+        {"tool": "shell", "args": "{}", "ok": True, "result": "r1"},
+    ], "model": "local", "date": "2026-10-13"}
+    monkeypatch.setattr(build_sft, "load_episodes", lambda: [row])
+    monkeypatch.setattr(build_sft, "load_golden", lambda: [])
+    out = tmp_path / "sft.jsonl"
+    build_sft.build(out=out)
+    sample = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+    assistant = [m for m in sample["messages"] if m["role"] == "assistant" and m.get("tool_calls")][0]
+    tool = [m for m in sample["messages"] if m["role"] == "tool"][0]
+    assert assistant["tool_calls"][0]["id"] == tool["tool_call_id"]

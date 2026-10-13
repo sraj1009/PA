@@ -156,6 +156,82 @@ def test_keep_alive_litellm_path(monkeypatch):
     assert captured["kw"].get("extra_body", {}).get("keep_alive") == "60s"
 
 
+# ------------------------------------------------- local server options (A58)
+class _FakeResp:
+    """One stand-in that satisfies both call shapes: `chat()` reads
+    `.choices[0].message`, `_litellm_stream` iterates chunks reading
+    `.choices[0].delta`."""
+
+    def __init__(self, text: str = "hi"):
+        self.choices = [SimpleNamespace(
+            message=SimpleNamespace(content=text, tool_calls=None),
+            delta=SimpleNamespace(content=text, tool_calls=None))]
+        self.usage = None
+
+    def __iter__(self):
+        yield self
+
+
+def _capture_litellm(monkeypatch, resp=None):
+    """Fake the ONLY external dependency of the primary path, and hand back the
+    kwargs it would have sent."""
+    from bee.agent import client as c
+    captured: dict = {}
+
+    def fake_completion(**kw):
+        captured["kw"] = kw
+        return resp or _FakeResp()
+
+    monkeypatch.setattr(c.litellm, "completion", fake_completion)
+    return captured
+
+
+def test_num_ctx_reaches_the_primary_litellm_path(monkeypatch):
+    """`cfg.ollama.num_ctx` was sent by the native fallbacks (`_native_ollama`,
+    `_ollama_stream`) but by NOTHING on the primary path, so in the shipped
+    configuration (litellm installed) the local model always ran with Ollama's own
+    context default and silently truncated BEE's prompt. Live on this box, same
+    13.3k-token prompt: dropped -> 2050 tokens evaluated, honoured -> 13342.
+
+    The form matters and was measured, not guessed: a TOP-LEVEL litellm param maps
+    into Ollama's `options`; `extra_body={"num_ctx": …}` arrives as a bare body
+    field Ollama ignores (2050), and `extra_body={"options": {…}}` replaces
+    litellm's whole options dict, dropping max_tokens (289 tokens generated when
+    8 were asked)."""
+    captured = _capture_litellm(monkeypatch)
+    LLMClient(_mk_cfg()).chat("local", [{"role": "user", "content": "hi"}])
+    assert captured["kw"].get("num_ctx") == 8192, list(captured["kw"])
+    # keep_alive still rides in extra_body — Ollama DOES accept it at body top level
+    assert captured["kw"].get("extra_body", {}).get("keep_alive") == "60s"
+    assert "num_ctx" not in captured["kw"].get("extra_body", {}), \
+        "num_ctx in extra_body is the form Ollama ignores"
+
+
+def test_num_ctx_applies_to_the_streaming_path_too(monkeypatch):
+    """Same omission, second method: `chat_stream` built its kwargs without
+    num_ctx *or* keep_alive, so the voice/`/talk` surface (always streaming) both
+    truncated and left the model loaded for Ollama's 5-minute default."""
+    captured = _capture_litellm(monkeypatch)
+    LLMClient(_mk_cfg()).chat_stream("local", [{"role": "user", "content": "hi"}],
+                                     lambda s: None)
+    assert captured["kw"].get("num_ctx") == 8192, list(captured["kw"])
+    assert captured["kw"].get("extra_body", {}).get("keep_alive") == "60s"
+
+
+def test_local_only_params_are_never_sent_to_a_cloud_provider(monkeypatch):
+    """litellm raises UnsupportedParamsError for a param a provider does not
+    implement unless drop_params=True (which BEE does not set) — so num_ctx must
+    stay on the local branch or every cloud call breaks."""
+    captured = _capture_litellm(monkeypatch)
+    cfg = _mk_cfg()
+    cfg.cloud.enabled = True
+    cfg.cloud.llm = "openai/gpt-4o-mini"
+    cfg.cloud.api_key = "test-key"
+    LLMClient(cfg).chat("cloud", [{"role": "user", "content": "hi"}])
+    assert "num_ctx" not in captured["kw"], list(captured["kw"])
+    assert "extra_body" not in captured["kw"], list(captured["kw"])
+
+
 def test_is_gemini3plus_detection():
     from bee.agent.client import _is_gemini3plus as g
     assert g("gemini/gemini-3.6-flash") is True

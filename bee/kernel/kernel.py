@@ -149,9 +149,8 @@ class AgentKernel:
                  max_attempts: int = 2, capabilities_path=None, memory_store_path=None):
         self.ctx = ctx
         self.approver = approver if approver is not None else guard.make_approver(ctx.guard_mode)
-        self.sessions_dir = Path(sessions_dir) if sessions_dir else (paths.PROJECT_ROOT / "memory" / "sessions")
-        self.receipts = ReceiptLog(receipts_path if receipts_path else
-                                   paths.PROJECT_ROOT / "memory" / "receipts.jsonl")
+        self.sessions_dir = Path(sessions_dir) if sessions_dir else paths.SESSIONS_DIR
+        self.receipts = ReceiptLog(receipts_path if receipts_path else paths.RECEIPTS_FILE)
         # `x or Default()` is the wrong idiom for injected collaborators: an
         # intentionally empty ToolBus/EventBus is falsy (__len__) and would be
         # silently replaced by the full default bus — i.e. a caller's lockdown

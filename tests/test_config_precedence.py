@@ -148,3 +148,24 @@ def test_engine_layer_independent(isolated):
     assert "settings.json" in cfg.precedence.get("engine", "")
     assert cfg.precedence["engine"] == \
         "settings.json (independent of Config — see matrix)"
+
+
+# ------------------------------------------------- shipped local context window
+# A59: measured 2026-10-13 against the live server with BEE's REAL system prompt
+# and the 30 shipped tool schemas. Every one of the 11 model-using eval tasks was
+# replayed twice — once at the shipped window (delivered = prompt_eval_count) and
+# once at num_ctx=12288 with num_predict=1 (required = the true size of the same
+# prompt). Real turns are 5772-7339 tokens and the shipped 4096 delivered 2050 of
+# them (26-35%): Ollama dropped the rest before the model saw it, yet still
+# answered with HTTP 200. The floor is the largest real turn measured.
+MIN_LOCAL_TURN_TOKENS = 7339
+
+
+def test_shipped_local_num_ctx_holds_a_real_agent_turn():
+    cfg = load_config(paths.CONFIG_YAML)
+    assert cfg.ollama.num_ctx >= MIN_LOCAL_TURN_TOKENS, (
+        f"config.yaml ships ollama.num_ctx={cfg.ollama.num_ctx} but a real BEE "
+        f"agent turn is up to {MIN_LOCAL_TURN_TOKENS} tokens of prompt. Below that "
+        "the local tier is silently truncated by Ollama — the model answers without "
+        "its own tool results. Raise it (8192 is the largest window that stays "
+        "entirely in this card's VRAM: /api/ps shows 12288 offloads 0.46 GB).")

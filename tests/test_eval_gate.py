@@ -223,3 +223,43 @@ def test_restore_workspace_undoes_everything_the_run_touched(tmp_path):
     assert not (repo / "eval_probe.txt").exists()
     # work that was already uncommitted before the run is never reverted
     assert (repo / "dirty_before.txt").read_text(encoding="utf-8") == "MY UNCOMMITTED WORK\n"
+
+
+# ------------------------------------------------ gate identity contract (A##)
+def test_the_route_keeps_the_pinned_engine_as_its_name():
+    """gate.set_baseline / model_quality_gate build `models_used` from every row's
+    `model`, and refuse a model that never appears. That only works because
+    `router.route()` keeps an explicit `model=` argument as the returned route
+    NAME (source='explicit'), so AgentResult.model becomes the engine string
+    ('bee4b'), not the coarse 'local'. If a refactor collapses that back to
+    'local', the gate silently can never seed — and every test in this file
+    stays green because they fake `run_suite` outright."""
+    from bee.agent.router import route
+    from bee.config import Config
+    cfg = Config()
+    r = route("tell me a story about dragons", cfg, model="bee4b")
+    assert r["name"] == "bee4b", r
+    assert r["source"] == "explicit", r
+    # a non-route model string must survive too (candidate = 'qwen2.5:3b' etc.)
+    r2 = route("hello there", cfg, model="qwen2.5:3b")
+    assert r2["name"] == "qwen2.5:3b", r2
+
+
+def test_the_eval_row_takes_model_from_agentresult_not_route_source():
+    """The other half of the same contract: `runner._run_tasks` must put
+    `last_r.model` (the engine string from AgentResult) into row['model'], not
+    `last_r.route_source`. A swap would rewrite every row to 'explicit' / 'fastpath'
+    / 'hybrid-speed' and the gate would refuse to seed with 'bee4b was never
+    invoked during the suite'. The gate's unit tests fake run_suite and cannot
+    see this drift — hence a static source check, the same pattern that re-feeds
+    A27a/A37a into themselves so the guard cannot pass by being unable to fire."""
+    import inspect
+    from bee.evals import runner
+    src = inspect.getsource(runner._run_tasks)
+    # two row literals exist: the skipped-task stub (`"model": None`) and the
+    # executed-task row we care about. Assert on the executed one.
+    assert '"model": last_r.model' in src, (
+        "the executed eval row must record last_r.model (the answered engine); "
+        "if it reads route_source instead the J3 gate silently can never seed")
+    assert '"model": last_r.route_source' not in src, (
+        "eval row 'model' must not read route_source")
