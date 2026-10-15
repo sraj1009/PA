@@ -207,6 +207,16 @@ def model_quality_gate(ctx, candidate: str | None = None, margin: int | None = N
         return {"ok": False, "reasons": [f"candidate {candidate!r} was never invoked during the "
                                          "suite (escalation/fallback?) — cannot score"]}
 
+    # A62: both sides count only tasks that actually RAN (skipped rows are excluded),
+    # so their denominators can differ — and the score test below is a raw pass COUNT.
+    # A candidate that skipped the hard half of the suite therefore read as a clean
+    # 12/12 against a baseline of 10/21 and would have been promoted.
+    if cand["total"] < base["total"]:
+        return {"ok": False, "reasons": [
+            f"candidate was scored on {cand['total']} task(s) but the {active} baseline "
+            f"has {base['total']} — a smaller task set is not comparable. Re-run with "
+            "the skipped tasks available (usually: cloud up)."]}
+
     structural = set(structural_task_ids())
     regressed = sorted(tid for tid, ok in (base.get("per_task") or {}).items()
                        if ok and tid in structural and not cand["per_task"].get(tid))

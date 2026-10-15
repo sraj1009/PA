@@ -106,6 +106,20 @@ def test_candidate_below_margin_rejected(env, monkeypatch):
     assert not env["models_yaml"].exists()          # NOT promoted
 
 
+def test_a_candidate_that_ran_fewer_tasks_cannot_be_compared(env, monkeypatch):
+    """A62: `run_score` drops skipped rows, so the two sides can have different
+    denominators while the score test compares raw pass COUNTS. Baseline 10/21,
+    candidate 12/12 (only 12 tasks ran, because cloud was down) used to read as an
+    improvement and promote the candidate."""
+    _fake_suite({"bee4b": {**{f"t{i}": True for i in range(10)},
+                           **{f"t{i}": False for i in range(10, 21)}},
+                 "bee4b-v2": {f"t{i}": True for i in range(12)}}, monkeypatch)
+    r = gate.model_quality_gate(env["ctx"], candidate="bee4b-v2", margin=1)
+    assert not r["ok"], r
+    assert any("not comparable" in reason for reason in r["reasons"]), r["reasons"]
+    assert not env["models_yaml"].exists()
+
+
 def test_structural_regression_blocks_promotion(env, monkeypatch):
     # candidate scores HIGHER overall but breaks a structural task that
     # passed in the baseline — promotion must still be refused

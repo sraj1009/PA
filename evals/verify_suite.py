@@ -1047,7 +1047,17 @@ def run_rag(suite: Suite, scale: int):
 
 # ----------------------------------------------------------------- report
 def _latest_llm_run():
-    """Latest result per task id across evals/results.jsonl (batch-tolerant)."""
+    """The agent-eval evidence for REPORT.md, as TWO separately-labelled numbers (A62).
+
+    `evals/results.jsonl` is a ledger: the latest row per task id across every run
+    this machine recorded. This function used to return only that cross-history
+    score, and the report line called it "(latest run)" — so evals/REPORT.md claimed
+    19/21 while the last real invocation scored 18/21, and any partial batch run
+    inherited passes earned by code that no longer exists.
+
+    Now the last recorded INVOCATION comes from `results_summary.json` (run-scoped,
+    and it says how many tasks actually ran and how many were skipped), with the
+    cross-history number kept but named for what it is."""
     import json as _json
     p = ROOT / "evals" / "results.jsonl"
     if not p.exists():
@@ -1070,9 +1080,55 @@ def _latest_llm_run():
         return None
     rows = [latest[t] for t in order]
     ok = sum(1 for r in rows if r.get("ok"))
+    summary = {}
+    ps = ROOT / "evals" / "results_summary.json"
+    if ps.exists():
+        try:
+            summary = _json.loads(ps.read_text(encoding="utf-8"))
+        except Exception:
+            summary = {}
     return {"ts": max(r.get("ts", "") for r in rows), "n": len(rows), "ok": ok,
             "score": f"{ok}/{len(rows)}",
-            "failures": [r.get("id") for r in rows if not r.get("ok")][:12]}
+            "failures": [r.get("id") for r in rows if not r.get("ok")][:12],
+            "run_ts": summary.get("ts"), "run_score": summary.get("run_score"),
+            "run_n": summary.get("run_n"), "run_failures": summary.get("run_failures"),
+            "carried": summary.get("carried"), "skipped": summary.get("skipped"),
+            "single_run": bool(summary.get("single_run"))}
+
+
+def agent_eval_lines(llm) -> list[str]:
+    """REPORT.md bullets for the agent eval, worded so a partial or skip-inflated
+    run can never read as a suite score."""
+    if not llm:
+        return ["- Agent eval suite: no runs recorded yet — `python -m bee.cli eval` "
+                "(needs the LLM)."]
+    if llm["single_run"] and llm.get("run_score"):
+        fl = llm.get("run_failures") or []
+        out = [f"- Agent eval suite ({llm['run_ts']}, full suite in one run): "
+               f"**{llm['run_score']}** tasks passed."]
+        if fl:
+            out.append(f"  failing: {', '.join(fl)}")
+        return out
+    parts = []
+    if llm.get("carried"):
+        parts.append(f"{llm['carried']} result(s) carried from earlier runs of "
+                     "different code")
+    if llm.get("skipped"):
+        parts.append(f"{llm['skipped']} skipped (never ran)")
+    if not parts:
+        parts.append("no single run covers the suite")
+    if not llm.get("run_score"):
+        return [f"- Agent eval suite (ledger, latest row per task up to {llm['ts']}): "
+                f"**{llm['score']}** — historical, not one run. Last-run summary "
+                f"(evals/results_summary.json) missing."]
+    return [
+        f"- Agent eval suite, last recorded run {llm['run_ts']}: **{llm['run_score']}** "
+        f"over the {llm['run_n']} task(s) that ran — NOT a suite score "
+        f"({'; '.join(parts)}).",
+        f"- Ledger (latest row per task across all runs, up to {llm['ts']}): "
+        f"**{llm['score']}** of {llm['n']} — historical, not one run."
+        + (f" failing there: {', '.join(llm['failures'])}" if llm["failures"] else ""),
+    ]
 
 
 def _load_bench():
@@ -1094,7 +1150,8 @@ def write_report(stats_list: list[dict], cfg, bench, llm, timings: dict, path: P
     L.append("# BEE — Verification Report (Phase 4)")
     L.append("")
     L.append(f"- Generated: {datetime.now().strftime('%Y-%m-%d %H:%M %Z')}")
-    L.append(f"- Machine: RTX 3050 8GB / Windows / Ollama `{cfg.ollama.model}`")
+    L.append(f"- Machine: RTX 3050 (nvidia-smi: 4094 MiB = 4 GB) / Windows / "
+             f"Ollama `{cfg.ollama.model}`")
     if cfg.cloud.enabled and cfg.cloud.llm:
         L.append(f"- Cloud tier: configured ({cfg.cloud.llm}) — "
                  + ("credentialed" if cloud_ok else "**no API key set — treated as down (calls would 401)**"))
@@ -1157,19 +1214,16 @@ def write_report(stats_list: list[dict], cfg, bench, llm, timings: dict, path: P
         L.append("> - 40,960 ctx: model footprint 11 GB → 80%/20% CPU/GPU → 4.6 tok/s")
         L.append("> - 8,192 ctx: model footprint 6.6 GB → 66%/34% CPU/GPU → 4.6 tok/s")
         L.append("> Ollama only moves a model fully onto the GPU when the WHOLE load")
-        L.append("> (weights + KV + CUDA context) fits the VRAM estimate; on this 8 GB")
-        L.append("> card the 8B model sits on the boundary, so a partial offload (which")
+        L.append("> (weights + KV + CUDA context) fits the VRAM estimate. This card is")
+        L.append("> 4 GB — nvidia-smi reports 4094 MiB; the 8 GB figure this report printed")
+        L.append("> until 2026-10-15 was wrong (A59's `size_vram` table is the evidence),")
+        L.append("> so an 8B model is far from fitting, and a partial offload (which")
         L.append("> does not speed up generation — the CPU layers remain the bottleneck)")
         L.append("> is the best achievable for qwen3:8b here. Full-GPU speed (~15-25 tok/s)")
         L.append("> would come from a ≤4B model, a bigger card, or ~12 GB VRAM.")
         L.append("> Latency is the only thing affected; correctness is unaffected.")
         L.append("")
-    if llm:
-        L.append(f"- Agent eval suite (latest run {llm['ts']}): **{llm['score']}** tasks passed.")
-        if llm["failures"]:
-            L.append(f"  failing: {', '.join(llm['failures'])}")
-    else:
-        L.append("- Agent eval suite: no runs recorded yet — `python -m bee.cli eval` (needs the LLM).")
+    L.extend(agent_eval_lines(llm))
     L.append("")
     L.append("## What this report does and does not guarantee")
     L.append("")

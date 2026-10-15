@@ -127,6 +127,28 @@ def test_the_pytest_harness_itself_keeps_the_audit_streams_off_the_real_tree():
     assert not str(paths.AUDIT_FILE).startswith(str(paths.PROJECT_ROOT)), paths.AUDIT_FILE
 
 
+def test_the_pytest_harness_keeps_the_scorer_and_the_flywheel_off_the_real_tree():
+    """A61: `train/` and `evals/` were the two write roots conftest never moved.
+    So a suite run appended the scripted model's rows to the SAME ledger `bee.cli eval`
+    reads as its history (and that `evals/verify_suite.py` quotes into the tracked
+    `evals/REPORT.md`), and teach-back appended a fake "cloud teacher" golden per
+    scored turn to `train/golden/cloud_golden.jsonl` — the corpus the nightly SFT build
+    turns into training prompts. Measured 2026-10-15: 2 new `ok-response` goldens from
+    one baseline run. Pinned as "the resolved path is outside the checkout" for every
+    constant rather than as a source-text check, because the bug class is a stream
+    nobody listed and a typo would still leave the real path in the file."""
+    for name in ("TRAIN_DIR", "EPISODES_DIR", "ROUTER_MODEL",
+                 "EVALS_DIR", "EVAL_RESULTS"):
+        val = pathlib.Path(getattr(paths, name))
+        assert not val.is_relative_to(paths.PROJECT_ROOT), (
+            f"paths.{name} still resolves inside the checkout ({val}): a suite run "
+            "writes the user's real training corpus / eval ledger")
+    # copying, not emptying: the ledger and task list must still be READABLE, or a
+    # test that drives the real runner fails for the wrong reason.
+    assert (paths.EVALS_DIR / "tasks.yaml").exists(), paths.EVALS_DIR
+    assert (paths.TRAIN_DIR / "golden" / "cloud_golden.jsonl").exists()
+
+
 def _digest(root) -> str:
     import hashlib
     h = hashlib.sha256()
@@ -141,9 +163,11 @@ def _digest(root) -> str:
 def _user_state_snapshot() -> tuple:
     """Everything a scored run must leave byte-for-byte alone."""
     real_memory = paths.PROJECT_ROOT / "memory"
-    audit = paths.PROJECT_ROOT / "audit.jsonl"
+    streams = [paths.PROJECT_ROOT / "audit.jsonl",
+               paths.PROJECT_ROOT / "evals" / "results.jsonl",
+               paths.PROJECT_ROOT / "train" / "golden" / "cloud_golden.jsonl"]
     return (_digest(real_memory),
-            audit.read_bytes() if audit.exists() else b"")
+            *(p.read_bytes() if p.exists() else b"" for p in streams))
 
 
 def test_a_real_scored_run_leaves_the_users_audit_state_byte_identical(tmp_path, monkeypatch):
@@ -165,8 +189,9 @@ def test_a_real_scored_run_leaves_the_users_audit_state_byte_identical(tmp_path,
     assert rows and rows[0]["ok"], rows
     assert _user_state_snapshot() == before, (
         "the scored run wrote into the user's real audit state (memory/sessions, "
-        "memory/receipts.jsonl, memory/checkpoints or audit.jsonl) — see "
-        "paths.SESSIONS_DIR / paths.RECEIPTS_FILE / paths.AUDIT_FILE")
+        "memory/receipts.jsonl, memory/checkpoints, audit.jsonl, evals/results.jsonl "
+        "or train/golden/) — see paths.SESSIONS_DIR / paths.RECEIPTS_FILE / "
+        "paths.AUDIT_FILE / paths.EVAL_RESULTS / paths.TRAIN_DIR")
 
 
 class _SpyCtx:

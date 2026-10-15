@@ -336,6 +336,46 @@ def test_compact_is_noop_when_there_is_headroom():
     assert compacted is msgs
     assert info["compacted"] is False
 
+
+def _fat_tools():
+    # a fixed floor compaction cannot touch: tool schemas ride on every turn
+    return [{"type": "function", "function": {"name": f"t{i}", "description": "d" * 400}}
+            for i in range(30)]
+
+def _pairs(n):
+    base = [{"role": "system", "content": "s" * 200}, {"role": "user", "content": "t" * 200}]
+    hist = []
+    for i in range(n):
+        hist.append({"role": "assistant", "content": "",
+                     "tool_calls": [{"id": f"c{i}", "function": {"name": "shell", "arguments": "{}"}}]})
+        hist.append({"role": "tool", "tool_call_id": f"c{i}", "content": "r" * 400})
+    return base + hist
+
+def _tool_pairs(msgs):
+    return sum(1 for j in range(2, len(msgs) - 1)
+               if msgs[j].get("role") == "assistant" and msgs[j].get("tool_calls")
+               and msgs[j + 1].get("role") == "tool")
+
+def test_compaction_reports_when_dropping_more_would_still_not_fit():
+    # A60c follow-up: the real web_search_tool turn compacted to 8434 est tokens
+    # against a 7168 budget and the event claimed nothing about it. It must say so.
+    msgs = _pairs(3)
+    compacted, info = compact_messages(msgs, _fat_tools(), num_ctx=2048, completion_reserve=512)
+    assert info["compacted"] is True
+    assert info["removed"] == 2
+    assert info["fits"] is False
+    assert info["estimate_after"] > info["budget"]
+    # the two most recent pairs are kept on purpose
+    assert _tool_pairs(compacted) == 2
+
+def test_compaction_reports_when_nothing_is_left_to_drop():
+    msgs = _pairs(2)
+    compacted, info = compact_messages(msgs, _fat_tools(), num_ctx=2048, completion_reserve=512)
+    assert compacted is msgs
+    assert info["compacted"] is False
+    assert info["fits"] is False
+    assert info["estimate"] > info["budget"]
+
 def test_compact_never_drops_system_or_task():
     msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "task"},
             {"role": "assistant", "content": "a" * 10000}]

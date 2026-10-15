@@ -16,7 +16,8 @@ ollama:
   timeout: 300
   # 8192 = the largest window that is both *sufficient* and *fully on-GPU*.
   # Measured 2026-10-13 with the real system prompt + the 30 shipped tool schemas:
-  # a genuine agent turn is 5875-7010 tokens, so 4096 made Ollama evaluate only
+  # a genuine agent turn is 5772-7339 tokens (10 model-using eval tasks, largest
+  # call each), so 4096 made Ollama evaluate only
   # 2050 of them (29-35%) — the model answered without ever seeing its own tool
   # results. 8192 delivers 100% at 3.25-4.28 s/call. Above it the KV cache leaves
   # VRAM on this 4 GB card (/api/ps: 12288 -> 0.46 GB off-GPU, 16384 -> 0.61 GB),
@@ -50,7 +51,7 @@ cloud:
 voice:
   enabled: true
   model: base.en           # faster-whisper size: tiny.en | base.en | small.en | medium
-  device: auto             # auto | cpu | cuda (8GB 3050 => int8 cuda works for base/small)
+  device: auto             # auto | cpu | cuda — this card is 4 GB (nvidia-smi 4094 MiB; memory/profile.md claims 8 GB, and tests/test_structured_memory.py:426 documents that conflict). int8 cuda is safe for tiny.en/base.en; small.en+ on 4 GB is unmeasured
   compute_type: int8
   sample_rate: 16000
   silence: 1.2             # seconds of quiet that ends a recording

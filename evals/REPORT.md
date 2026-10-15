@@ -1,7 +1,7 @@
 # BEE — Verification Report (Phase 4)
 
-- Generated: 2026-10-10 19:12 
-- Machine: RTX 3050 8GB / Windows / Ollama `bee4b`
+- Generated: 2026-10-15 22:23 
+- Machine: RTX 3050 (nvidia-smi: 4094 MiB = 4 GB) / Windows / Ollama `bee4b`
 - Cloud tier: configured (gemini/gemini-3.6-flash) — credentialed
 - Seed: 20261004
 
@@ -49,15 +49,17 @@ Notes per suite:
 > - 40,960 ctx: model footprint 11 GB → 80%/20% CPU/GPU → 4.6 tok/s
 > - 8,192 ctx: model footprint 6.6 GB → 66%/34% CPU/GPU → 4.6 tok/s
 > Ollama only moves a model fully onto the GPU when the WHOLE load
-> (weights + KV + CUDA context) fits the VRAM estimate; on this 8 GB
-> card the 8B model sits on the boundary, so a partial offload (which
+> (weights + KV + CUDA context) fits the VRAM estimate. This card is
+> 4 GB — nvidia-smi reports 4094 MiB; the 8 GB figure this report printed
+> until 2026-10-15 was wrong (A59's `size_vram` table is the evidence),
+> so an 8B model is far from fitting, and a partial offload (which
 > does not speed up generation — the CPU layers remain the bottleneck)
 > is the best achievable for qwen3:8b here. Full-GPU speed (~15-25 tok/s)
 > would come from a ≤4B model, a bigger card, or ~12 GB VRAM.
 > Latency is the only thing affected; correctness is unaffected.
 
-- Agent eval suite (latest run 2026-10-10T19:10:23): **19/21** tasks passed.
-  failing: dsa_graph, plan_complex
+- Agent eval suite (2026-10-15T21:49:02, full suite in one run): **20/21** tasks passed.
+  failing: dsa_lis
 
 ## What this report does and does not guarantee
 
@@ -71,4 +73,4 @@ Notes per suite:
 3. **Not claimed:** no 99.9% on open-ended LLM behaviour — that target is only
    meaningful for deterministic components and is stated here with its interval.
 
-_Total checks: 71,914 · wall time: 4.8s · overall: ALL PASS_
+_Total checks: 71,914 · wall time: 6.8s · overall: ALL PASS_

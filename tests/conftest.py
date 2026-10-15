@@ -67,7 +67,7 @@ _UNIT = [
     "test_capabilities", "test_offline", "test_audit",
     "test_config_precedence", "test_events", "test_providers",
     "test_plan_store",
-    # A60 (2026-10-13): Ollama autostart — the launch, its gating, and the
+    # A60a (2026-10-13): Ollama autostart — the launch, its gating, and the
     # router seam that used to degrade a task because nothing could start the server.
     "test_localserver",
     # A52 (2026-10-10): the eval headline is the run that ran, not the ledger.
@@ -289,13 +289,11 @@ def _isolate_append_only_streams():
     root = Path(tempfile.mkdtemp(prefix="bee_test_streams_"))
     mdir = root / "metrics"
     mdir.mkdir()
-    (root / "episodes").mkdir()
     sdir = root / "skills"
     sdir.mkdir()
     _STREAM_MP = pytest.MonkeyPatch()
     _STREAM_MP.setattr(paths, "METRICS_DIR", mdir)
     _STREAM_MP.setattr(paths, "METRICS_FILE", mdir / "metrics.jsonl")
-    _STREAM_MP.setattr(paths, "EPISODES_DIR", root / "episodes")
     # skills/ is the agent's own procedure library: teach-back writes CANDIDATE
     # cards there and the nightly `skill_gate` job evaluates them, so a test that
     # runs the flywheel would leave the user with a skill the assistant believes
@@ -356,6 +354,44 @@ def _isolate_append_only_streams():
         _STREAM_MP.setattr(paths, "AUDIT_FILE", root / "audit.jsonl")
     except Exception:
         pass
+
+    # train/ and evals/ are the OUTPUTS of the flywheel and of scoring, and neither
+    # was ever redirected (A61, measured 2026-10-15). Two live leaks came from that:
+    # a suite run appends the scripted model's rows to evals/results.jsonl — the same
+    # ledger `bee.cli eval` reads as history and evals/verify_suite.py quotes into the
+    # git-tracked evals/REPORT.md, so the fake passes became the project's own evidence
+    # — and teach-back writes a "cloud teacher" golden per scored turn into
+    # train/golden/cloud_golden.jsonl, the corpus the nightly SFT build turns into
+    # training prompts (2 rows of `resp='ok-response'` appeared mid-suite-run).
+    # ROUTER_MODEL is redirected with them: a suite-side retrain would overwrite the
+    # user's live routing model. No try/except here on purpose: the older blocks above
+    # swallow their own failures, which is exactly how a half-listed redirect stayed
+    # invisible — a broken copy must fail collection loudly, not leak into train/.
+    import shutil
+
+    troot = root / "train"
+    eroot = root / "evals"
+    (troot / "episodes").mkdir(parents=True, exist_ok=True)
+    eroot.mkdir(parents=True, exist_ok=True)
+    # copying, not emptying: the ledger, tasks.yaml and the golden corpus must stay
+    # READABLE, or a test that drives the real runner fails for the wrong reason.
+    # episodes are the exception — they are the user's real history and the SFT
+    # corpus, and reading 2 MB of live episodes would make results machine-dependent.
+    for p in sorted(paths.TRAIN_DIR.iterdir()) if paths.TRAIN_DIR.exists() else []:
+        if p.is_dir() and p.name != "episodes":
+            shutil.copytree(p, troot / p.name, dirs_exist_ok=True)
+        elif p.is_file():
+            shutil.copy2(p, troot / p.name)
+    for p in sorted(paths.EVALS_DIR.iterdir()) if paths.EVALS_DIR.exists() else []:
+        if p.is_dir():
+            shutil.copytree(p, eroot / p.name, dirs_exist_ok=True)
+        elif p.is_file():
+            shutil.copy2(p, eroot / p.name)
+    _STREAM_MP.setattr(paths, "TRAIN_DIR", troot)
+    _STREAM_MP.setattr(paths, "EPISODES_DIR", troot / "episodes")
+    _STREAM_MP.setattr(paths, "ROUTER_MODEL", troot / "router_model.joblib")
+    _STREAM_MP.setattr(paths, "EVALS_DIR", eroot)
+    _STREAM_MP.setattr(paths, "EVAL_RESULTS", eroot / "results.jsonl")
 
 
 def pytest_unconfigure(config):

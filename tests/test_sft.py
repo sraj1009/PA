@@ -60,7 +60,7 @@ def test_build_min_quality_filters(tmp_path, monkeypatch):
 
 def test_failed_or_blocked_tool_calls_are_not_trained(monkeypatch, tmp_path):
     """A guard-blocked or broken tool call must not become the desired behaviour in
-    the SFT dataset — A60. The episode recovers, so validate passes, but the bad
+    the SFT dataset — A60b. The episode recovers, so validate passes, but the bad
     event is still dropped by the message builder."""
     bad_row = {
         "task": "do the thing", "output": "done", "ok": True, "events": [
@@ -94,3 +94,26 @@ def test_tool_messages_carry_matching_tool_call_ids(monkeypatch, tmp_path):
     assistant = [m for m in sample["messages"] if m["role"] == "assistant" and m.get("tool_calls")][0]
     tool = [m for m in sample["messages"] if m["role"] == "tool"][0]
     assert assistant["tool_calls"][0]["id"] == tool["tool_call_id"]
+
+
+def test_a_cloud_golden_is_trained_on_its_real_task_not_its_dedupe_key(tmp_path, monkeypatch):
+    """A63: the 2026-10-13 dedupe rewrite hashed the task and then stored the HASH
+    as the sample's `task`, so every golden was emitted as
+    `"75f0ed01688fcd2ef604634568edc8d6" -> the answer`. Measured on this machine
+    with HEAD's builder over the real 208-row corpus: 9 samples out, **9 of 9 with a
+    32-char hex digest as the user message** — one nightly `maybe_build_sft` away
+    from teaching the model to answer a key instead of a question."""
+    import re
+    monkeypatch.setattr(build_sft, "load_episodes", lambda: [])
+    monkeypatch.setattr(build_sft, "load_golden", lambda: [
+        {"task": "explain photosynthesis", "response": "Plants turn light into food.",
+         "model": "cloud", "ts": "2026-10-13T12:00:00"}])
+    out = tmp_path / "sft.jsonl"
+    stats = build_sft.build(out=out)
+    assert stats["golden_in"] == 1
+    sample = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+    prompt = sample["messages"][0]["content"]
+    assert prompt == "explain photosynthesis"
+    assert not re.fullmatch(r"[0-9a-f]{32}", prompt), prompt
+    assert sample["messages"][-1]["content"] == "Plants turn light into food."
+    assert sample["metadata"]["date"] == "2026-10-13"

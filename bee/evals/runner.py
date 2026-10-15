@@ -313,20 +313,29 @@ def summarize(latest: dict[str, dict], results: list[dict]) -> dict:
     """A52: `score` is the latest row per task id over ALL of results.jsonl, so a
     1-task run printed "21/21 overall" while 20 of those rows came from earlier runs
     of different code — and that is the number reports kept quoting. The run's own
-    result is now its own field, and the carry-over is stated instead of hidden."""
+    result is now its own field, and the carry-over is stated instead of hidden.
+
+    A62 adds the second half of the same lie: a task that never ran is written
+    `ok: True, skipped: True` (cloud not up), and `ok` alone counted it as a pass.
+    So a 21-task run with 5 skips reported "21/21" and `single_run: True`. Skipped
+    tasks are now in neither the numerator nor the denominator, are listed by id,
+    and forbid the `single_run` claim."""
+    ran = [r for r in results if not r.get("skipped")]
+    skipped_ids = sorted(str(r.get("id")) for r in results if r.get("skipped"))
     passed = sum(1 for r in latest.values() if r.get("ok"))
-    ran = {str(r.get("id")) for r in results}
-    run_ok = sum(1 for r in results if r.get("ok"))
-    carried = len([i for i in latest if i not in ran])
+    ran_ids = {str(r.get("id")) for r in ran}
+    run_ok = sum(1 for r in ran if r.get("ok"))
+    carried = len([i for i in latest if i not in ran_ids])
     return {
         "ts": datetime.now().isoformat(timespec="seconds"),
         "n": len(latest), "ok": passed, "score": f"{passed}/{len(latest)}",
         "failures": sorted(str(r.get("id")) for r in latest.values() if not r.get("ok")),
-        "run_n": len(results), "run_ok": run_ok,
-        "run_score": f"{run_ok}/{len(results)}",
-        "run_failures": sorted(str(r.get("id")) for r in results if not r.get("ok")),
+        "run_n": len(ran), "run_ok": run_ok,
+        "run_score": f"{run_ok}/{len(ran)}",
+        "run_failures": sorted(str(r.get("id")) for r in ran if not r.get("ok")),
+        "skipped": len(skipped_ids), "skipped_ids": skipped_ids,
         "carried": carried,
-        "single_run": carried == 0 and len(results) == len(latest),
+        "single_run": carried == 0 and skipped_ids == [] and len(ran) == len(latest),
     }
 
 
@@ -468,12 +477,20 @@ def _run_tasks(ctx, model, only) -> list[dict]:
     summary = summarize(latest, results)
     (paths.EVALS_DIR / "results_summary.json").write_text(
         json.dumps(summary, indent=1), encoding="utf-8")
+    skip_note = ""
+    if summary["skipped"]:
+        skip_note = (f"\n  SKIPPED (never ran, not counted as a pass): "
+                     f"{summary['skipped']} — {', '.join(summary['skipped_ids'])}")
     if summary["carried"]:
         print(f"\n  THIS RUN: {summary['run_score']} passed "
               f"(not a suite score — {summary['run_n']} of {summary['n']} tasks ran)"
               f"\n  latest result per task across all history: {summary['score']} "
               f"({summary['carried']} of those {summary['n']} rows are from earlier "
-              f"runs of different code)")
+              f"runs of different code)"
+              + skip_note)
+    elif summary["skipped"]:
+        print(f"\n  score: {summary['run_score']} over the {summary['run_n']} tasks "
+              f"that ran — NOT a full-suite score" + skip_note)
     else:
         print(f"\n  score: {summary['run_score']} — full suite, every task run now")
     print(f"  (history: {paths.EVAL_RESULTS})")

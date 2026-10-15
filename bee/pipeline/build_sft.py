@@ -165,13 +165,17 @@ def build(keep_unknown: bool = False, workspace: Path | None = None,
     # they are included directly (deduped against episodes, still PII-scrubbed)
     # — this is how the local model learns what the cloud already answered well.
     for row in golden:
-        key = _task_key((row.get("task") or "").strip())
+        # A63: `task` is the PROMPT the model is trained on, not the dedupe key.
+        # Storing the hash here emitted 206 samples whose user message was a
+        # 32-char digest, i.e. trained the model to answer a key.
+        task = (row.get("task") or "").strip()
+        key = _task_key(task)
         if not key or not (row.get("response") or "").strip():
             continue
         if key in seen:
             stats["dropped_dup"] += 1
             continue
-        seen[key] = {"task": key, "output": row["response"][:4000], "ok": True,
+        seen[key] = {"task": task, "output": row["response"][:4000], "ok": True,
                      "events": [], "model": row.get("model", "cloud"),
                      "date": (row.get("ts") or "")[:10]}
         stats["golden_in"] += 1

@@ -1021,9 +1021,7 @@ re-opened an A47 false positive — `test_hedged_or_negated_sentences_are_not_cl
 failed immediately. The window is `clause-start → match-END`, as in A47.
 
 
-### Full single-run eval, 2026-10-10 (post A47-A52)
-
-
+## Full single-run eval, 2026-10-10 (post A47-A52) — snapshot, not an A-entry
 
 `python -m bee.evals.runner`-equivalent, all 21 tasks in one invocation, real
 `bee4b`, `eval_approver`, isolated telemetry — **run_score 18/21**, 259.2 s, and
@@ -1206,6 +1204,212 @@ mostly lied.
 scripts were *probe* artifacts — native `/api/chat` wants `tool_calls[].function.arguments`
 as an **object** with a `type` tag, while BEE sends the OpenAI shape (JSON *string*,
 `loop.py:801`) and litellm translates it. The product path was correct.
+
+
+## A60 — BEE could not bring up its own model server (2026-10-13; three parts)
+
+A58/A59 made the local context window real, and both investigations hit the same
+wall from different sides: **the server was not there**. Nothing in the product
+started Ollama. On a reboot — or on any machine where Ollama is not in the startup
+group — every local task degraded to the cloud tier or to deterministic mode, and
+the fine-tuned model that is the point of the product was never consulted. The
+health surface said `ollama OFFLINE` and that was the end of it.
+
+### A60a — the autostart itself (`bee/agent/localserver.py`, 15 tests)
+
+New module, wired at `bee/cli.py:927-928` (boot) and used for the local route by
+`loop.py:533-534`. It mirrors `bee/native` rather than inventing a supervisor:
+launch on a background thread, never block startup, and **a server BEE did not
+start is untouchable** — it starts the server, never the model, and `keep_alive`
+still governs when the weights load. A failed launch is a log line plus
+`status()`, never an exception that reaches the user.
+
+| Decision | Why it is that way |
+|---|---|
+| `_attempted` / `_ready` are `threading.Event`, one launch attempt per process | without the once-gate a flapping `reachable()` would spawn an Ollama per turn |
+| `grace(cfg, 1.5 s)` before the local call, not at boot | the boot thread may still be winning the race when the first task arrives; the route waits briefly instead of degrading silently |
+| `exe_path()` via `shutil.which`, `_child_env` inherits | no hardcoded `C:\Program Files\Ollama\ollama.exe`; a missing binary is a *reason* (`offline_hint`), not a stack trace |
+| `offline_hint(cfg)` branches on `autostart` | "next BEE launch" when a launch is configured, "autostart is off" when it is not — the user is told the state that is actually true |
+| `reset()` exists | the module owns process-global state, so the suite can drive the real state machine instead of faking the answer |
+
+**Live verification (2026-10-13):** `ollama.autostart: true` ships in `config.yaml`;
+`status()` and `offline_hint()` are rendered by `bee/monitor/health.py:48-49`, so the
+surface reports *why* the local tier is unavailable, not just that it is. The tests
+fake exactly two things — `subprocess.Popen` and `httpx.get` — and drive the state
+machine, port binding and gating for real; nothing is ever launched by a test.
+
+### A60b — the SFT message builder had no contract (caught while testing A60a)
+
+Writing the autostart tests surfaced that `build_sft.row_to_messages()` returned a
+bare list: "no messages" and "zero messages, all events dropped" were the same value,
+so a caller could not tell a skipped episode from a corrupted one. It now returns
+`tuple[list | None, int]` — messages or `None`, plus the count of dropped bad events —
+and `dropped_bad_events` is what `build()` reports. `tests/test_pipeline.py::test_row_to_messages`
+unpacks the tuple and pins both halves (`(None, 0)` for a failed episode; 4 messages
+and no `rm -rf` for the dropped-event case).
+
+### A60c — prompt-budget-aware history compaction (`bee/agent/context.py`)
+
+The open item A59 ended with ("headroom over the largest measured turn is ~850
+tokens … the fix is prompt-budget-aware compaction of old tool results") is now
+implemented: `compact_messages()` runs in `loop.py:578-586` before every local call,
+drops the oldest `assistant tool_call` + `tool result` pairs, never touches
+system+task, and always keeps `min_recent_pairs=2` so the model still has evidence of
+what just happened. `_token_estimate` is the A59-corrected estimator (`chars/4`, ×1.3,
+plus per-message overhead) — it is used to *choose which pairs to drop first*, not to
+claim precision.
+
+**Live verification (2026-10-15, during the full 21-task eval):** it fired on the
+real thing — `compacted prompt history: dropped 2 messages (8523 -> 8434 est tokens)`.
+That log line is also how the **next** defect was found, and it is the reason the
+event now carries `budget`/`fits`: compaction can only give up politely. The tool
+schemas are a fixed floor that no amount of history-dropping can move, so a turn can
+exit the loop still over budget and the old message read like a solved problem.
+`fits: False` is now returned (and logged as `STILL OVER BUDGET — Ollama will
+truncate`), plus a separate warning for the nothing-left-to-drop case. Pinned by
+`tests/test_localserver.py::test_compaction_reports_when_dropping_more_would_still_not_fit`
+and `…_when_nothing_is_left_to_drop`; both raise `KeyError: 'fits'` against HEAD.
+
+**Naming, so the code and this register agree:** the three parts above had been
+committed as bare "A60" in `tests/test_localserver.py:1`, `tests/conftest.py:70` and
+`tests/test_sft.py:62`. They are disambiguated to A60a/A60b/A60c everywhere.
+
+
+## A61 — the test harness still wrote the user's training corpus and score ledger (2026-10-15)
+
+A44 redirected memory + telemetry + workspace, A57 added the kernel's three streams,
+and the docstring claimed hermeticity. Two output trees were never in the list, and
+nothing was checking: `train/` (the flywheel's episodes and cloud-golden corpus) and
+`evals/` (the score ledger `results.jsonl`).
+
+**Live verification (2026-10-15), in the user's files, measured by hash before/after
+a 51-test run:** **2 new rows** appeared in `train/golden/cloud_golden.jsonl` mid-suite
+— `{"task": "explain how a rainbow forms", "response": "ok-response", "model": "cloud"}`
+at `21:15:24` and `21:19:36`: the fake LLM's canned answer written through the real
+`_golden()` path by tests that drive `run_agent` with a scripted cloud escalation
+(13 of the corpus' 15 such rows were from 2026-10-13, so the leak was not new — only
+new to *measurement*). `evals/results.jsonl` had **19 rows, all `math_sieve`**, and the
+only test that runs that task through the real scorer is
+`tests/test_eval_hermeticity.py:187` → `runner.run_suite(ctx, only=["math_sieve"])`
+(the tests that fake `run_suite` *cannot* see this drift, which is exactly the
+A27a/A37a pattern of a guard that passes by being unable to fire).
+
+| Cause | Fix |
+|---|---|
+| The harness list was stale, not the mechanism | `tests/conftest.py` now copies and redirects `TRAIN_DIR`, `EPISODES_DIR`, `ROUTER_MODEL`, `EVALS_DIR`, `EVAL_RESULTS` — **copied rather than emptied**, so readers still see real content (A44's principle). |
+| The first version of the fix swallowed its own failure | it wrapped the copies in `try/except Exception: pass`, and the target dirs did not exist yet, so every `copy2` raised `FileNotFoundError`, was discarded, and `paths.TRAIN_DIR` stayed inside the checkout. Dirs are created first and the `try` is **gone on purpose**: a silent swallow is the defect class being fixed. |
+| Nothing pinned any of it | `test_the_pytest_harness_keeps_the_scorer_and_the_flywheel_off_the_real_tree` asserts each path is not `is_relative_to(PROJECT_ROOT)` and that the copies are readable; `_user_state_snapshot()` now hashes `audit.jsonl`, `evals/results.jsonl`, `train/golden/cloud_golden.jsonl` and the memory tree, so the scored-run test cannot pass while writing any of them. Verified to bite: reverting the isolation makes the new test fail. **Proved end to end on the final run (2026-10-15): `pytest tests -q` = 928 passed in 105.8 s and every tree of the user's real state — `memory`, `metrics`, `train`, `skills`, `evals`, `audit.jsonl(+.1)`, `settings.json` — hashed **byte-identical** before and after (`temp/bee-docsync/{pre,post}_final2.json`, "DIFFERING KEYS: NONE").** |
+
+## A62 — a skipped task was counted as a pass, in four places at once (2026-10-15)
+
+`_run_tasks` writes a task that never ran (cloud down) as `ok: True, skipped: True`,
+because "we could not try" is not a failure of the assistant. `summarize()` only ever
+read `ok`. So a 21-task invocation with 5 skips reported **`21/21`** *and*
+`single_run: True` — the exact lie A52 was written about, produced by the field A52
+added to fix it.
+
+| Place | What it did | Fix |
+|---|---|---|
+| `bee/evals/runner.py::summarize` | skips in numerator and denominator | `ran = [r for r in results if not r.get("skipped")]`; adds `skipped`/`skipped_ids`; `run_n`/`run_score` count only what ran; `single_run` requires `skipped_ids == []` |
+| `runner._run_tasks` print | "21/21 — full suite" | prints `SKIPPED (never ran, not counted as a pass): 5 — ids…` and, when tasks are missing, `… over the N tasks that ran — NOT a full-suite score` |
+| `evals/verify_suite.py` → `REPORT.md` | quoted one number with no denominator story | new pure `agent_eval_lines(llm)` emits either "full suite in one run" or the two-line partial form (`NOT a suite score` + `Ledger (latest row per task across all history, up to …): X/N — historical, not one run.`); it now reads `run_*`/`carried`/`skipped`/`single_run` from the summary |
+| `eval_resume.py` + `bee/evals/gate.py` | resumed from "last row in file order", and treated a skip as a pass; the gate compared raw pass **counts** across different denominators | resume compares by `ts` and requires `ok and not skipped`; the gate refuses when `cand["total"] < base["total"]` — a candidate that skipped the hard half of the suite would otherwise have promoted itself on a 12/12 against a 10/21 baseline |
+
+**Suite after A62:** `pytest tests -q` = **926 passed, 0 failed** before the A60c
+follow-up, **928 passed, 0 failed** after it (core 849 · security 135) ·
+`evals/verify_suite.py` **ALL PASS** · `REPORT.md` regenerated and reads
+`Agent eval suite (2026-10-15T21:49:02, full suite in one run): **20/21** tasks passed.`
+
+## A63 — the cloud-golden corpus was 100 % machine residue, and the builder hashed the prompt (2026-10-15)
+
+Found by following A61's two stray rows to their file. `train/golden/cloud_golden.jsonl`
+held **208 rows and exactly 5 distinct task strings**, every one `model: "cloud"`:
+
+| rows | task | where it comes from |
+|---|---|---|
+| 186 | `write a one line poem about bees` | `tests/test_engines_session.py` fixture |
+| 15 | `explain how a rainbow forms` | `tests/test_engine_speed.py` / `test_localserver.py` fixture |
+| 5 | `## Conversation state (resolved by the kernel, for context)…` | A64 — the kernel-augmented prompt stored as the user's words |
+| 1 | `List the top-level entries of the workspace…` | eval task |
+| 1 | `How many prime numbers are there between 1 and 100?` | eval task |
+
+Nothing in it is a thing this user asked. `_golden()` (`loop.py:351-362`) fires
+whenever a turn is `ok` **and** `escalated`, and the tests' fake escalations looked
+identical to real ones — so the corpus the flywheel feeds QLoRA was a mirror of the
+test suite. `bee/scheduler.py::maybe_build_sft` runs nightly from `worker.py`, which
+is how "nobody has to notice" turns into a trained model.
+
+**Second defect, in the same file:** the 2026-10-13 dedupe rewrite hashed the task and
+then stored **the hash as the sample's `task`**. Measured by running HEAD's builder
+over this corpus in a temp dir: 9 samples out, **9 of 9 whose user message is a
+32-char hex digest** (example `500b1c3f2029e02a7f16e4c356b0d146`). The fix keeps the
+real `task` text and uses `_task_key(task)` only as the dedupe key; the same corpus
+through the fixed builder emits 9 samples with **0** hex prompts.
+
+**Data actions (both reversible, both recorded here rather than silently done):**
+- the 208 rows were moved to `train/quarantine/cloud_golden-2026-10-15.jsonl` and the
+  live file truncated to empty, so tonight's `maybe_build_sft` cannot train on them;
+- the 19 scripted ledger rows were removed from `evals/results.jsonl` (811 rows left,
+  saved to `train/quarantine/results-scripted-rows-2026-10-15.jsonl`). History that
+  cannot be attributed is not fixed — the rows are kept, and the pin tests stop new
+  ones.
+
+**Suite after A63:** included in the 928 above.
+
+## A64 — `_golden()` teaches the model the kernel's prompt, not the user's (2026-10-15, OPEN)
+
+The 5 kernel-headed rows above are the visible half. `_golden()` appends
+`task[:500]`, and by the time the loop has a `task`, the kernel has already
+prepended resolved session state, so a golden that survives A61's isolation is still
+*a prompt-inflated one* — the model would learn to answer a question that begins with
+a machine-written context block. Not patched in this pass: the fix needs a decision
+about where the user's original wording is carried (kernel input vs `Context.task`),
+and doing it halfway would put the same class of junk in the corpus from a different
+call site. `docs/STATUS.md` lists it as an open item.
+
+**Also open, deliberately not patched here:**
+- **Gate seeding from a partial run** — `gate.py` now *refuses* to compare across
+  denominators, but a baseline *seeded* from a partial run still stores raw counts, so
+  the first comparison after a seed can be apples-to-oranges in the other direction.
+- **Unregistered test files escape `-m core`** — markers come from a hand-kept
+  filename registry in `tests/conftest.py:63-204`, and three files are in no list at
+  all: `test_native.py` (5 defs) and `test_telemetry.py` (5 defs) are collected by
+  `pytest tests -q` but deselected by `-m core`, and `test_monitor.py` has **no test
+  functions** — its `check()`s run at import, so a broken monitor layer is a *collect
+  error* that no marker can select. Measured 2026-10-15: `-m core` = 849 selected /
+  **79 deselected** of 928; the 79 are those three files plus `test_automate` (11),
+  `test_commands` (29), `test_livekit` (7, by design — optional SDK) and
+  `test_phase7_repro` (17, `ml` only). Anything that gates on `-m core` is not gating
+  on the suite, and `test_automate`/`test_commands` need no optional dependency.
+- **Nothing pins the docs' test counts** — `STATUS.md`/`README.md` quote suite sizes
+  in prose; they drift every pass and this pass had to re-measure them by hand.
+- **VRAM claims** — `nvidia-smi` on this box reports **4094 MiB** and A59's
+  `size_vram` table is the evidence. Corrected this pass: the `config.yaml` comment,
+  `docs/STATUS.md`, and the report *generator* `evals/verify_suite.py:1153` + `:1218`,
+  so the regenerated `evals/REPORT.md` now prints `RTX 3050 (nvidia-smi: 4094 MiB = 4 GB)`
+  instead of the 8 GB it asserted until today. Still saying "8 GB": `docs/llm-component.md`
+  (:24, :28, :39-45, :111) and `docs/training-plan.md` (:10, :13, :39, :93, :166). Those
+  two are the planning docs for the never-promoted `bee-8b` QLoRA route, and the 4 GB
+  figure is not a typo in them — it *is their premise* (an 8B q4_k_m plus an 8192-ctx KV
+  cache "fits with margin"), so correcting them means re-planning the route, not
+  find-and-replace; left as written and flagged here instead. The same `llm-component.md`
+  header calls the active local model "stock Ollama `qwen3:8b`", while `config.yaml:7`
+  ships `bee4b`. `docs/JARVIS_BASELINE.md:167` already says 4 GB. The originating claim is
+  the user's own `memory/profile.md` ("NVIDIA RTX 3050 8 GB"), which is user data and was
+  *not* edited — `tests/test_structured_memory.py:426` documents that the profile says
+  8 GB while CIM reports 4, and A32b's `_hw_conflict()` surfaces the contradiction when
+  the assistant quotes that note.
+
+**Suite after A60c–A64 (final, 2026-10-15):** `pytest tests -q` = **928 passed,
+0 failed** in 105.8 s · `-m core` **849** selected / 79 deselected · `-m security`
+**135** · `evals/verify_suite.py` = **ALL PASS** (71,914 checks, 6 families) ·
+agent eval = **20/21** in one invocation, 0 skipped · user state **byte-identical**
+across the suite run (evidence above).
+Re-run once more after the doc sync (only `docs/`, `README.md` and `config.yaml`
+comments changed since): **928 passed in 94.4 s**, and the same eight digests
+(`memory`, `metrics`, `train`, `skills`, `evals`, `audit.jsonl`, `audit.jsonl.1`,
+`settings.json`) again report **DIFFERING KEYS: NONE**
+(`temp/bee-docsync/{pre,post}_final3.json`).
 
 
 

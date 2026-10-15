@@ -71,14 +71,26 @@ def test_row_to_messages():
     row = {"ok": True, "task": "do it", "output": "done",
            "events": [_ev("calculator", True, json.dumps({"expression": "1+1"}),
                           json.dumps({"result": "2"}))]}
-    msgs = row_to_messages(row)
+    # A60b changed the contract to (messages, dropped_bad_events) and build() sums
+    # the second value into stats — the assertions below now unpack instead of
+    # pretending the tuple is a list.
+    msgs, dropped = row_to_messages(row)
+    assert dropped == 0
     assert msgs[0]["role"] == "user" and msgs[0]["loss"] is False
     assert msgs[1]["role"] == "assistant" and msgs[1]["loss"] is True
     assert msgs[1]["tool_calls"][0]["function"]["name"] == "calculator"
     assert msgs[2]["role"] == "tool" and msgs[2]["loss"] is False
     assert msgs[3]["role"] == "assistant" and msgs[3]["content"] == "done"
-    # failed episode -> None
-    assert row_to_messages({**row, "ok": False, "output": ""}) is None
+    # failed episode -> no messages at all
+    assert row_to_messages({**row, "ok": False, "output": ""}) == (None, 0)
+    # a failed/blocked event is skipped AND counted, so the sample teaches the
+    # recovery rather than the denied call: user + (assistant,tool) for the one good
+    # event + final assistant = 4 messages, and 'rm -rf' appears nowhere.
+    msgs, dropped = row_to_messages({**row, "events": [
+        _ev("calculator", True, json.dumps({"expression": "1+1"}), json.dumps({"result": "2"})),
+        _ev("shell", False, json.dumps({"command": "rm -rf /"}), '{"blocked": true}')]})
+    assert dropped == 1 and len(msgs) == 4
+    assert "rm -rf" not in json.dumps(msgs)
 
 
 def test_router_label():

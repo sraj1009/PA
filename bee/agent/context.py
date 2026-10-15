@@ -345,7 +345,8 @@ def compact_messages(messages: list[dict], tools: list | None, num_ctx: int,
     budget = max(1024, num_ctx - completion_reserve)
     before = _token_estimate(messages, tools)
     if before <= budget:
-        return messages, {"compacted": False}
+        return messages, {"compacted": False, "estimate": before,
+                          "budget": budget, "fits": True}
 
     def count_pairs(msgs):
         return sum(1 for j in range(2, len(msgs) - 1)
@@ -370,10 +371,20 @@ def compact_messages(messages: list[dict], tools: list | None, num_ctx: int,
         else:
             i += 1
 
+    after = _token_estimate(kept, tools)
+    fits = after <= budget
     if removed:
-        after = _token_estimate(kept, tools)
-        log.warning("compacted prompt history: dropped %d messages (%d -> %d est tokens)",
-                    removed, before, after)
+        # `fits is False` is the honest case, not a contradiction: dropping more
+        # would remove the last recent pairs, and a live `web_search_tool` turn
+        # measured exactly this (8434 est tokens against a 7168 budget).
+        log.warning("compacted prompt history: dropped %d messages (%d -> %d est tokens, "
+                    "budget %d, %s)", removed, before, after, budget,
+                    "fits" if fits else "STILL OVER BUDGET - Ollama will truncate")
         return kept, {"compacted": True, "removed": removed,
-                      "estimate_before": before, "estimate_after": after}
-    return messages, {"compacted": False, "estimate": before, "budget": budget}
+                      "estimate_before": before, "estimate_after": after,
+                      "budget": budget, "fits": fits}
+    if not fits:
+        log.warning("prompt over local context budget and nothing left to compact "
+                    "(%d est tokens, budget %d) - Ollama will truncate", before, budget)
+    return messages, {"compacted": False, "estimate": before, "budget": budget,
+                      "fits": fits}

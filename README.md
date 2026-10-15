@@ -1,10 +1,12 @@
 # BEE — a local-first personal assistant
 
-> **Status (verified 2026-10-08, post fix-pass):** BEE is a well-tested
+> **Status (re-measured on this machine 2026-10-15):** BEE is a well-tested
 > single-user personal agent for human-supervised deployment on this machine —
-> **767/767 tests green**, 71,914 deterministic checks passing, all major
-> security invariants audit-verified, 19-20/21 on the 21-task agent eval. A
-> post-audit code sweep fixed 34 defect classes the suite had been certifying as
+> **928/928 tests green**, 71,914 deterministic checks passing, all major
+> security invariants audit-verified, **20/21** on the 21-task agent eval (one
+> invocation, `skipped: 0`, `single_run: true` — the only failure is answer quality
+> on the local 3B model). A
+> post-audit code sweep has fixed defect classes the suite had been certifying as
 > clean (dead config switches, an unarmed emergency-stop hotkey, silent TTS
 > playback, a frozen face page, no logging handler at all, a session rule that
 > hijacked the deterministic tier, reminders that fired into a log instead of the
@@ -20,8 +22,10 @@
 > task burn 48 tool calls on code that kept failing, and pasted code the assistant
 > described instead of running, and a loop whose own `do not repeat this` note was
 > returned as a success — so one task asked for the same refused call 21 times in a row
-> — see
-> `docs/TECHNICAL_DEBT.md` rows A1–A35).
+> — plus, in the 2026-10-13→15 pass, a shipped context window that was half the size of
+> a real agent turn, a test harness still writing the user's training corpus and score
+> ledger, and an eval headline that counted tasks which never ran as passes — see
+> `docs/TECHNICAL_DEBT.md` rows A1–A64).
 > It is **not** multi-user, **not** "production-ready" in the service sense, and its
 > hardware paths (real mic/display/LiveKit room) are test-verified only with mocks.
 > Authoritative status: [docs/STATUS.md](docs/STATUS.md) · evidence:
@@ -138,6 +142,9 @@ _env_key_for`) — a Gemini model will never receive an OpenAI key.
 |---|---|---|
 | `ollama.model` | `bee4b` | local orchestrator (Qwen2.5-3B + BEE persona) |
 | `ollama.max_tokens` | `1024` | per-turn ceiling (this box: ~50–90 tok/s → snappy turns) |
+| `ollama.num_ctx` | `8192` | context window — **pinned by a measured floor**, not a round number: the largest turn the 21-task eval builds is 7339 tokens and 8192 is the biggest window that stays fully resident on this 4 GB card (A59). Below that Ollama silently evaluates `num_ctx / 2` |
+| `ollama.keep_alive` | `"60s"` | unload the local model 60 s after last use (`""` = Ollama's own 5 min). Sent in `extra_body` — litellm has no `keep_alive` parameter (A58) |
+| `ollama.autostart` | `true` | bring up Ollama itself at boot (A60a) when it is not already reachable; a server you started is never touched, and a failed launch shows up as a reason on the health page instead of a degraded silent turn |
 | `cloud.enabled` / `cloud.llm` | `true` / `gemini/gemini-3.6-flash` | escalation tier (`provider/model`) |
 | `voice.speak` | `true` | speak answers aloud (REPL: `/tts on\|off`) |
 | `voice.tts_rate` | `190` | TTS speed, words/minute (REPL: `/tts rate <n>`) |
@@ -216,16 +223,21 @@ the local model for every conversational turn adds first-token latency. So in
 and vice-versa escalation (local→cloud) on quality failure. Explicit `local:`/`use
 local` and `engine: local` always force the local model. Set `cloud_first: false` for the
 classic local-first hybrid. The local model is also released from RAM/VRAM
-`ollama.keep_alive` (60 s) after its last use, and `num_ctx` is pinned to 4096 so bee4b
-stays fully on the 4 GB GPU instead of spilling layers to CPU.
+`ollama.keep_alive` (60 s) after its last use, and `num_ctx` is **8192** — the largest
+window that keeps bee4b fully on the 4 GB GPU *and* holds a whole real agent turn
+(measured: the biggest turn the 21-task eval builds is 7339 tokens; at 4096 Ollama
+evaluated 2050 of 5779 silently — see `docs/TECHNICAL_DEBT.md` A58/A59).
 
 **The local brain: bee4b.** A custom Ollama model built from **Qwen2.5-3B** with the BEE
 persona baked in (`models/bee4b.Modelfile`). Sizing rationale for this 4 GB card, all
 measured: Qwen2.5 has no 4B (lineup jumps 3B → 7B); `qwen3:4b` is a *thinking* model that
 narrates its reasoning in-content and exhausts the token budget before answering (even
 "reply OK" → "Hmm, the user wants…") — unusable for a fast PA; `qwen3:8b` (~5 GB)
-CPU-offloads on this card → ~4.6 tok/s. Qwen2.5-3B sits at ~1.9 GB VRAM, runs 100 %
-on-GPU at `num_ctx: 4096`, and measured **~50–90 tok/s** with crisp, direct answers.
+CPU-offloads on this card → ~4.6 tok/s. Qwen2.5-3B sits at ~1.9 GB of weights, runs 100 %
+on-GPU even at `num_ctx: 8192` (A59 measured `size_vram` 2.31 GB — weights *plus* KV
+cache — on this 4 GB card), and measured **~50–90 tok/s** with crisp, direct answers (at
+the earlier 4096 window; what moving to 8192 bought is whole-turn prompts and 70 → 46
+model calls per eval, A59).
 Rebuild it any time: `ollama create bee4b -f models\bee4b.Modelfile`.
 
 **Math never touches the model.** The deterministic tier (`bee/agent/router.py: math_expr`)
@@ -336,7 +348,8 @@ APIs (`ctypes` keybd_event / powrprof / WMI) instead of pyautogui/psutil, so the
 zero extra dependency cost on this RAM-tight box.
 
 **App & URL accessibility — deterministic, instant.** "Open something" never waits for
-the model: a fastpath layer (`bee/agent/fastpaths.py`) resolves 30+ targets —
+the model: a fastpath layer (`bee/agent/fastpaths.py` — part of the 46-handler catalog)
+resolves these with no model call —
 `chrome`/`edge` **including browser profiles** ("open chrome and select user 1" →
 `chrome --profile-directory="Profile 1"`), installed apps (terminal, vscode, spotify,
 zoom, slack, task manager, settings, Microsoft Store), the Windows **Camera** and Photos
@@ -500,7 +513,7 @@ bee/
   cli.py · __main__.py     REPL/voice/web/plan/speak/eval/setup entry points
   config.py · paths.py     config + canonical paths
   privacy.py · guard.py    PII redaction · execution gates
-  commands/                ★ modular slash-commands (registry + 5 commands)
+  commands/                ★ modular slash-commands (registry + 7 commands)
   agent/                   loop · client · router · offline · context · reflection · spawn
   brain/                   verifier · rag (RRF hybrid) · mlrouter (learned)
   tools/                   30 tools (registry: tools/__init__.py)
@@ -510,7 +523,7 @@ bee/
   voice/                   mic · transcribe (whisper) · speak (TTS) · loop
   dsa/                     algorithm library + bench harness
   evals/                   21-task runner + model benchmark
- tests/                     30+ pytest files (markers: core/security/windows/ml/voice/livekit)
+ tests/                     68 pytest files / 928 tests (markers: core/security/windows/ml/voice/livekit)
 training/qlora/            SFT/merge/export for the dedicated model
 skills/ · evals/ · memory/ · train/ · metrics/ · docs/
 config.yaml · models.yaml · requirements*.txt · setup.ps1
@@ -540,13 +553,20 @@ The REPL, `/help`, and any new surface (web/voice) pick it up automatically.
 ## 11. Testing & verification
 
 ```powershell
-python -m pytest tests -q                 # full suite — 767 passed (2026-10-09)
-python -m pytest tests -q -m core         # portable core (unit+integration) — 631
-python -m pytest tests -q -m security     # permission/privacy surface — 125
+python -m pytest tests -q                 # full suite — 928 passed, 0 failed (2026-10-15, 105.8 s)
+python -m pytest tests -q -m core         # portable core (unit+integration) — 849 (79 deselected, see A64)
+python -m pytest tests -q -m security     # permission/privacy surface — 135
 python evals/verify_suite.py              # 71,914 deterministic checks vs references
-python -m bee.cli eval                    # 21-task agent eval (measured, per run)
+python -m bee.cli eval                    # 21-task agent eval — 20/21 (2026-10-15, one run, 0 skipped)
 python -m bee.evals.bench_model           # tok/s + latency benchmark
 ```
+
+**Neither gate touches your real data** (A44 → A57 → A61): a scored run and a plain
+`pytest` run both redirect memory, receipts/sessions/checkpoints, `audit.jsonl`,
+telemetry, `train/` (episodes + the cloud-golden corpus), `evals/results.jsonl`,
+`skills/` and the workspace into a temp copy — copied rather than emptied, so readers
+still see your real content — and `tests/test_eval_hermeticity.py` hashes those trees
+before/after a live run so the claim cannot rot silently. It could; it used to.
 
 **Deterministic verification (no LLM, ~10 s).** Every deterministic subsystem is checked
 against independent references with Wilson 95 % confidence intervals. A perfect run with
@@ -582,8 +602,8 @@ PII redaction confirmed on wire.
 
 | Symptom | Fix |
 |---|---|
-| `Ollama not reachable` | start Ollama (system tray); `ollama pull qwen2.5:3b` + `ollama create bee4b -f models\bee4b.Modelfile` if no models |
-| Slow local answers | `ollama ps` → PROCESSOR shows the CPU/GPU split. bee4b (Qwen2.5-3B, ~1.9 GB) fits fully in 4 GB VRAM at `num_ctx: 4096` — if you see a partial CPU split, close other GPU apps or lower `num_ctx`. Bigger local models (7B+) CPU-offload on this card by hardware limit — that's why bee4b is 3B-based |
+| `Ollama not reachable` | BEE starts it (A60a: `ollama.autostart: true` launches the server on a background thread at boot, and the health page says which of the two states you are in) — if it is still down, start it yourself and check `status()`; `ollama pull qwen2.5:3b` + `ollama create bee4b -f models\bee4b.Modelfile` if the models are missing |
+| Slow local answers | `ollama ps` → PROCESSOR shows the CPU/GPU split. bee4b (Qwen2.5-3B) is **2.31 GB including its KV cache** at `num_ctx: 8192` and measured fully resident on this 4 GB card (A59's `size_vram` table: 12288 spills 0.46 GB and adds ~1.5 s per call) — if you see a partial CPU split, close other GPU apps or lower `num_ctx`. Bigger local models (7B+) CPU-offload on this card by hardware limit — that's why bee4b is 3B-based |
 | Whole system stalls, evals hang | check free RAM (`Get-CimInstance Win32_OperatingSystem`). Zombie `llama-server` processes from killed sessions hoard ~4 GB: kill them (`Stop-Process -Name llama-server`, or via Task Manager), wait for pagefile to settle, rerun in batches of 2–3 LLM tasks |
 | Cloud 401 / "no credits" | key must match `cloud.llm` provider (`gemini/…` → `GOOGLE_API_KEY`); an OpenAI key with no credits fails — switch providers in `config.yaml` |
 | Cloud model 404 | model deprecated/renamed — query the provider's models API and update `cloud.llm` |
@@ -641,7 +661,8 @@ Cloud — see §6.5) · secrets env-only · external web content treated as untr
   deterministic tier), guard rails, privacy redaction, verifier, offline mode, RAG,
    episode data flywheel + QLoRA pipeline, monitoring, 71,914-check verification suite
    (5 suites with Wilson 95 % CI lower ≥ 99.9 %), **assistant command layer
-   (`/plan /draft /summarize /code /think`), BEE persona, configurable TTS**,
+   (`/plan /draft /summarize /code /think /remind /welcome` — 7 in the registry),
+   BEE persona, configurable TTS**,
     **fast-path command catalog (46 pure-Python handlers) + engine selection
    (hybrid/local/ollama-cloud/api-cloud) + cloud teach-back**
 - [x] **Phase 4.5** — **Super JARVIS integration**: Welcome Home protocol,
@@ -679,7 +700,10 @@ Cloud — see §6.5) · secrets env-only · external web content treated as untr
     (`--paraphrase N`) to train more from the same verified examples.
   - [ ] **Phase 5** — first `bee-8b` fine-tune from verified episodes (pipeline + J3
     quality gate ready; no trained model promoted yet) · GPU sandbox variant ·
-   unattended-automation hardening · more commands (`/inbox`, `/remind`) via the registry
+   unattended-automation hardening · more commands (`/inbox`) via the registry
+   (`/remind` shipped — 7 commands register today) · **A64: cloud goldens still store
+   the kernel-augmented prompt as the user's task, and the verified corpus is empty
+   until that is fixed, so there is currently nothing honest to fine-tune on**
 - [x] **Proactive event intelligence (A22–A23)** — six event sources now run in
  production (timer, file-change, battery, network, app foreground/launch, memory+disk
  pressure), all edge-triggered with hysteresis; rules stay default-deny and
@@ -697,9 +721,17 @@ Cloud — see §6.5) · secrets env-only · external web content treated as untr
    (`docs/JARVIS_ACCEPTANCE_AUDIT.md`, 535/535 tests, P0/P1 fixes F0–F5).
    Authoritative feature status: `docs/STATUS.md` · full phase history:
    `docs/JARVIS_ROADMAP.md`.
+- [x] **Context + measurement pass (A57–A64, 2026-10-13→15)** — the local context
+   window now reaches the model and is sized to a **measured** real turn (A58/A59),
+   BEE **starts Ollama itself** at boot (A60a), old tool history is compacted before
+   Ollama truncates it and says so when it cannot fit (A60c), the eval headline
+   counts only tasks that actually ran (A62), and the harness stopped writing the
+   user's **training corpus and score ledger** (A57/A61) — which is how the cloud
+   golden corpus turned out to be 208 rows of test fixtures (A63, quarantined).
+   Measured on this machine: `pytest tests -q` **928 passed, 0 failed**, verify_suite
+   **ALL PASS** (71,914 checks), agent eval **20/21** in one invocation, 0 skipped.
 
 ---
 
 *BEE is opinionated but readable — every module starts with a docstring of what it does and
 why. Read it, edit it, make it yours.*
-"# PA" 

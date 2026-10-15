@@ -1,6 +1,7 @@
 # BEE / Jarvis — Feature Status (authoritative)
 
-**Date:** 2026-10-08 · **Basis:** independent acceptance audit
+**Date:** 2026-10-08 audit, **re-measured on this machine 2026-10-15** ·
+**Basis:** independent acceptance audit
 ([JARVIS_ACCEPTANCE_AUDIT.md](JARVIS_ACCEPTANCE_AUDIT.md)) — source reads at
 cited locations + test suites actually executed on this machine.
 
@@ -9,17 +10,29 @@ Legend:
 - **YELLOW** — implemented with known, documented limitations
 - **RED** — incomplete / unverified / unsafe
 
-Test basis (final, post fix-pass 2026-10-10): `pytest tests -q` = **888 passed,
-0 failed** (was 842 before the A47-A56 pass; suites overlap by marker);
-`evals/verify_suite.py` = **ALL PASS** (re-run after every change).
-21-task agent eval, **one invocation, every task actually run**: **18/21** in
-259.2 s as of A52; A55/A56 then turned `guard_blocked` and `file_roundtrip` from
-FAIL to PASS in single-task live runs (31.6 s / 3 tools and 45.1 s / 3 tools), so
-the remaining failures are `dsa_graph` and `plan_complex` — both the local 3B
-narrating instead of acting, not a missing mechanism. That number is now real: A52
-found that the headline this suite printed was the latest row per task across *all
-history*, so a 1-task run reported "21/21 overall"; every score quoted here before
-2026-10-10 came from that field and is not a single-run result.
+Test basis (re-measured on this machine **2026-10-15**, after the A57–A64 pass):
+`pytest tests -q` = **928 passed, 0 failed** — 105.8 s, then 94.4 s on the final
+re-run after the docs sync (wall time drifts; the count did not) (`-m core` 849 selected /
+79 deselected, `-m security` 135 — the marker registry is hand-kept, see the YELLOW
+register) · `evals/verify_suite.py` = **ALL PASS**, 71,914 deterministic checks over
+6 families, every accuracy 100 % with its 95 % CI lower bound printed.
+21-task agent eval, **one invocation, every task actually run**: **20/21** in
+186.3 s (`evals/results_summary.json`, ts `2026-10-15T21:49:02`, `skipped: 0`,
+`carried: 0`, `single_run: true`). The only failure is `dsa_lis` (30.8 s, missing
+substring `'4'`) — answer quality on the local 3B model, not a missing mechanism.
+The rows that flipped since the last recorded basis are `dsa_graph` and
+`file_list_ws` — A59's 2026-10-13 run was **18/21** with `file_list_ws`, `dsa_lis`
+and `dsa_graph` failing (and the older 2026-10-10 basis was 18/21 in 259.2 s with a
+different trio). A59's mechanism deltas (the shipped `num_ctx` went from half a turn
+to the whole turn: suite 516 s → 295 s, 70 → 46 model calls) are the part to trust,
+because per-task outcomes on `bee4b` are stochastic and 20/21 is this invocation's
+number, not a trend.
+That number is now meaningful because of A52: the headline this suite used to print
+was the latest row per task across *all history*, so a 1-task run reported "21/21
+overall"; every score quoted here before 2026-10-10 came from that field and is not a
+single-run result. A62 found the second half of the same lie — a task that never ran
+was counted as a pass — and closed it in the runner, `REPORT.md`, `eval_resume.py`
+and the J3 gate.
 The score moves with
 local-3B answer quality and is stochastic — what is *mechanism-level* stable is
 the deterministic tier: `route_det_math` went from **36.9 s / 13 tool calls /
@@ -266,9 +279,13 @@ A14) · verify_suite ALL PASS.
 | Cancellation (REPL Ctrl-C / "stop" / voice / job timeout) | GREEN | **kernel-owned task scope** (N4): every new task starts with a clean cancel event at `kernel.run`; jobs additionally swap a job-scoped event. Web & LiveKit have **no** mid-task cancel *route* (feature gap, not a leak — fail-closed approver limits blast radius). |
 | Crash recovery (J1 checkpoints + `/resume`) | GREEN | task-level resume with "do not redo executed steps" note |
 | Provider abstraction (local Ollama + cloud kinds) | GREEN | one registry, one execution path; keys env-only, matched per provider |
+| Local model server autostart (A60a) | GREEN (tests) / **not field-verified after a real reboot** | `bee/agent/localserver.py` boots from `cli.py:927-928` when `ollama.autostart: true`; background thread, one attempt per process, `grace()` (1.5 s) before the local route so a boot still in flight does not degrade the task, and a server BEE did not start is left alone. 15 autostart tests fake only `Popen` + `httpx.get` and launch nothing (`tests/test_localserver.py` has 21 in total, the rest are the compaction tests below); `offline_hint()`/`status()` are shown by the health surface. |
+| Local context window end-to-end (A58/A59) | GREEN (live-measured) | `num_ctx` reaches litellm as a top-level kwarg and `keep_alive` via `extra_body` (the wire forms were measured against the server, not guessed); shipped window **8192** holds the largest measured real turn (7339 tokens) and is the largest one that stays fully resident on this 4 GB card. Every model-using eval task now delivers its whole prompt (was: 2050 of 5779 evaluated). |
+| Prompt-budget history compaction (A60c) | GREEN, with a stated limit | `compact_messages()` drops the oldest tool-call/result pairs before Ollama silently truncates to `num_ctx / 2`; never touches system+task, keeps the 2 most recent pairs. Fires in production (measured: `dropped 2 messages (8523 -> 8434 est tokens)`). It now also reports `fits: False` when the fixed floor (30 tool schemas) keeps the turn over budget after all droppable history is gone — compaction cannot solve that turn, and says so instead of pretending. |
 | Cloud-unavailable operation | GREEN (tested) / YELLOW (live) | fallback + deterministic floor verified with fake clients; live offline drill not performed in this audit |
 | ML router | GREEN | optional; major-version incompatible artifact **refused** with a clear message; falls back to heuristics; per-class training report; pinned env |
 | Offline deterministic tier (math/smalltalk/files) | GREEN | eval_safe AST calculator, fast paths, offline floor |
+| Eval headline honesty (A52 → A62) | GREEN | `score` is the latest row **per task across all history** (a ledger) and is labelled as one; `run_score` is the invocation. A62 closed the second half of the same lie: a task that never ran (cloud down) was written `ok: True, skipped: True` and counted as a **pass**, so a 21-task run with 5 skips printed `21/21` *and* `single_run: true`. Skips are now in neither numerator nor denominator, are listed by id, forbid the `single_run` claim, and `REPORT.md`/`verify_suite` print the partial form instead of one bare number. The J3 gate refuses a candidate scored on fewer tasks than its baseline, and `eval_resume.py` compares by `ts` instead of file order. |
 | Engine choice (hybrid / local / ollama-cloud / api-cloud) + persistence | GREEN (A41) | one canonical redirectable path (`paths.SETTINGS_JSON`, isolated by the suite); `save_engine` returns whether the write happened and the REPL / `POST /engine` report `persisted` separately from the in-session switch; unknown names and corrupt files log instead of silently reverting to hybrid. **Live through the real app:** blocked write → `{'ok': True, 'persisted': False}` + warning (was a silent `{"ok": true}`). |
 
 ## Memory & conversation
@@ -288,7 +305,8 @@ A14) · verify_suite ALL PASS.
 |---|---|---|
 | Durable scheduler (one Job model, UTC-canonical next_run, job timezone) | GREEN | restart restore with crash repair, no blind replay, file-claim single-flight; trigger math pure & tz-deterministic |
 | `automation_job` create validation (A43) | GREEN | a trigger whose next fire cannot be computed is **refused** with the field and shape named (`at`/`time`/`days`/`every_seconds`), never stored as a live-but-deaf `pending/enabled/next_run=""` job; day names map to 0-6, unknown days and unknown kinds are refused; malformed numbers return a model-actionable message instead of `invalid literal for int() with base 10` |
-| Eval hermeticity (A44) | GREEN (live-verified) | a scored run redirects memory **+ telemetry** (`metrics.jsonl`, `train/episodes/`, `skills/`) **+ workspace**, and disables reflection; verified by hash before/after a live 2-task run. 322 eval episodes and 502 eval metric rows written by earlier runs were removed reversibly (backups in `temp/*.before-a44-…`), keeping the user's rows byte-for-byte |
+| Eval + suite hermeticity (A44 → A57 → A61) | GREEN (hash-verified, pinned) | a scored run redirects memory **+ telemetry** (`metrics.jsonl`, `train/episodes/`, `skills/`) **+ workspace**, and disables reflection. Two more leaks closed since: **A57** — the kernel's own streams (`memory/receipts.jsonl`, `memory/sessions/`, `memory/checkpoints/`, `audit.jsonl`) were built from an unredirectable inline `PROJECT_ROOT`; they are `paths` constants now. **A61** — `train/` (episodes + `golden/cloud_golden.jsonl`) and `evals/results.jsonl` were never redirected at all, so *plain `pytest tests`* was writing the user's training corpus and score ledger. Both trees are redirected in `tests/conftest.py` (copied, not emptied), and `test_eval_hermeticity.py` hashes `audit.jsonl` / `results.jsonl` / `cloud_golden.jsonl` / the memory tree around a live run, so the claim cannot go stale silently. Historic residue removed reversibly (backups in `temp/*.before-a44-…`, `train/quarantine/`). |
+| Training corpus honesty (A63) | **RED for the old corpus** / GREEN for the pipeline | `train/golden/cloud_golden.jsonl` held 208 rows and **5 distinct task strings**, all of them test fixtures or eval prompts — 186 × "write a one line poem about bees", 15 × "explain how a rainbow forms". The flywheel's input was a mirror of the test suite, and `build_sft` also hashed each task and trained on the **hash** as the prompt (measured: 9 of 9 emitted samples had a 32-char hex user message). Corpus quarantined, builder fixed, both pinned. Nothing has been trained on it (no `bee-8b` promoted). |
 | Scheduled tasks through the kernel | GREEN | agent jobs + proactive tasks run `kernel.run` with fail-closed approver (only preapproved capabilities) |
 | Proactive policy (default-deny, rate limits, quiet hours) | GREEN | no rule → no action; per-rule + global caps; quiet hours suppress non-critical pings |
 | External side effects (auto email/whatsapp/sms) | GREEN (gate) / **must stay off by default** | require `external_authorized=True` per rule; default-deny enforced in `ProactivePolicy.check` |
@@ -346,23 +364,47 @@ matrix). Real-network/real-hardware versions: not exercised.
 |---|---|
 | Unattended real-display computer use | real `WindowsDesktop` path never verified on a live display; budget + gate exist but the ground truth is mocked |
 | Auto external messaging (email/whatsapp/sms) from proactive rules | capability gate works, but no live channel integration is verified; keep `external_authorized` off until a channel is field-tested |
-| "Production-ready" / multi-user claims | single-user localhost design; web bind is 127.0.0.1; no authn between users; eval ceiling 8–13/21 (local 3B model) |
+| "Production-ready" / multi-user claims | single-user localhost design; web bind is 127.0.0.1; no authn between users; the agent eval is now **20/21** on this machine (2026-10-15, one invocation, no skips) and the residual failure is answer quality on a 3B model, so the ceiling is the *model*, not the mechanism — but 21 scored tasks is not a production acceptance test |
 
 ## YELLOW register (honest limitations)
 
-Fastpath gate-skip (design) · event sources still schema-only (email/app_event/
-device_state — timer/file_change/battery/network are live and started in
-production) · learned vision not implemented (structural only) ·
-wall-clock scheduler not CI-exercised · LiveKit has no explicit cancel *endpoint*
-(interruption is owned by barge-in / "Stop." → `kernel.cancel()`; the web UI got
-`POST /cancel` in this pass) · prompt-injection corpus now exists
-(`tests/test_injection.py`, 8 tests) but no large adversarial corpus / no
-learned input classifier · `sys.argv` swap in the LiveKit worker (SDK
+Fastpath gate-skip (design) · **email** is the one event source still schema-only
+(timer / file_change / battery / network / app_event / device_state are live and
+started in production — 5 of 6, see the Event sources row) · learned vision not
+implemented (structural only) · wall-clock scheduler not CI-exercised · LiveKit has
+no explicit cancel *endpoint* (interruption is owned by barge-in / "Stop." →
+`kernel.cancel()`; the web UI got `POST /cancel` in this pass) · prompt-injection
+corpus exists (`tests/test_injection.py`, 12 tests) but no large adversarial corpus /
+no learned input classifier · `sys.argv` swap in the LiveKit worker (SDK
 constraint — `run_app` has no argv parameter; scoped + `finally`-restored) ·
-behavioral eval capped by the local model (J3 model-gate is the closure path).
-Closed in this pass and no longer YELLOW: `tests/test_automation.py` load
-flake (N7 — idle is now announced by the job thread, not sampled).
+behavioral eval capped by the local model (J3 model-gate is the closure path) ·
+autostart has never been exercised by a **real reboot** of this box (the state
+machine is tested, the boot race is not).
+
+New in the 2026-10-13 → 10-15 pass (each has an entry or an open item in
+`TECHNICAL_DEBT.md`, none of them closed here on purpose):
+
+- **A64** — `_golden()` stores the *kernel-augmented* prompt as the user's task, so a
+  golden can begin with `## Conversation state (resolved by the kernel…)`; 5 of the
+  208 quarantined rows were exactly that. The corpus is empty until this is decided.
+- **Compaction has a floor it cannot move** — the live turn measured 8523 → 8434 est
+  tokens against a 7168 budget (8192 − 1024): system prompt + 30 tool schemas are a
+  fixed cost that no amount of history-dropping touches. It now *reports*
+  `fits: False` instead of implying success; the real fix is fewer/leaner schemas per
+  route (or retrieval), not another drop pass.
+- **Gate seeding from a partial run** — the J3 gate refuses to *compare* across
+  different task counts (A62), but a baseline *seeded* during a partial run still
+  stores raw counts.
+- **Marker registry drift** — `-m core` selects 849 of 928; `test_native`,
+  `test_telemetry` and `test_monitor` are in no marker list at all, and
+  `test_monitor.py` has no test functions (its `check()`s run at import, so it can
+  only fail as a collect error). A gate on `-m core` is not a gate on the suite.
+- **Docs quote suite sizes in prose** (`928`, `849`, `12 tests` above) and nothing
+  pins them — every pass has to re-measure them by hand, which is what this pass did.
+- Closed in earlier passes and still true: `tests/test_automation.py` load flake
+  (N7 — idle is announced by the job thread, not sampled).
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 543-test suite. Nothing here is marketing.*
+or to a green test in the 928-test suite (`pytest tests -q`, re-measured
+2026-10-15). Nothing here is marketing.*

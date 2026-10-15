@@ -24,6 +24,12 @@ sys.path.insert(0, str(ROOT))
 
 
 def latest_results() -> dict:
+    """Latest row per task id, by recorded timestamp.
+
+    A62: this used to be "last row in file order", so a task whose pass was earned
+    before a later regression still looked green to the resumer (and a row from an
+    appended older/batch file could supersede a newer one). Same fix as the runner's
+    own summary: compare `ts`, and never treat a `skipped` row as a pass."""
     p = ROOT / "evals" / "results.jsonl"
     latest: dict = {}
     if p.exists():
@@ -35,7 +41,9 @@ def latest_results() -> dict:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            latest[row["id"]] = row
+            cur = latest.get(row["id"])
+            if cur is None or str(cur.get("ts", "")) <= str(row.get("ts", "")):
+                latest[row["id"]] = row
     return latest
 
 
@@ -49,7 +57,7 @@ def main() -> int:
         if only and tid not in only:
             continue
         row = latest.get(tid)
-        if row is not None and row.get("ok"):
+        if row is not None and row.get("ok") and not row.get("skipped"):
             print(f"[skip] {tid} (already passed)")
             continue
         todo.append(t)
