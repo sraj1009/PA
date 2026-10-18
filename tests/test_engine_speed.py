@@ -156,6 +156,57 @@ def test_keep_alive_litellm_path(monkeypatch):
     assert captured["kw"].get("extra_body", {}).get("keep_alive") == "60s"
 
 
+def test_keep_alive_native_embedding(monkeypatch):
+    """P1-4: `embed()` carried no keep_alive on either transport, so the
+    memory/RAG path left the embedding model on Ollama's 5-minute default —
+    measured live 2026-10-18: ~299 s after a bare embed vs ~59 s with
+    `keep_alive: 60s` (same species as A58, on the serving path)."""
+    from bee.agent import client as c
+    captured: dict = {}
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"embedding": [1.0]}
+
+    def fake_post(url, json=None, timeout=None):
+        captured["payload"] = json
+        return _R()
+
+    monkeypatch.setattr(c, "HAS_LITELLM", False)   # force the native loop
+    monkeypatch.setattr(c.httpx, "post", fake_post)
+    monkeypatch.setattr(c.LLMClient, "_has_ollama", lambda self: True)
+    out = LLMClient(_mk_cfg()).embed(["one text"])
+    assert out == [[1.0]]
+    assert captured["payload"]["keep_alive"] == "60s"
+    assert captured["payload"]["prompt"] == "one text"
+
+
+def test_keep_alive_litellm_embedding(monkeypatch):
+    """Same contract on the primary path — and the form is NOT the chat one.
+    Measured live (2026-10-18, unload-separated /api/ps, litellm 1.104.0):
+    `extra_body` lands as `options.extra_body` and is ignored (cold call ->
+    299 s), while a bare `keep_alive` kwarg reaches the body top level
+    (~59 s). Pin the bare-kwarg form."""
+    from bee.agent import client as c
+    captured: dict = {}
+
+    def fake_embedding(**kw):
+        captured["kw"] = kw
+        return {"data": [{"embedding": [1.0]}]}
+
+    monkeypatch.setattr(c, "HAS_LITELLM", True)
+    monkeypatch.setattr(c.litellm, "embedding", fake_embedding)
+    monkeypatch.setattr(c.LLMClient, "_has_ollama", lambda self: True)
+    out = LLMClient(_mk_cfg()).embed(["one text"])
+    assert out == [[1.0]]
+    assert captured["kw"].get("keep_alive") == "60s"
+    assert "extra_body" not in captured["kw"]   # measured no-op on embeddings
+    assert captured["kw"]["model"].startswith("ollama/")
+
+
 # ------------------------------------------------- local server options (A58)
 class _FakeResp:
     """One stand-in that satisfies both call shapes: `chat()` reads

@@ -654,6 +654,22 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   (66 unique ids, no route hijacks). Pinned by `tests/test_eval_score.py`
   (skip_if semantics, CI/flaky shapes) and `tests/test_fastpaths.py` (real-
   classifier fastpath guard, 3 payloads).
+- **Serving keep_alive reaches the embedding paths (P1-4, 2026-10-18).** A58
+  fixed `num_ctx`/`keep_alive` for chat and streaming; `LLMClient.embed()` — the
+  memory/RAG serving path — sent neither, so `nomic-embed-text` stayed resident
+  on Ollama's 5-minute default. Measured live with unload-separated `/api/ps`
+  reads: a cold embed call read `~299 s` before the fix, `~59 s` after. The
+  form is not the chat one, and the difference cost a debugging cycle (worth
+  recording): litellm's embedding transformation puts `extra_body` into
+  `options`, where Ollama ignores it (`~299 s` — measured), while a bare
+  `keep_alive` kwarg lands at the body top level (`~59 s`). The fix uses the
+  bare kwarg on the litellm path and body-top-level on the native path, gated
+  on `cfg.ollama.keep_alive` exactly like chat; embedding never leaves the
+  local server, so there is no cloud gate. The raw-endpoint bench harness
+  (`evals/bench_model.py`) stays raw by design. Pinned by
+  `test_keep_alive_native_embedding` / `test_keep_alive_litellm_embedding` —
+  both fail against the pre-fix `embed()` (`KeyError: 'keep_alive'` /
+  `None == '60s'`).
 - **CI portability pass (2026-10-18).** The first Actions run on the rewritten
   repo (Linux + Windows bare installs, both `-m core`) failed 18/12 tests that
   had only ever run on the author's box. Fixes: the Windows-only feature tests
@@ -885,8 +901,8 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 1088-test suite (`pytest tests -q`, re-measured
+or to a green test in the 1090-test suite (`pytest tests -q`, re-measured
 2026-10-18 after the loop refactor + routing facade + doctor + memory
 hardening + web audit + packaging + the A69 live-skip fix + the A64
-registry + gate-guard closes + the N7 pin repair + the M12 import-graph lint).
-Nothing here is marketing.*
+registry + gate-guard closes + the N7 pin repair + the M12 import-graph lint
++ the P1-4 embed keep_alive). Nothing here is marketing.*

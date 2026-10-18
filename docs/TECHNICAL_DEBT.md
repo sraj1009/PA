@@ -1271,6 +1271,15 @@ scripts were *probe* artifacts — native `/api/chat` wants `tool_calls[].functi
 as an **object** with a `type` tag, while BEE sends the OpenAI shape (JSON *string*,
 `loop.py:801`) and litellm translates it. The product path was correct.
 
+**Follow-up (2026-10-18, P1-4):** A58 covered chat and streaming; `embed()` — the
+memory/RAG path — still sent no `keep_alive` on either transport, so
+`nomic-embed-text` sat on Ollama's 5-minute default (cold call, unload-separated
+`/api/ps` reads: `~299 s` before, `~59 s` after). The *form* differs from chat:
+litellm's embedding transformation routes `extra_body` into `options`, where
+Ollama ignores it (`~299 s` measured), while a bare `keep_alive` kwarg reaches
+the body top level (`~59 s`). Fixed in `bee/agent/client.py:embed()`; pinned by
+`test_keep_alive_native_embedding` / `test_keep_alive_litellm_embedding`.
+
 
 ## A60 — BEE could not bring up its own model server (2026-10-13; three parts)
 

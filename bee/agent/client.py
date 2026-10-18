@@ -357,20 +357,38 @@ class LLMClient:
         texts = [t if t else " " for t in texts]
         if not self._has_ollama():
             raise LLMError("Ollama not reachable for embeddings", "connect")
+        # P1-4: keep_alive governs the EMBEDDING model too. Measured live
+        # (2026-10-18, unload-separated /api/ps reads; litellm==1.104.0):
+        # a cold embed left nomic-embed-text loaded ~299 s (Ollama default);
+        # with the config value it reads ~59 s. The two transports take
+        # DIFFERENT forms - measured, not guessed: litellm's embedding
+        # transformation moves extra_body into `options` where Ollama ignores
+        # it (299 s), while a bare keep_alive kwarg lands at the body top
+        # level (59 s). The chat transformation is the opposite (extra_body
+        # works there - A58); do not port one form to the other. Embedding
+        # never leaves the local server, so there is no cloud gate.
+        keep_alive = self.cfg.ollama.keep_alive
         if HAS_LITELLM:
             try:
                 # `ollama_chat/` is a CHAT provider: for embeddings litellm maps
                 # only `ollama/`, so the old ref raised UnknownProvider on every
                 # call and the blanket except dropped it into the native loop.
-                resp = litellm.embedding(model=f"ollama/{self.cfg.ollama.embed_model}",
-                                         api_base=self.cfg.ollama.base_url, input=texts)
+                kwargs: dict = {"model": f"ollama/{self.cfg.ollama.embed_model}",
+                                "api_base": self.cfg.ollama.base_url,
+                                "input": texts}
+                if keep_alive:
+                    kwargs["keep_alive"] = keep_alive
+                resp = litellm.embedding(**kwargs)
                 return [d["embedding"] for d in resp["data"]]
             except Exception as e:
                 log.debug("litellm embedding unavailable (%s); using native Ollama", e)
         url = f"{self.cfg.ollama.base_url}/api/embeddings"
         out = []
         for t in texts:
-            r = httpx.post(url, json={"model": self.cfg.ollama.embed_model, "prompt": t[:8000]}, timeout=60)
+            payload = {"model": self.cfg.ollama.embed_model, "prompt": t[:8000]}
+            if keep_alive:
+                payload["keep_alive"] = keep_alive
+            r = httpx.post(url, json=payload, timeout=60)
             r.raise_for_status()
             out.append(r.json()["embedding"])
         return out
