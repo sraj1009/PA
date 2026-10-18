@@ -677,6 +677,12 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
             # command guard off (`/guard off`) — a REPL convenience flag can
             # never bypass capability authorization. The legacy command
             # guard below (line 605) is the one thing `guard_on` controls.
+            # P1-7: stamp the turn's trust onto ctx BEFORE anything runs, so
+            # tool handlers (memory writes) can provenance-tag execution that
+            # happens while untrusted content is in play. Recomputed per call:
+            # a stale True from an earlier task self-corrects on the first
+            # dispatch of the next one.
+            ctx.untrusted_active = untrusted_active
             if res_v is None and getattr(ctx, "capability_gate", None) is not None:
                 gate_res = ctx.capability_gate.check(tname, args,
                                                      task_id=getattr(ctx, "current_task_id", ""),

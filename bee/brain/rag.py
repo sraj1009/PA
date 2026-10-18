@@ -46,7 +46,12 @@ def needs_context(task: str) -> bool:
 
 
 def auto_context(ctx, task: str, k: int = 4) -> str:
-    """Markdown context block for the system/user message, or '' if not needed."""
+    """Markdown context block for the system/user message, or '' if not needed.
+
+    P1-7 recall fence: lines tagged untrusted-turn are stripped before the
+    block is built — a silent grounding surface must never carry facts planted
+    by external content. Trusted neighbours in the same chunk survive; the
+    fact itself stays reachable through explicit memory_search, marked."""
     if not needs_context(task):
         return ""
     res = retrieve(ctx, task, k=k)
@@ -54,8 +59,13 @@ def auto_context(ctx, task: str, k: int = 4) -> str:
         return ""
     lines = ["## MEMORY CONTEXT (grounded, from your memory — verify before relying)"]
     for r in res:
+        text, _planted = md.strip_untrusted_lines(r["text"])
+        if not text:
+            continue
         src = r.get("source", "?").replace(str(ctx.cfg.workspace), ".", 1)
-        lines.append(f"- [{src}] {r['text'][:300]}")
+        lines.append(f"- [{src}] {text[:300]}")
+    if len(lines) == 1:
+        return ""
     return "\n".join(lines)
 
 

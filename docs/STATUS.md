@@ -733,6 +733,40 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   contract, quiet-vs-normal `finish`, tagged end-to-end loop pass, episode
   family gate, registry) and the M12 import pin now names `bee.practice` in
   the organ group.
+- **Untrusted-turn memory provenance + recall fence (P1-7, 2026-10-18).** The
+  loop already sentinel-wrapped external content and escalated capability asks
+  (audit item 5), but a memory write that still executed — an interactive
+  approval of "remember this" from a fetched page — landed with no provenance,
+  and `rag.auto_context` later served it as trusted grounding on every silent
+  recall. Now the loop stamps each tool dispatch with the turn's trust state
+  (`ctx.untrusted_active`, recomputed per dispatch so stale state
+  self-corrects), and the memory tools honour it: writes from an untrusted
+  turn are tagged `[source: untrusted-turn]`, may not rewrite an existing
+  bullet or subject-clash "update" a trusted value, and a wipe
+  (`append=False`) is refused outright — `md.add_facts(..., protect=True)` is
+  the policy, not per-caller logic. Every such write emits a `memory_write`
+  metrics row with `untrusted: true` — the auditable signal of a poisoning
+  attempt. At recall the two surfaces split deliberately: `rag.auto_context`
+  strips tagged lines before the grounding block is built (trusted neighbours
+  in the same chunk survive), while the explicit `memory_search` returns the
+  fact with `untrusted_origin: true` and a visible marker — a planted fact
+  must be *seen*, not silently hidden. The fail-closed switches stay pinned:
+  `external_authorized` remains False (`test_proactive` / `test_automation`)
+  and the unattended approver always denies `desktop.control` and denies
+  `files.write` once an untrusted turn escalated it. `tests/test_injection.py`
+  grew 12 → 16 tests (tagged write, no-overwrite/no-wipe, recall strip, search
+  marking, unattended denial). The live check immediately paid for itself: the
+  real `web_fetch` had **never actually fetched anything** — `netguard.safe_get`
+  buffered with `client.get()` and then `iter_raw()`'d the consumed stream, so
+  every real fetch returned only httpx `StreamConsumed` ("content has already
+  been streamed"), a defect the fake-transport tests structurally could not
+  see. Fixed first, as its own commit: `client.stream(...)` + `iter_bytes()`
+  (content-encoding decodes before the size cap counts bytes), pinned by three
+  real-httpx `MockTransport` regressions — bite-proven, each failing with the
+  exact live error against the pre-fix code. Second live run — real network +
+  real kernel, every user-state path sandboxed: fetch 200 / fenced, the write
+  landed tagged, `auto_context` excluded the canary, and the `memory_write`
+  row recorded `untrusted: true`. Full suite 1119 passed.
 - **CI portability pass (2026-10-18).** The first Actions run on the rewritten
   repo (Linux + Windows bare installs, both `-m core`) failed 18/12 tests that
   had only ever run on the author's box. Fixes: the Windows-only feature tests
@@ -965,9 +999,10 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 1112-test suite (`pytest tests -q`, re-measured
+or to a green test in the 1119-test suite (`pytest tests -q`, re-measured
 2026-10-18 after the loop refactor + routing facade + doctor + memory
 hardening + web audit + packaging + the A69 live-skip fix + the A64
 registry + gate-guard closes + the N7 pin repair + the M12 import-graph lint
 + the P1-4 embed keep_alive + the P1-5 recall guard + the P1-6 practice
-job). Nothing here is marketing.*
+job + the P1-7 untrusted-memory fence and the web_fetch streaming defect
+its live check exposed). Nothing here is marketing.*

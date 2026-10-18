@@ -33,6 +33,10 @@ class Context:
                                    # are tagged `practice`, and diary/win/golden
                                    # side effects stay silent (nobody asked for
                                    # this task; only the practice job sets it)
+    untrusted_active: bool = False # P1-7: external content was ingested this
+                                   # turn — the loop stamps it before each tool
+                                   # dispatch; memory writes made while set are
+                                   # provenance-tagged and recall-fenced
     kernel: object = None          # Phase 2: AgentKernel instance (set at launch;
                                    # commands use ctx.kernel.direct for LLM calls)
     capability_gate: object = None # Phase 3: CapabilityGate — checked BEFORE tool
