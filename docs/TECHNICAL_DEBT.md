@@ -305,7 +305,7 @@ Evidence: `docs/JARVIS_ACCEPTANCE_AUDIT.md` + `tests/test_debt_fixes.py`
 | N4 (HIGH-latent) | **CLOSED** | The KERNEL owns task-scoped cancellation: `AgentKernel._run_impl` clears the cancel event at every new task start (kernel.py); a cancelled task can no longer poison the next, on any surface; regression `test_n4_stale_cancel_event_does_not_poison_new_task`. (Web/LiveKit still have no *cancel route* — a feature gap, not a leak path; the kernel clear makes a future route safe.) |
 | N5 (MEDIUM) | **CLOSED** | `.gitignore` covers `memory/receipts.jsonl`, `memory/sessions/`, `memory/store.json`, `memory/checkpoints/` (verified by `git ls-files`) |
 | N6 (MEDIUM) | **CLOSED — root-caused** | The `guard_blocked` eval anomaly was a REAL DEFECT: a guard-'ask' DENIED by the approver left the task in `WAITING_FOR_PERMISSION`; the later move to `VERIFYING` raised `InvalidTransitionError`. F5: `_approver` returns the task to `EXECUTING` on both outcomes; regression `test_f5_denied_guard_ask_does_not_strand_task`; `guard_blocked` re-run with the live model: **PASS (42.0s)**. The "denied automation.manage asks burned tool budget" observation was the same model retrying after a block — no approver-reuse bug found. |
-| N7 (LOW) | OPEN | Load-dependent flake in `tests/test_automation.py` (`wait_idle(10)`). Not reproduced in this session's runs (all green). Correct fix = deterministic worker shutdown (join with timeout + drain check) — deferred; must NOT be loosened. |
+| N7 (LOW) | **CLOSED 2026-10-18** | Load-dependent flake in `tests/test_automation.py` (`wait_idle(10)`). The fix landed 2026-10-09 in `c6c4a33` (announced-idle signal) but was never recorded here; closing it also repaired an inert pin (see the closure note below). Not loosened at any point. |
 | N8 (LOW) | **CLOSED** | `evals/results_summary.json` is no longer tracked (`git ls-files evals/` = verify_suite.py, tasks.yaml, bench_model.json, REPORT.md only) |
 | N9 (LOW) | **CLOSED** | `ToolBus.from_default` records the FULL capability list (`ToolDef.capabilities`); `capability` kept as primary for compatibility; regression `test_n9_bus_records_full_capability_list` |
 | H6 (HIGH, half) | **MITIGATED + documented (SDK constraint)** | `livekit.agents.cli.run_app(server)` has no argv parameter (verified against the installed SDK source: `_build_cli(server)()` reads `sys.argv`); the scoped save/swap/`finally`-restore in `livekit/agent.py:306-314` is the only mechanism. Residual: concurrent argparse use INSIDE the livekit worker process while the worker runs (latent, single-user worker process). Revisit if the SDK gains an argv parameter. |
@@ -321,6 +321,25 @@ worker shutdown, never loosen the test), M12 (import-cycle lint, cosmetic), and
 the §3-risky rows
 already closed above (R1/R2/R5/R8 closed in Phase 1; R3 web auth closed in
 Phase 1; R4 secrets closed in Phase 0; R7 closed via H8; R6 = H6 mitigated).
+
+**Closed 2026-10-18 — N7 (the fix had landed 2026-10-09 in `c6c4a33` and was
+never recorded here):** the pre-fix `wait_idle` polled `is_alive()` in a 0.05 s
+join loop (`git show c6c4a33^^:bee/automation/worker.py`), so under machine
+load a finished job could still read as alive past the deadline. `JobWorker`
+now carries an `_idle` Event — `tick()` clears it before starting a job thread
+and the last exiting thread sets it under `_threads_lock`
+(`bee/automation/worker.py:189-190`, `:229-249`, `:413`, `:431-433`) — and
+`wait_idle` waits on the event, keeping the bounded join sweep only as an
+exactness fallback. The standing rule was honoured: no assertion was relaxed.
+Closing it honestly required repairing one of its two pins: in
+`test_idle_waits_for_the_slowest_concurrent_job` the fast/slow split was driven
+from `desc=`, but the worker runs `action['task']` (`worker.py:_execute`), so
+both jobs slept 0.01 s and the concurrency scenario never happened (0.10 s per
+run, invisible). The pin now passes `task=` with a wiring guard
+(`sorted(kernel.calls) == ["fast echo", "slow echo"]`); its call time went to
+0.69 s — the slow branch actually fires. Verified 2026-10-18 under 6-process
+CPU load: both pins green in 15/15 consecutive runs, then the whole
+`tests/test_automation.py` (30 tests) green.
 
 ---
 

@@ -860,6 +860,17 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   compare. Pinned by
   `test_a_baseline_seeded_from_a_partial_run_is_not_comparable_later` and
   `test_two_arms_that_skipped_identically_are_comparable`.
+- **N7 — the worker-flake row is closed (2026-10-18).** The load-dependent
+  `wait_idle(10)` flake was fixed back on 2026-10-09 (`c6c4a33`) with an
+  announced-idle signal, but the debt register never recorded it — the old
+  `wait_idle` polled `is_alive()` every 0.05 s, so under load a finished job
+  could still read as alive past the deadline. Closing it honestly required
+  repairing one of its two pins:
+  `test_idle_waits_for_the_slowest_concurrent_job` keyed its fast/slow split
+  on `desc=`, but the worker runs `action['task']`, so both jobs ran 0.01 s
+  and the scenario never fired (0.10 s per run; 0.69 s now, with a wiring
+  guard). No assertion was loosened. Verified under 6-process CPU load: both
+  pins green 15/15 runs, plus the whole file (30 tests) green.
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit

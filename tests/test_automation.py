@@ -837,7 +837,12 @@ def test_wait_idle_is_announced_not_sampled(tmp_path):
 
 
 def test_idle_waits_for_the_slowest_concurrent_job(tmp_path):
-    """One finishing early must not mark the worker idle while another runs."""
+    """One finishing early must not mark the worker idle while another runs.
+
+    The worker runs `action['task']` (see `_execute`: `act.get("task") or
+    job.description`), so the fast/slow split must ride `task=` — driving it
+    from `desc=` left both jobs on the same text and the slow branch unreachable
+    (the pin was inert: 0.10 s per run instead of ~0.6 s)."""
     import time as _t
 
     class Mixed(FakeKernel):
@@ -846,13 +851,16 @@ def test_idle_waits_for_the_slowest_concurrent_job(tmp_path):
             _t.sleep(0.6 if "slow" in text else 0.01)
             return FakeResult(ok=True, output="done")
 
-    w = make_worker(tmp_path, Mixed(Ctx(), "ok"), FakeClock(BASE))
-    a = w.create_job(due_one_time(desc="fast job"))
-    b = w.create_job(due_one_time(desc="slow job"))
+    kernel = Mixed(Ctx(), "ok")
+    w = make_worker(tmp_path, kernel, FakeClock(BASE))
+    a = w.create_job(due_one_time(desc="fast job", task="fast echo"))
+    b = w.create_job(due_one_time(desc="slow job", task="slow echo"))
     started = w.tick()
     assert len(started) == 2, started
     assert w.wait_idle(10) is True
     assert w._idle.is_set()
+    # wiring guard: the text the branching keys on must be what both jobs ran
+    assert sorted(t for t, _ in kernel.calls) == ["fast echo", "slow echo"]
     assert {w.store.load_job(j.id).state for j in (a, b)} == {"completed"}
 
 
