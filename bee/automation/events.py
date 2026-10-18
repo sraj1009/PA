@@ -579,16 +579,20 @@ def start_sources(bus: EventBus, cfg=None) -> list[EventSource]:
                        name="bee-tick")
     tick.start(bus)
     started.append(tick)
-    battery = BatterySource(
-        interval_seconds=float(getattr(auto, "battery_poll_seconds", 60.0)
-                               if auto is not None else 60.0),
-        low_percent=int(getattr(auto, "battery_low_percent", 20)
-                        if auto is not None else 20))
-    try:
-        battery.start(bus)
-        started.append(battery)
-    except Exception as e:
-        log.info("battery source unavailable: %s", e)
+    # The capability report is the contract — never start a source it declares
+    # unavailable on this platform (report/started-list consistency is pinned
+    # by test_capability_report_is_honest_on_this_machine).
+    if not available_sources()["battery"].startswith("unavailable"):
+        battery = BatterySource(
+            interval_seconds=float(getattr(auto, "battery_poll_seconds", 60.0)
+                                   if auto is not None else 60.0),
+            low_percent=int(getattr(auto, "battery_low_percent", 20)
+                            if auto is not None else 20))
+        try:
+            battery.start(bus)
+            started.append(battery)
+        except Exception as e:
+            log.info("battery source unavailable: %s", e)
     network = NetworkSource(
         interval_seconds=float(getattr(auto, "network_poll_seconds", 30.0)
                                if auto is not None else 30.0))

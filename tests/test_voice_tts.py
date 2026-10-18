@@ -145,7 +145,7 @@ def test_decode_to_wav_roundtrips_through_a_real_decoder(tmp_path):
 def test_edge_tts_runs_without_an_azure_key(monkeypatch, tmp_path):
     """`key` is config-compatible but unnecessary — gating on it only cost the
     neural voice, so an empty key must still synthesize and play."""
-    import edge_tts
+    edge_tts = pytest.importorskip("edge_tts")   # optional dep (bare CI install)
 
     class FakeCommunicate:
         def __init__(self, text, voice, rate="0%"):
@@ -169,7 +169,7 @@ def test_edge_tts_runs_without_an_azure_key(monkeypatch, tmp_path):
 
 
 def test_edge_tts_returns_false_when_synthesis_fails(monkeypatch):
-    import edge_tts
+    edge_tts = pytest.importorskip("edge_tts")   # optional dep (bare CI install)
 
     class Boom:
         def __init__(self, *a, **k):

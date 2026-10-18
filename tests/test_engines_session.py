@@ -49,6 +49,11 @@ def ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(mt, "record", lambda *a, **k: None)
     cfg = load_config()
     cfg.rag.auto_context = False
+    # Deterministic hybrid-speed routing: cloud-tier usability must not depend
+    # on this machine having a provider key (CI runners have none) — pin the
+    # documented explicit-credential path so these tests assert ROUTING, not
+    # the environment. No call reaches the network (RecordingClient doubles).
+    cfg.cloud.api_key = "test-key-not-real"
     c = Context(cfg, workspace=tmp_path)
     c.client = RecordingClient()
     c.episodes_on = False

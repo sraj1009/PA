@@ -82,6 +82,10 @@ def _cfg(base=BASE, autostart=True, local=True):
 def _wire(monkeypatch, server: Server, popen: Popen):
     monkeypatch.setattr(ls.httpx, "get", server.get)
     monkeypatch.setattr(ls.subprocess, "Popen", popen)
+    # Binary discovery (PATH + install dirs) has its own dedicated tests;
+    # everything wired here drives the LAUNCH, which must not depend on this
+    # runner having Ollama installed (CI has none). Popen is already a double.
+    monkeypatch.setattr(ls, "exe_path", lambda: "ollama-stub")
 
 
 def _launched(popen: Popen, attempts: int = 100) -> None:

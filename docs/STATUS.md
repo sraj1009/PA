@@ -653,6 +653,22 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   (66 unique ids, no route hijacks). Pinned by `tests/test_eval_score.py`
   (skip_if semantics, CI/flaky shapes) and `tests/test_fastpaths.py` (real-
   classifier fastpath guard, 3 payloads).
+- **CI portability pass (2026-10-18).** The first Actions run on the rewritten
+  repo (Linux + Windows bare installs, both `-m core`) failed 18/12 tests that
+  had only ever run on the author's box. Fixes: the Windows-only feature tests
+  skip with a reason (`jarvis` volume/media/brightness — `systemctl._win` is
+  the platform line), the per-machine `welcome.ide_path` check detects and
+  skips where the editor is absent, optional `edge-tts` is `importorskip`,
+  the foreground-window doubles fake `win32con` alongside `win32gui`, the
+  Ollama-launch tests fake discovery (its own discovery tests stay real), the
+  secret-redaction test injects a canary key plus checks every real key,
+  cloud-first routing pins an explicit test key instead of relying on a
+  credentialed runner, and the delete-confirmation uses a platform-correct
+  command. One real bug surfaced: `start_sources()` started the battery source
+  where `available_sources()` reports it unavailable — it now consults the
+  report, the very contract the honesty test pins. Verified on all four CI
+  selections on the author's box (core 936 · security 155 · portable
+  integration 562 · windows 88) before the re-push.
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit

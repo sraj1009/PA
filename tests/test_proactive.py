@@ -19,6 +19,7 @@ sleep. No network, no mail, no display.
 """
 from __future__ import annotations
 
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -228,12 +229,16 @@ def test_sources_honor_config_and_the_disable_switch(monkeypatch):
     cfg.automation.file_watch_dir = ""
     started = start_sources(CollectBus(), cfg)
     kinds = {s.kind for s in started}
-    assert {"timer", "battery", "network"} <= kinds
-    bat = [s for s in started if s.kind == "battery"][0]
+    expected = {"timer", "network"}
+    if sys.platform == "win32":
+        expected.add("battery")           # the power API exists on Windows only
+    assert expected <= kinds, kinds
+    if "battery" in kinds:
+        bat = [s for s in started if s.kind == "battery"][0]
+        assert bat.interval == cfg.automation.battery_poll_seconds
+        assert bat.low_percent == cfg.automation.battery_low_percent
     net = [s for s in started if s.kind == "network"][0]
-    assert bat.interval == cfg.automation.battery_poll_seconds
     assert net.interval == cfg.automation.network_poll_seconds
-    assert bat.low_percent == cfg.automation.battery_low_percent
 
 
 def test_capability_report_is_honest_on_this_machine():
@@ -348,8 +353,14 @@ def test_device_source_survives_a_missing_reader():
     DeviceSource(read_fn=lambda: None).scan(bus)     # desktop / no stats
     DeviceSource(read_fn=lambda: {"ram_free_mb": None, "disk_free_gb": None}).scan(bus)
     assert bus.names() == []
-    # the real reader must never raise into the poll loop
-    assert DeviceSource()._default_read() is not None
+    # The real reader must never raise into the poll loop: Windows telemetry
+    # yields stats; platforms without a native backend return None — exactly
+    # the "nothing to report" case pinned by the two scans above.
+    got = DeviceSource()._default_read()
+    if sys.platform == "win32":
+        assert got is not None
+    else:
+        assert got is None
 
 
 def test_start_sources_runs_and_can_stop_the_device_source(monkeypatch):

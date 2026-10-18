@@ -205,8 +205,12 @@ def test_gate_blocks_before_execution_in_kernel(tmp_path):
 
 def test_gate_confirms_then_proceeds_in_kernel(tmp_path):
     from test_kernel_integration import make_kernel
+    # `del` is cmd-only: the execution is the point of this test, so the delete
+    # must run wherever the suite runs (both spellings escalate to files.delete).
+    import os
+    delete_cmd = "del notes.txt" if os.name == "nt" else "rm notes.txt"
     k, client, _ = make_kernel(tmp_path, [
-        {"tool_calls": [{"id": "c1", "name": "shell", "arguments": {"command": "del notes.txt"}}]},
+        {"tool_calls": [{"id": "c1", "name": "shell", "arguments": {"command": delete_cmd}}]},
         "Deleted notes.txt as requested.",
     ], approver=lambda tool, args, reason: True)
     (tmp_path / "notes.txt").write_text("old")

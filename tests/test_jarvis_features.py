@@ -196,6 +196,8 @@ def test_systemctl_tool_exposes_hardware(monkeypatch):
     assert "hardware" in enum, enum
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="volume keys are Windows-only (systemctl._win)")
 def test_keybd_recording(monkeypatch):
     presses = []
     monkeypatch.setattr(systemctl, "_keybd", lambda vk, n=1: presses.append((vk, n)) or True)
@@ -208,6 +210,8 @@ def test_keybd_recording(monkeypatch):
     assert "Unknown volume action" in systemctl.set_volume("sideways")
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="media keys are Windows-only (systemctl._win)")
 def test_media_and_desktop(monkeypatch):
     presses = []
     monkeypatch.setattr(systemctl, "_keybd", lambda vk, n=1: presses.append(vk) or True)
@@ -221,6 +225,8 @@ def test_media_and_desktop(monkeypatch):
     assert "Desktop shown" in systemctl.show_desktop()
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="brightness (WMI) is Windows-only (systemctl._win)")
 def test_brightness_validation(monkeypatch):
     calls = []
     monkeypatch.setattr(systemctl, "_ps", lambda expr: calls.append(expr) or "0")
@@ -266,7 +272,10 @@ def test_welcome_config_loaded():
     assert cfg.welcome.ide_exes
     if cfg.welcome.ide_path:
         import os
-        assert os.path.isfile(cfg.welcome.ide_path), "welcome.ide_path must exist"
+        if not os.path.isfile(cfg.welcome.ide_path):
+            # welcome.ide_path is a per-machine setting — detect and skip where
+            # that editor is not installed (CI runners), never fail portably.
+            pytest.skip(f"configured IDE not installed here: {cfg.welcome.ide_path}")
 
 
 def test_welcome_retrigger_guard():

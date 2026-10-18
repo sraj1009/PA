@@ -586,13 +586,22 @@ class _FakeWin32:
         return self._r
 
 
+def _fake_win32(monkeypatch, gui):
+    """WindowsDesktop validates `import win32con, win32gui` at construction.
+    These doubles stand in for BOTH names so the foreground-window logic runs
+    on any runner (CI has no pywin32; nothing on this path reads win32con)."""
+    import types
+    monkeypatch.setitem(sys.modules, "win32con", types.ModuleType("win32con"))
+    monkeypatch.setitem(sys.modules, "win32gui", gui)
+
+
 def test_active_window_resolves_the_handle_directly(monkeypatch):
     """The old version searched list_windows() (which drops untitled windows),
     so a real foreground window with an empty title reported active=None and the
     active_window verification claimed failure where there was none."""
     import sys
     from bee.computeruse import desktop as D
-    monkeypatch.setitem(sys.modules, "win32gui", _FakeWin32(handle=1234, title=""))
+    _fake_win32(monkeypatch, _FakeWin32(handle=1234, title=""))
     w = D.WindowsDesktop().active_window()
     assert w is not None, "an untitled foreground window must still resolve"
     assert w.active and w.title == ""
@@ -601,7 +610,7 @@ def test_active_window_resolves_the_handle_directly(monkeypatch):
 def test_active_window_is_none_only_when_truly_unknown(monkeypatch):
     import sys
     from bee.computeruse import desktop as D
-    monkeypatch.setitem(sys.modules, "win32gui", _FakeWin32(handle=0))
+    _fake_win32(monkeypatch, _FakeWin32(handle=0))
     assert D.WindowsDesktop().active_window() is None, \
         "a non-interactive session must report unknown, not guess a window"
 
@@ -614,7 +623,7 @@ def test_active_window_falls_back_when_the_api_raises(monkeypatch):
         def GetForegroundWindow(self):
             raise RuntimeError("no win32 here")
 
-    monkeypatch.setitem(sys.modules, "win32gui", Boom())
+    _fake_win32(monkeypatch, Boom())
     d = D.WindowsDesktop()
     d.list_windows = lambda: [WindowInfo(title="Notepad", cls="N", x=0, y=0, w=9, h=9,
                                           active=True)]

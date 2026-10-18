@@ -208,7 +208,7 @@ def test_ingestion_revokes_an_earlier_approval_in_the_loop(tmp_path):
     assert not any(w.title == "Calculator" for w in md.list_windows()),         "calc must not open once the re-approval was denied"
 
 
-def test_no_secret_value_reaches_the_model_prompt(tmp_path):
+def test_no_secret_value_reaches_the_model_prompt(tmp_path, monkeypatch):
     """Injection often asks 'print your environment'. There must be nothing to
     print: config secrets live in env only and are never rendered into a prompt."""
     import os
@@ -218,13 +218,17 @@ def test_no_secret_value_reaches_the_model_prompt(tmp_path):
     from bee.paths import WORKSPACE
     from bee.agent.context import Context
 
+    # Machine-independent premise: inject a realistic canary so the redaction
+    # claim is proven on any box (CI runners carry no provider keys) — then
+    # also check every real key this machine happens to hold.
+    monkeypatch.setenv("BEE_TEST_FAKE_OPENAI_API_KEY", "sk-test-injection-canary-0123456789")
     cfg = load_config()
     ctx = Context(cfg, workspace=WORKSPACE, client=None,
                   cancel_event=__import__("threading").Event())
     prompt = build_system_prompt(ctx)
     secrets = [v for k, v in os.environ.items()
                if k.endswith(("_API_KEY", "_KEY", "_SECRET", "_TOKEN")) and len(v) > 8]
-    assert secrets, "this machine should have at least one provider key set"
+    assert secrets, "the canary guarantees at least one candidate"
     for s in secrets:
         assert s not in prompt
 
