@@ -15,7 +15,9 @@
 ## Tests (source of truth: `tests/conftest.py`, CI: `.github/workflows/ci.yml`)
 - Full: `python -m pytest tests -q` (~2 min). Gate: `-m core`. Markers are a
   **hand-kept registry** — every new `tests/test_*.py` MUST be added to `_UNIT`,
-  `_INTEGRATION`, or a category list or it is silently deselected from `-m core`.
+  `_INTEGRATION`, or a category list or it is silently deselected from `-m core`;
+  `tests/test_marker_registry.py` now fails the suite on an unregistered file
+  (and on category-only entries no CI job selects).
 - Hermeticity is enforced (`test_eval_hermeticity`): never write to real
   `train/`, `metrics/`, `skills/`, `memory/` from tests — use `tmp_path` +
   `monkeypatch` on `bee.paths` constants.

@@ -836,10 +836,22 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   `tests/test_debt_fixes.py::test_a69_live_checks_skip_when_the_sdk_is_absent`
   (child pytest, SDK blocked, fake creds forced via `LIVEKIT_*` env:
   `2 failed in 0.20s` before → `2 skipped in 0.08s` after).
+- **CI gate completeness — the marker registry now fails loud (A64 closed,
+  2026-10-18).** Markers come from hand-kept filename lists, so four files
+  that passed locally were selected by **no CI job**: `test_native` and
+  `test_telemetry` (in no list at all) and `test_automate`/`test_commands`
+  (category markers only — `tools`/`agent` drive no job). All four are
+  registered now, and `tests/test_marker_registry.py` enforces the registry
+  in both directions: a new `tests/test_*.py` no CI job can select fails the
+  suite (proved by unregistering `test_native` — `1 failed` naming it), and a
+  stale name with no file fails too. `test_monitor` (import-time checks, no
+  selectable items) and `test_livekit` (optional SDK, no CI job installs it)
+  are documented exemptions with reasons; the meta-test also pins that
+  `ci.yml` still runs the five marker pockets it feeds.
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 1081-test suite (`pytest tests -q`, re-measured
+or to a green test in the 1085-test suite (`pytest tests -q`, re-measured
 2026-10-18 after the loop refactor + routing facade + doctor + memory
-hardening + web audit + packaging + the A69 live-skip fix). Nothing here is
-marketing.*
+hardening + web audit + packaging + the A69 live-skip fix + the A64
+registry close). Nothing here is marketing.*

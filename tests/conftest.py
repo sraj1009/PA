@@ -110,6 +110,11 @@ _UNIT = [
     # Packaging (2026-10-18): pyproject.toml mirrors the pinned requirements
     # files (core + 5 extras) and adds the `bee` console script — drift fails.
     "test_packaging",
+    # A64 close (2026-10-18): files that were selected by NO CI job at all.
+    # test_monitor stays deliberately unregistered (its checks run at import;
+    # no selectable items) — the exemption lives in test_marker_registry.
+    "test_native", "test_automate",
+    "test_marker_registry",
 ]
 _INTEGRATION = [
     "test_kernel_integration", "test_automation", "test_episodes",
@@ -179,6 +184,8 @@ _INTEGRATION = [
     # SSE stream (bearer auth, one-time ids, timeout-deny) + the /voice route
     # staying off the event loop (live uvicorn, not TestClient).
     "test_web_approvals",
+    # A64 close (2026-10-18): now selected by core + portable integration.
+    "test_telemetry", "test_commands",
 ]
 # Files that need OPTIONAL packages / a specific platform — the default CORE
 # suite must not fail because these are absent (Program Phase 7). Phase 7

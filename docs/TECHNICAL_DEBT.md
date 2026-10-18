@@ -1452,6 +1452,17 @@ comments changed since): **928 passed in 94.4 s**, and the same eight digests
 `settings.json`) again report **DIFFERING KEYS: NONE**
 (`temp/bee-docsync/{pre,post}_final3.json`).
 
+**Closed 2026-10-18 — the unregistered-files item:** `test_native` and
+`test_automate` joined `_UNIT`, `test_telemetry` and `test_commands` joined
+`_INTEGRATION` (the core and portable-integration CI jobs select them now), and
+`tests/test_marker_registry.py` makes the registry self-enforcing in both
+directions: every `tests/test_*.py` must be selected by some CI job or be an
+exemption-with-reason (`test_monitor`: import-time checks with no selectable
+items; `test_livekit`: optional SDK, no CI job installs it), every registered
+name must exist on disk, and `ci.yml` must keep running the five marker pockets
+it feeds. Proved to bite: unregistering `test_native` fails the meta-test naming
+it, and a stale synthetic entry fails the dangling-name test naming it.
+
 ## A65 — the preference corpus could only grow when the user typed `/correct` (2026-10-17, **CLOSED same day**)
 
 RLAIF stage 2 (preference tuning) reads `train/prefs.jsonl`, and
