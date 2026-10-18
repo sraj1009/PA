@@ -90,6 +90,12 @@ def _fn_flush_memory_index(ctx) -> dict:
     return scheduler.flush_memory_index(ctx)
 
 
+def _fn_recall_guard(ctx) -> dict:
+    """P1-5: nightly recall probe over the live memory index."""
+    from ..memory import recall_guard
+    return recall_guard.run(ctx)
+
+
 def _fn_train_router(ctx) -> dict:
     from .. import scheduler
     return scheduler.maybe_train_router(ctx)
@@ -148,6 +154,7 @@ FUNCTIONS: dict[str, Callable] = {
     "bee.scheduler.consolidate": _fn_consolidate,
     "bee.scheduler.rebuild_vectors": _fn_rebuild_vectors,
     "bee.scheduler.flush_memory_index": _fn_flush_memory_index,
+    "bee.memory.recall_guard.run": _fn_recall_guard,
     "bee.scheduler.maybe_train_router": _fn_train_router,
     "bee.scheduler.maybe_teach_back": _fn_teach_back,
     "bee.scheduler.maybe_build_sft": _fn_build_sft,

@@ -122,6 +122,37 @@ def test_scheduler_disabled_pauses_persisted_system_jobs(tmp_path):
         set(scheduler._SYSTEM_JOB_IDS)
 
 
+def test_every_system_job_fn_resolves_in_the_worker_allowlist(tmp_path):
+    """The job-id parity pin above cannot see an fn string the worker cannot
+    resolve: dotted names go through an explicit allowlist
+    (`worker.FUNCTIONS`) and an unknown one fails the job at run time - i.e.
+    at 03:00, after the fact. `recall_guard` shipped registered-but-
+    unreachable exactly that way (fixed 2026-10-18); this is the class pin,
+    not just the one job."""
+    from bee import scheduler
+    from bee.automation import worker as job_worker
+    from bee.automation.store import JobStore
+
+    class StubWorker:
+        def __init__(self, store):
+            self.store = store
+            self.created = []
+
+        def create_job(self, job):
+            self.created.append(job)
+            self.store.save_job(job)
+
+    cfg = load_config()
+    cfg.scheduler.enabled = True
+    w = StubWorker(JobStore(tmp_path / "automation"))
+    scheduler._register_nightly_jobs(w, cfg)
+    assert w.created, "expected the nightly specs to register"
+    missing = [j.id for j in w.created
+               if (j.action or {}).get("type") == "function"
+               and (j.action or {}).get("fn") not in job_worker.FUNCTIONS]
+    assert not missing, f"unresolvable system job fn strings: {missing}"
+
+
 def test_model_gate_disabled_skips_evaluation():
     from bee.evals.gate import model_quality_gate
     cfg = load_config()
