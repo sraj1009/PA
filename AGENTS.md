@@ -51,7 +51,7 @@
   (stale FAIL rows). `docs/TECHNICAL_DEBT.md` rows are evidence-linked; check the
   cited `file:line` before acting — some rows are already closed in code.
 - After code changes: `python3 -m graphify update`, then `python3 -m graphify label`.
-  Graph outputs live in `graphify-out/` (not git-ignored — shows in `git status`).
+  Graph outputs live in `graphify-out/` (git-ignored; regenerate locally with `graphify update`).
 
 ## Editing
 - Prefer editing over new files. After any edit, re-read the hunk and recompile

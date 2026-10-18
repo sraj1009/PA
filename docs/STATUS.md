@@ -672,6 +672,20 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   went green on both remotes: Linux core 915 passed/21 skipped (was 18
   failed), Windows core 927/9 (was 12 failed), ML 73 passed — runs
   39113985839 (PA-bee) and 39113989195 (PA), both at `5e3a94c`.
+- **Repository hygiene pass (2026-10-18).** Runtime artifacts are no longer
+  tracked (`git rm --cached`; the files stay on disk, history is not
+  rewritten): `.coverage`, `audit.jsonl.1`, `evals/compare_results.jsonl`,
+  `memory/receipts.jsonl.1`, `memory/ratings.db` (whose own contract is
+  "never leaves the machine"), and the 455-file / 40.4 MB `graphify-out/`
+  tree (regenerate locally with `graphify update`; `AGENTS.md`'s note now
+  says exactly that). `.gitignore` now also covers `.coverage*`,
+  `audit.jsonl*`, `memory/receipts.jsonl*`, `memory/ratings.db*`,
+  `evals/compare_results.jsonl`, `graphify-out/`, and the Phase 6 job-store
+  entry is root-anchored (`/automation/`) — the bare `automation/` also
+  matched the `bee/automation/` source tree (its 8 files were
+  tracked-but-ignored; a latent capture bug). Verified after the pass:
+  `git status` is clean of the artifacts, zero tracked-but-ignored paths
+  remain, and `-m core` collects **936/1020** (84 deselected).
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit

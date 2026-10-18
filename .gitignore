@@ -8,6 +8,7 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.coverage*
 .hf/
 
 # --- Secrets — NEVER commit (Phase 1 security) ---
@@ -26,28 +27,34 @@ memory/longterm.md
 train/
 metrics/
 temp/
-audit.jsonl
+audit.jsonl*
 
 # --- Evals / jobs runtime artifacts ---
 evals/results.jsonl
+evals/compare_results.jsonl
 evals/dsa_bench.json
 evals/verify_results.json
 jobs.json
 jobs.log
 # Phase 6 durable job store (runtime state: jobs/executions/notifications)
-automation/
+# NOTE: root-anchored — a bare "automation/" also caught the bee/automation/ source tree
+/automation/
 
 # --- Model weights (large; live on this machine, not in VCS) ---
 models/faster-whisper-base.en/
 models/bee-qlora-*/
 models/bee-merged-*/
 
+# --- Graphify knowledge-graph outputs (generated; regenerate with "graphify update") ---
+graphify-out/
+
 # --- OS / logs ---
 .DS_Store
 *.log
 
 # runtime state (Phase 12 repo hygiene, 2026-10-08)
-memory/receipts.jsonl
+memory/receipts.jsonl*
+memory/ratings.db*
 memory/sessions/
 memory/store.json
 memory/checkpoints/
