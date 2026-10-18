@@ -750,5 +750,5 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 1020-test suite (`pytest tests -q`, re-measured
-2026-10-18). Nothing here is marketing.*
+or to a green test in the 1042-test suite (`pytest tests -q`, re-measured
+2026-10-18 after the loop refactor + routing facade). Nothing here is marketing.*
