@@ -668,7 +668,10 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   where `available_sources()` reports it unavailable — it now consults the
   report, the very contract the honesty test pins. Verified on all four CI
   selections on the author's box (core 936 · security 155 · portable
-  integration 562 · windows 88) before the re-push.
+  integration 562 · windows 88) before the re-push, and the Actions re-run
+  went green on both remotes: Linux core 915 passed/21 skipped (was 18
+  failed), Windows core 927/9 (was 12 failed), ML 73 passed — runs
+  39113985839 (PA-bee) and 39113989195 (PA), both at `5e3a94c`.
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
