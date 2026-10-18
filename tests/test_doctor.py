@@ -98,16 +98,22 @@ def test_report_never_contains_key_material(healthy, tmp_path):
 def test_dirty_queue_and_index_age_rendered(healthy, monkeypatch):
     from bee.memory import search
     monkeypatch.setattr(search, "pending_paths", lambda: ["a", "b", "c"])
+    # Freeze doctor's clock and set the mtime absolutely: age is then exactly
+    # 7200 s -> "2.0 h" deterministically. The previous write-time-relative
+    # mtime put the age at "7200 + (collect - write)" measured in wall-clock
+    # time, which flaked on a CI runner whose clock drifted across the 7200 s
+    # formatting boundary (read back as minutes; PA-bee run 39121752261).
+    frozen = 1_700_000_000.0
+    monkeypatch.setattr(doctor, "time", types.SimpleNamespace(time=lambda: frozen))
     vd = paths.VECTOR_DIR
     vd.mkdir(parents=True, exist_ok=True)
     f = vd / "table.lance"
     f.write_text("x", encoding="utf-8")
-    old = f.stat().st_mtime - 7200
-    os.utime(f, (old, old))
+    os.utime(f, (frozen - 7200, frozen - 7200))
     rep = doctor.collect(healthy)
     text = doctor.render(rep)
     assert "3 file(s) pending embed" in text
-    assert "h old" in text
+    assert "2.0 h old" in text
 
 
 def test_precedence_summary_buckets():
