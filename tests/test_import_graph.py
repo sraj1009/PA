@@ -6,8 +6,9 @@ cycle groups documented below.
 Why a lint and not a refactor: the register's original M12 text named two
 lazy-import pairs (`cli <-> webapp`, `livekit.agent -> cli`); measuring the
 FULL graph (2026-10-18: 155 modules, 440 unique edges — 222 of them
-function-level) found **4** cycle groups, including one 23-module organ around
-agent/kernel/tools/evals. Every group is closed by at least one lazy (or
+function-level) found **4** cycle groups, including one 24-module organ around
+agent/kernel/tools/evals (P1-6 added `bee.practice`; the reason is recorded
+below). Every group is closed by at least one lazy (or
 `__main__`-guarded) edge — a top-level cycle cannot import at all, which is why
 the import-time graph stays acyclic while the true dependency graph does not.
 
@@ -36,11 +37,14 @@ DOCUMENTED_CYCLE_GROUPS: dict[frozenset[str], str] = {
                "bee.automation.tools", "bee.automation.worker", "bee.evals.gate",
                "bee.evals.runner", "bee.evals.skillgate", "bee.kernel",
                "bee.kernel.kernel", "bee.kernel.memory_if", "bee.kernel.session",
-               "bee.kernel.tools_bus", "bee.pipeline.build_sft", "bee.scheduler",
-               "bee.tools", "bee.tools.planner", "bee.tools.skills"}):
+               "bee.kernel.tools_bus", "bee.pipeline.build_sft", "bee.practice",
+               "bee.scheduler", "bee.tools", "bee.tools.planner",
+               "bee.tools.skills"}):
         "the agent/kernel/tools/evals organ — one dependency blob; every path "
         "back closes through a lazy edge (agent.loop -> kernel :237, "
-        "scheduler -> evals.gate :296, tools -> automation :41, ...)",
+        "scheduler -> evals.gate :296, tools -> automation :41, ...). P1-6 "
+        "added bee.practice (practice -> agent.loop top-level; "
+        "automation.worker -> practice lazy in _fn_practice)",
     frozenset({"bee.cli", "bee.livekit.agent", "bee.livekit.transport",
                "bee.webapp"}):
         "cli -> webapp (:621-631) and -> livekit.transport (:724) lazy; "

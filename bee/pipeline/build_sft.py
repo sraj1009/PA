@@ -256,6 +256,11 @@ def build(keep_unknown: bool = False, workspace: Path | None = None,
             if sys_content:
                 msgs = [{"role": "system", "content": sys_content, "loss": False}] + msgs
                 stats["parity_in"] += 1
+            if (clean.get("tag") or "") == "practice":
+                # P1-6: practice rows stay visible in the report — the flywheel
+                # must be able to show how much of the dataset is model-generated
+                # rather than user work.
+                stats["practice_in"] = stats.get("practice_in", 0) + 1
             bucket = f"{int(q * 10) / 10:.1f}"
             stats["quality_dist"][bucket] = stats["quality_dist"].get(bucket, 0) + 1
             tmix = validate.detect_type(clean.get("task", ""), clean.get("events", []))
@@ -266,6 +271,7 @@ def build(keep_unknown: bool = False, workspace: Path | None = None,
                 "metadata": {"date": clean.get("date"), "model": clean.get("model"),
                              "n_tools": clean.get("n_tools"), "redactions": n_red,
                              "quality": q, "augmented": aug,
+                             "practice": (clean.get("tag") or "") == "practice",
                              "type": validate.detect_type(clean.get("task", ""), clean.get("events", []))},
             }, ensure_ascii=False) + "\n")
             n_out += 1

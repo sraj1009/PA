@@ -29,6 +29,10 @@ class Context:
     privacy_on: bool = True        # redact PII on cloud-bound payloads
     rag_on: bool = True            # auto memory-context on dangling references
     episodes_on: bool = True       # record episodes for the data pipeline
+    practice: bool = False         # P1-6: self-directed practice run — episodes
+                                   # are tagged `practice`, and diary/win/golden
+                                   # side effects stay silent (nobody asked for
+                                   # this task; only the practice job sets it)
     kernel: object = None          # Phase 2: AgentKernel instance (set at launch;
                                    # commands use ctx.kernel.direct for LLM calls)
     capability_gate: object = None # Phase 3: CapabilityGate — checked BEFORE tool

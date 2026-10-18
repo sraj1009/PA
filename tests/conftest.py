@@ -120,6 +120,7 @@ _UNIT = [
     # the documented four.
     "test_import_graph",
     "test_recall_guard",
+    "test_practice",
 ]
 _INTEGRATION = [
     "test_kernel_integration", "test_automation", "test_episodes",

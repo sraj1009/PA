@@ -690,7 +690,49 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   true, 79 indexed rows / 93 disk chunks, 0 misses. Pinned by
   `tests/test_recall_guard.py` (9 tests: the A38a canary, regression →
   raise-but-still-record, index-lost, empty-install, the absolute/relativized
-  path bridge, sampling determinism, registry membership).
+  path bridge, sampling determinism, registry membership). The fn string must
+  also resolve in the worker allowlist (`worker.FUNCTIONS`): the first cut
+  registered the job while `bee.memory.recall_guard.run` could not be
+  resolved — a defect the id-parity pin cannot see, and one that would have
+  failed loudly at 03:45 on its first real night; fixed with a class-level
+  pin (`test_every_system_job_fn_resolves_in_the_worker_allowlist`,
+  bite-proven both ways: with the entry 0 unresolvable, without it exactly
+  `["recall_guard"]`).
+- **Self-directed practice job (P1-6, 2026-10-18).** All 12 nightly jobs were
+  maintenance-only: nothing generated its own tasks, so the flywheel only
+  turned when the user spoke. New durable job `practice` (`bee.practice.run`,
+  daily at `03:00 + 50 min`, after consolidation and the flush): mines the
+  freshest failures — eval ids whose latest `results.jsonl` row failed, plus
+  recent failed episodes — asks the local model for up to 3 sibling tasks per
+  source, attempts up to 6 through the SAME agent loop users use
+  (`model="local"` — the explicit local engine, `guard_mode="unattended"` —
+  guard asks are denied, never queued at 03:50), and keeps verifier-clean
+  trajectories: each attempt lands as an episode row tagged `practice` (new
+  `tag` field through `Episode`), which the nightly SFT build reports
+  separately (`practice_in` + per-sample metadata) so the dataset can show
+  how much of it is model-generated rather than user work. Practice is
+  silent in every user-facing surface — `ctx.practice` gates the diary line,
+  the win digest and cloud goldens; the tagged episode + one metrics row are
+  its only artifacts. Idle-only: defers when a non-practice episode ended in
+  the last 20 minutes, stops early if the user returns mid-run, and defers
+  while `nvidia-smi` reports > 25 % GPU utilization (absent tool → not busy;
+  the activity rule is the guard of record). The live shakedown paid for
+  itself twice: the first run rehearsed `git reset --hard` and a
+  `cloud storage` task (fixed: destructive/system command SHAPES — the
+  guard's ask-class — and cloud shapes are dropped, from sources and
+  generated tasks alike), the second drifted into desktop/browser tasks
+  (fixed: episode mining keeps only the deterministically gradable families
+  `math/file/shell/code` via `validate.detect_type`, plus an off-family
+  desktop/web shape block; in the shakedown those attempts never drove the
+  desktop — one made a single read-only `web_search` call, the other used no
+  tools). Final live run: sources 2, variations 3,
+  attempts 2, **ok 2 / clean 2**, 29.5 s, tasks `Run python: from bee.dsa
+  import LIS…` and a bubble-sort sibling — both `verify: pass`, 1-3 tool
+  calls. Pinned by `tests/test_practice.py` (12 tests: parser + both filters,
+  idle/GPU deferrals, mid-run stop, cold-ctx client, local/unattended
+  contract, quiet-vs-normal `finish`, tagged end-to-end loop pass, episode
+  family gate, registry) and the M12 import pin now names `bee.practice` in
+  the organ group.
 - **CI portability pass (2026-10-18).** The first Actions run on the rewritten
   repo (Linux + Windows bare installs, both `-m core`) failed 18/12 tests that
   had only ever run on the author's box. Fixes: the Windows-only feature tests
@@ -912,7 +954,8 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   register named two lazy-import pairs; measuring the whole package from source
   (155 modules, 440 edges — 222 of them function-level) found **four** cycle
   groups: the cli/web/livekit corner, `automation.models ↔ schedule`,
-  `memory.md ↔ memory.search`, and a 23-module agent/kernel/tools/evals organ.
+  `memory.md ↔ memory.search`, and a 23-module agent/kernel/tools/evals organ
+  (24 since P1-6's `bee.practice` joined it — the pin records the reason).
   `tests/test_import_graph.py` (new, registered in the marker registry) walks
   every `bee/**/*.py` with `ast`, computes SCCs, and asserts the groups equal
   the documented four — bidirectionally: proved by a fabricated cycle (failed
@@ -922,9 +965,9 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 1099-test suite (`pytest tests -q`, re-measured
+or to a green test in the 1112-test suite (`pytest tests -q`, re-measured
 2026-10-18 after the loop refactor + routing facade + doctor + memory
 hardening + web audit + packaging + the A69 live-skip fix + the A64
 registry + gate-guard closes + the N7 pin repair + the M12 import-graph lint
-+ the P1-4 embed keep_alive + the P1-5 recall guard). Nothing here is
-marketing.*
++ the P1-4 embed keep_alive + the P1-5 recall guard + the P1-6 practice
+job). Nothing here is marketing.*

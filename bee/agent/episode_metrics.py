@@ -78,14 +78,19 @@ def finish(ctx, task, episode: Episode | None, res: AgentResult, start: float,
            emit, sub: bool, raw: str = "") -> AgentResult:
     # raw = the user's own wording (kernel route_text). Goldens record the
     # request as asked, not the context-augmented prompt the model saw.
+    practice = bool(getattr(ctx, "practice", False))
     if episode:
         episode.finish(res.ok, res.output, error=res.error, escalated=res.escalated,
                        verify={"verdict": res.verify}, tokens=res.est_tokens)
     metrics.record("task", ok=res.ok, model=res.model, iters=res.iterations,
                    tools=res.tool_calls, seconds=round(time.time() - start, 1),
                    tokens=res.est_tokens, escalated=res.escalated,
-                   verify=res.verify, source=res.route_source, error=res.error[:200])
-    if not sub:
+                   verify=res.verify, source=res.route_source, error=res.error[:200],
+                   practice=practice)
+    # P1-6: a practice run is nobody's request — no diary line, no golden, no
+    # win claimed in memory. The tagged episode row + the metrics above are
+    # its only artifacts.
+    if not sub and not practice:
         diary(task, res)
         if res.ok and served_cloud(ctx, res) and (res.output or "").strip():
             golden(raw or task, res)

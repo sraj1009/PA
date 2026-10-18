@@ -419,9 +419,9 @@ def _cron_time(cron: str) -> str:
 # The maintenance jobs this module owns. A test pins that this list matches the
 # specs actually registered, so the disable path can never pause a stale set.
 _SYSTEM_JOB_IDS = ("nightly_consolidate", "vector_rebuild", "memory_index_flush",
-                   "recall_guard", "router_retrain", "teach_back", "sft_build",
-                   "qlora_train", "log_rotation", "alert_scan", "skill_gate",
-                   "model_gate")
+                   "recall_guard", "practice", "router_retrain", "teach_back",
+                   "sft_build", "qlora_train", "log_rotation", "alert_scan",
+                   "skill_gate", "model_gate")
 
 
 def _set_system_jobs_enabled(worker, job_ids, enabled: bool) -> None:
@@ -473,6 +473,9 @@ def _register_nightly_jobs(worker, cfg) -> None:
         ("recall_guard", "nightly recall probe (live index sample vs trailing baseline)",
          JobTrigger(kind="daily", time=_plus(45)),
          {"type": "function", "fn": "bee.memory.recall_guard.run"}, 900.0),
+        ("practice", "self-directed practice from recent failures (local model, idle-only)",
+         JobTrigger(kind="daily", time=_plus(50)),
+         {"type": "function", "fn": "bee.practice.run"}, 3600.0),
         ("router_retrain", "ML router retrain (only if new episodes)",
          JobTrigger(kind="daily", time=_plus(30)),
          {"type": "function", "fn": "bee.scheduler.maybe_train_router"}, 1800.0),

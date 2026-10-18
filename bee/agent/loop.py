@@ -158,7 +158,11 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                        escalated=False)
         emit({"type": "route", "model": "cloud", "escalated": False, "source": "hybrid-speed"})
 
-    episode = Episode(said, model=name) if (not sub and ctx.episodes_on) else None
+    # P1-6: practice runs keep the episode (trajectories feed SFT, tagged) but
+    # go quiet everywhere user-facing — see episode_metrics.finish.
+    episode = Episode(said, model=name,
+                      tag=("practice" if getattr(ctx, "practice", False) else "")
+                      ) if (not sub and ctx.episodes_on) else None
 
     # ------------------------------------------------- tier 0: deterministic
     if name == "det":

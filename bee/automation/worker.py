@@ -96,6 +96,12 @@ def _fn_recall_guard(ctx) -> dict:
     return recall_guard.run(ctx)
 
 
+def _fn_practice(ctx) -> dict:
+    """P1-6: self-directed practice (mine failures, attempt siblings, tag)."""
+    from .. import practice
+    return practice.run(ctx)
+
+
 def _fn_train_router(ctx) -> dict:
     from .. import scheduler
     return scheduler.maybe_train_router(ctx)
@@ -155,6 +161,7 @@ FUNCTIONS: dict[str, Callable] = {
     "bee.scheduler.rebuild_vectors": _fn_rebuild_vectors,
     "bee.scheduler.flush_memory_index": _fn_flush_memory_index,
     "bee.memory.recall_guard.run": _fn_recall_guard,
+    "bee.practice.run": _fn_practice,
     "bee.scheduler.maybe_train_router": _fn_train_router,
     "bee.scheduler.maybe_teach_back": _fn_teach_back,
     "bee.scheduler.maybe_build_sft": _fn_build_sft,

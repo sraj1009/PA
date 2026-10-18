@@ -1,8 +1,9 @@
 """Episode logger — persist complete task episodes for the data pipeline.
 
 Each episode (one JSONL row per day file) captures:
-  task, model, route, every tool call (name, args, ok, seconds, truncated result),
-  final output, ok, verification verdict, duration, est tokens.
+  task, model, tag (empty or e.g. 'practice'), route, every tool call (name,
+  args, ok, seconds, truncated result), final output, ok, verification verdict,
+  duration, est tokens.
 
 These episodes feed:
   - pipeline/validate.py   (verifiable-success filter)
@@ -36,9 +37,10 @@ def _short(v, limit: int = MAX_EVENT_CHARS) -> str:
 
 
 class Episode:
-    def __init__(self, task: str, model: str = ""):
+    def __init__(self, task: str, model: str = "", tag: str = ""):
         self.task = task
         self.model = model
+        self.tag = tag
         self.escalated = False
         self.t0 = time.time()
         self.events: list[dict] = []
@@ -70,6 +72,7 @@ class Episode:
             "date": date.today().isoformat(),
             "task": privacy.redact(self.task)[0][:4000],
             "model": self.model,
+            "tag": self.tag,
             "escalated": self.escalated,
             "ok": ok,
             "error": self.error,
