@@ -115,6 +115,10 @@ _UNIT = [
     # no selectable items) — the exemption lives in test_marker_registry.
     "test_native", "test_automate",
     "test_marker_registry",
+    # M12 close (2026-10-18): the package import graph measured from source
+    # (module-level + lazy edges); the nontrivial cycle groups must be exactly
+    # the documented four.
+    "test_import_graph",
 ]
 _INTEGRATION = [
     "test_kernel_integration", "test_automation", "test_episodes",

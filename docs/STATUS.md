@@ -871,10 +871,22 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   and the scenario never fired (0.10 s per run; 0.69 s now, with a wiring
   guard). No assertion was loosened. Verified under 6-process CPU load: both
   pins green 15/15 runs, plus the whole file (30 tests) green.
+- **M12 — every hidden import cycle is now lint-enforced (2026-10-18).** The
+  register named two lazy-import pairs; measuring the whole package from source
+  (155 modules, 440 edges — 222 of them function-level) found **four** cycle
+  groups: the cli/web/livekit corner, `automation.models ↔ schedule`,
+  `memory.md ↔ memory.search`, and a 23-module agent/kernel/tools/evals organ.
+  `tests/test_import_graph.py` (new, registered in the marker registry) walks
+  every `bee/**/*.py` with `ast`, computes SCCs, and asserts the groups equal
+  the documented four — bidirectionally: proved by a fabricated cycle (failed
+  as `NEW group: bee.privacy, bee.security.audit`) and by removing a documented
+  closure edge (failed as `GONE group: automation.models, schedule`). The
+  Phase-2 refactor is no longer a precondition.
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 1087-test suite (`pytest tests -q`, re-measured
+or to a green test in the 1088-test suite (`pytest tests -q`, re-measured
 2026-10-18 after the loop refactor + routing facade + doctor + memory
 hardening + web audit + packaging + the A69 live-skip fix + the A64
-registry + gate-guard closes). Nothing here is marketing.*
+registry + gate-guard closes + the N7 pin repair + the M12 import-graph lint).
+Nothing here is marketing.*

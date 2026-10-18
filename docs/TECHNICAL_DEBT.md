@@ -197,6 +197,12 @@ the primary path, and the shipped value is pinned by a measured test.)*
 `cli ↔ webapp` and `livekit.agent ↔ agent/voice` use function-level imports
 to dodge import cycles — a sign the module boundaries are wrong.
 **Fix:** resolve naturally via the Context factory / EventBus (Phase 2).
+**Status 2026-10-18 — CLOSED as an enforced lint.** The graph measured from
+source has **four** cycle groups, not two: the cli/web/livekit corner, the
+23-module agent/kernel/tools/evals organ, `automation.models ↔ schedule`, and
+`memory.md ↔ memory.search`. `tests/test_import_graph.py` pins all four
+bidirectionally; the Phase-2 refactor is no longer a precondition (closure note
+under the post-audit fix pass below).
 
 ## LOW
 
@@ -267,7 +273,7 @@ Full evidence: `docs/JARVIS_BASELINE.md`. Original IDs closed since 2026-10-06:
 | M9 (untested paths) | PARTIAL | 449-test suite incl. kernel/automation/voice/bridge; LiveKit room + WindowsDesktop still unverified in-field |
 | M10 (unbounded growth) | CLOSED | 10-item #2 (M13): rotation + caps at every JSONL chokepoint |
 | M11 (VRAM assumption) | OPEN | `num_ctx=8192` pinned for 8 GB; not auto-tuned |
-| M12 (lazy-import cycles) | PARTIAL | documented edges; not yet import-lint enforced |
+| M12 (lazy-import cycles) | **CLOSED 2026-10-18** | measured from source: 4 cycle groups (155 modules, 440 edges — 222 lazy); `tests/test_import_graph.py` enforces them bidirectionally — see the closure note below |
 
 ### New findings (2026-10-08)
 
@@ -340,6 +346,25 @@ run, invisible). The pin now passes `task=` with a wiring guard
 0.69 s — the slow branch actually fires. Verified 2026-10-18 under 6-process
 CPU load: both pins green in 15/15 consecutive runs, then the whole
 `tests/test_automation.py` (30 tests) green.
+
+**Closed 2026-10-18 — M12 (import-cycle lint):** the register's original text
+named two lazy-import pairs; the graph measured from source (155 modules, 440
+unique edges — 222 function-level) has **four** cycle groups:
+`automation.models ↔ automation.schedule`, `memory.md ↔ memory.search`, a
+23-module agent/kernel/tools/evals organ, and the cli/web/livekit group. Every
+group closes through at least one lazy (or `__main__`-guarded) edge, which is
+why the import-time graph stays acyclic while the true dependency graph does
+not. The new `tests/test_import_graph.py` (registered in `conftest.py::_UNIT`)
+parses every `bee/**/*.py` with `ast`, resolves intra-package targets (absolute
+and relative, module paths only), computes SCCs and asserts the nontrivial
+groups EQUAL the documented four — a new member, a whole new group, or a
+vanished group all fail. Proved to bite both ways: a fabricated lazy
+`bee.privacy -> bee.security.audit` edge failed as `NEW group (2): bee.privacy,
+bee.security.audit`; commenting out the sole closure edge
+`automation.models -> schedule` (`models.py:281`) failed as `GONE group (2):
+bee.automation.models, bee.automation.schedule`. The Phase-2 Context/EventBus
+refactor is no longer a precondition for this row; any future hidden cycle is
+now a failing test instead of a silent liability.
 
 ---
 
