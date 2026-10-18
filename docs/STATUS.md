@@ -720,6 +720,20 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   construction and now denies — `posixpath` had hoisted it under the repo
   cwd (CI saw `open('C:\Windows\...', 'a')` classify 'ask'); regression
   test `test_outside_workspace_windows_style_on_posix`, Windows unchanged.
+- **Agent loop refactor — `bee/agent/loop.py` 1,491 → 929 lines (2026-10-18).**
+  `run_agent`'s logical pieces are now sibling modules, moved verbatim (zero
+  behavior change): `result.py` (AgentResult), `policy.py` (regex detectors +
+  predicates — the loop only branches on booleans), `tool_dispatch.py` (arg
+  sealing, model-output parsing/text tool-call recovery, ToolBus dispatch,
+  fast-path runner), `answer_postprocess.py` (grounded fallback, attached-code
+  execution, plan relay/attach, unverified-claim annotation), `episode_metrics.py`
+  (diary/golden/served-cloud/finish bookkeeping). `run_agent`/`AgentKernel`
+  entry points and the historical private names (`_golden`, `_finish`,
+  `_validate_call`, `_META_RAMBLE_RE`, `_extract_text_tool_calls`, …) stay
+  importable from `bee/agent/loop.py` via explicit aliases. Verified: new
+  `tests/test_agent_policy.py` (5) + focused router/fastpath/extractor/risk
+  suites 121 passed; `-m core` green on the frozen tree (951 passed /
+  84 deselected).
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit

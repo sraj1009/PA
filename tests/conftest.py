@@ -94,6 +94,10 @@ _UNIT = [
     # A45 (2026-10-09): planner inputs (real tool list), skill-index module names,
     # and the eval's expect_any premise.
     "test_plan_inputs",
+    # Refactor (2026-10-18): the regex policy detectors extracted from
+    # bee/agent/loop.py into bee/agent/policy.py — the loop only branches on
+    # these booleans, and the legacy private names stay importable from loop.
+    "test_agent_policy",
 ]
 _INTEGRATION = [
     "test_kernel_integration", "test_automation", "test_episodes",
