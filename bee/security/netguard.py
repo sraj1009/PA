@@ -164,57 +164,65 @@ def safe_get(url: str, *,
             reason = validate_url(current, resolver=resolver)
             if reason:
                 raise NetGuardError(f"blocked: {reason}")
-            resp = client.get(current, headers=hdrs,
-                               timeout=httpx.Timeout(read_timeout, connect=connect_timeout))
-            if resp.is_redirect and "location" in resp.headers:
-                redirects += 1
-                if redirects > max_redirects:
-                    raise NetGuardError(f"too many redirects (>{max_redirects})")
-                current = urljoin(str(resp.url), resp.headers["location"])
-                continue
-            # DNS-rebinding TOCTOU: the pre-fetch validate_url() resolved the
-            # host, but the client re-resolved independently at connect time —
-            # a record that flipped to non-public in between would silently
-            # serve attacker-chosen bytes. Re-resolve the host we actually
-            # talked to and refuse to USE a response whose post-hoc
-            # resolution is no longer public (IP literals were classified
-            # directly above and need no DNS round-trip).
-            host_now = (urlparse(current).hostname or "").lower()
-            try:
-                ipaddress.ip_address(host_now)
-                literal = True
-            except ValueError:
-                literal = False
-            if not literal:
+            # Stream the body — never buffer-then-inspect. client.get()
+            # fully reads (and closes) the response before max_bytes can be
+            # enforced, and iter_raw() on it raises StreamConsumed on EVERY
+            # real fetch ('content has already been streamed'; found by the
+            # P1-7 live check — the fake transports this file's tests used
+            # yielded happily and hid it). iter_bytes() (not iter_raw) so
+            # content-encoding (gzip/br) decodes before the cap counts bytes
+            # and before the charset decode below reads real text.
+            with client.stream("GET", current, headers=hdrs,
+                               timeout=httpx.Timeout(read_timeout, connect=connect_timeout)) as resp:
+                if resp.is_redirect and "location" in resp.headers:
+                    redirects += 1
+                    if redirects > max_redirects:
+                        raise NetGuardError(f"too many redirects (>{max_redirects})")
+                    current = urljoin(str(resp.url), resp.headers["location"])
+                    continue
+                # DNS-rebinding TOCTOU: the pre-fetch validate_url() resolved the
+                # host, but the client re-resolved independently at connect time —
+                # a record that flipped to non-public in between would silently
+                # serve attacker-chosen bytes. Re-resolve the host we actually
+                # talked to and refuse to USE a response whose post-hoc
+                # resolution is no longer public (IP literals were classified
+                # directly above and need no DNS round-trip).
+                host_now = (urlparse(current).hostname or "").lower()
                 try:
-                    ips_now = resolver(host_now)
-                except Exception as e:
-                    raise NetGuardError(
-                        f"post-fetch dns failure for {host_now}: "
-                        f"{str(e)[:120]} — discarding response")
-                if not ips_now:
-                    raise NetGuardError(
-                        f"post-fetch dns returned no addresses for {host_now} "
-                        "— discarding response")
-                for ip in ips_now:
-                    cls = _ip_class(ip)
-                    if cls:
+                    ipaddress.ip_address(host_now)
+                    literal = True
+                except ValueError:
+                    literal = False
+                if not literal:
+                    try:
+                        ips_now = resolver(host_now)
+                    except Exception as e:
                         raise NetGuardError(
-                            f"dns for {host_now} changed mid-fetch to a {cls} "
-                            f"address ({ip}) — discarding response")
-            ct = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
-            ct_base = ct.split("+", 1)[0]
-            if ct and ct not in allowed_content_types and ct_base not in allowed_content_types:
-                raise NetGuardError(f"content-type {ct!r} not allowed "
-                                    f"(allowed: {', '.join(allowed_content_types[:4])}, ...)")
-            buf = bytearray()
-            for chunk in resp.iter_raw():
-                buf.extend(chunk)
-                if len(buf) > max_bytes:
-                    raise NetGuardError(f"response exceeds size limit ({max_bytes} bytes)")
-            text = buf.decode(resp.encoding or "utf-8", errors="replace")
-            return FetchResult(text=text, url=str(resp.url), status=resp.status_code,
-                               content_type=ct, bytes_read=len(buf), redirects=redirects)
+                            f"post-fetch dns failure for {host_now}: "
+                            f"{str(e)[:120]} — discarding response")
+                    if not ips_now:
+                        raise NetGuardError(
+                            f"post-fetch dns returned no addresses for {host_now} "
+                            "— discarding response")
+                    for ip in ips_now:
+                        cls = _ip_class(ip)
+                        if cls:
+                            raise NetGuardError(
+                                f"dns for {host_now} changed mid-fetch to a {cls} "
+                                f"address ({ip}) — discarding response")
+                ct = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                ct_base = ct.split("+", 1)[0]
+                if ct and ct not in allowed_content_types and ct_base not in allowed_content_types:
+                    raise NetGuardError(f"content-type {ct!r} not allowed "
+                                        f"(allowed: {', '.join(allowed_content_types[:4])}, ...)")
+                buf = bytearray()
+                for chunk in resp.iter_bytes():
+                    buf.extend(chunk)
+                    if len(buf) > max_bytes:
+                        raise NetGuardError(f"response exceeds size limit ({max_bytes} bytes)")
+                text = buf.decode(resp.encoding or "utf-8", errors="replace")
+                return FetchResult(text=text, url=str(resp.url), status=resp.status_code,
+                                   content_type=ct, bytes_read=len(buf), redirects=redirects)
     finally:
         if owned:
             try:

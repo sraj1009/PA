@@ -2,6 +2,8 @@
 No network access in any test."""
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 
 from bee.security import netguard as ng
@@ -107,19 +109,24 @@ class FakeResp:
     def is_redirect(self):
         return 300 <= self.status_code < 400 and "location" in self.headers
 
-    def iter_raw(self):
+    def iter_bytes(self):
         yield self._body
 
 
 class FakeClient:
+    """httpx.Client-shaped double. safe_get streams (`client.stream(...)` as
+    a context manager) since the web_fetch streaming fix; the real-httpx
+    regression pins live at the bottom of this file."""
+
     def __init__(self, responses):
         self.responses = list(responses)
         self.requested = []
 
-    def get(self, url, headers=None, timeout=None):
+    @contextlib.contextmanager
+    def stream(self, method, url, headers=None, timeout=None):
         self.requested.append(url)
         r = self.responses.pop(0)
-        return r if isinstance(r, FakeResp) else r(self)  # callable hooks see client
+        yield r if isinstance(r, FakeResp) else r(self)  # callable hooks see client
 
     def close(self):
         pass
@@ -174,3 +181,81 @@ def test_fetch_no_content_type_allowed():
     c = FakeClient([FakeResp(200, {}, b"plain bytes")])
     out = ng.safe_get("https://example.com", transport=c)
     assert out.bytes_read == len(b"plain bytes")
+
+
+# ------------------------------------- REAL httpx machinery (P1-7 regression)
+def _real_client(handler):
+    """A real httpx.Client over MockTransport (still no network) — the fake
+    transport above cannot distinguish 'streamed' from 'already consumed',
+    which is exactly how the live bug hid."""
+    import httpx
+    return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+
+
+_REAL_RESOLVER = _fake_resolver({"example.com": ["93.184.216.34"]})
+
+
+def test_safe_get_streams_a_real_httpx_response():
+    """REGRESSION (found by the P1-7 live check, 2026-10-18): safe_get used
+    client.get() (full body read + closed) and then resp.iter_raw() — real
+    httpx raises StreamConsumed ('content has already been streamed') on
+    EVERY fetch; the fake transports yielded happily, so the suite stayed
+    green while live web_fetch returned only that error. This drives the
+    REAL response objects via MockTransport; reverting to get()+iter_raw()
+    fails here the same way live did."""
+    import httpx
+
+    def handler(req):
+        return httpx.Response(200, headers={"content-type": "text/plain; charset=utf-8"},
+                              content=b"hello real httpx")
+
+    c = _real_client(handler)
+    try:
+        out = ng.safe_get("https://example.com", transport=c, resolver=_REAL_RESOLVER)
+    finally:
+        c.close()
+    assert out.status == 200 and out.text == "hello real httpx"
+    assert out.bytes_read == len(b"hello real httpx")
+
+
+def test_safe_get_decodes_content_encoding_and_caps_decoded_bytes():
+    """iter_bytes (not iter_raw) under the streaming fix: a gzip response
+    comes back as decoded text, and the size cap counts decoded bytes — a
+    small compressed body cannot smuggle an unbounded one past max_bytes."""
+    import gzip
+    import httpx
+
+    plain = b"zip-decode-me" * 200
+    body = gzip.compress(plain)
+
+    def handler(req):
+        return httpx.Response(200, headers={"content-type": "text/plain",
+                                            "content-encoding": "gzip"},
+                              content=body)
+
+    c = _real_client(handler)
+    try:
+        out = ng.safe_get("https://example.com", transport=c, resolver=_REAL_RESOLVER)
+        assert out.text == plain.decode("utf-8")
+        with pytest.raises(ng.NetGuardError, match="size limit"):
+            ng.safe_get("https://example.com", transport=c, resolver=_REAL_RESOLVER,
+                        max_bytes=len(plain) // 2)
+    finally:
+        c.close()
+
+
+def test_safe_get_streams_redirect_chain_under_real_httpx():
+    import httpx
+
+    def handler(req):
+        if req.url.path == "/a":
+            return httpx.Response(302, headers={"location": "https://example.com/b"})
+        return httpx.Response(200, headers={"content-type": "text/plain"}, content=b"end")
+
+    c = _real_client(handler)
+    try:
+        out = ng.safe_get("https://example.com/a", transport=c, resolver=_REAL_RESOLVER)
+    finally:
+        c.close()
+    assert out.status == 200 and out.text == "end"
+    assert out.redirects == 1 and out.url == "https://example.com/b"
