@@ -136,6 +136,14 @@ complexity-floor rule as the only documented interaction. Behavior is
 pinned by tests, but adding a capability means touching all three.
 **Fix:** keep (they work — 6,000 router checks 100%) but document the
 decision order and expose it as one `Router` interface (Phase 2/5).
+**CLOSED — 2026-10-18.** The three mechanisms remain (deliberate tiers: the ML
+router and the fast paths are load-bearing), but the decision is now ONE
+documented entry: `bee/agent/router.py:decide()` composes deterministic →
+explicit → smalltalk → fast-path → ML → heuristic (escalation follows in
+`run_agent`, which needs live service probes) and returns the fast-path hit
+alongside the tier decision. Order documented in the router docstring +
+`AGENTS.md` + README §9; pinned by `tests/test_routing_order.py` (7 tests).
+`route()`/`route_task()` APIs unchanged.
 
 ### M5. Unclear config precedence (4 files)
 `config.yaml` (135) / `models.yaml` (34) / `.env` / `settings.json` —

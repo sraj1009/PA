@@ -1,13 +1,30 @@
-"""Hybrid routing — four tiers, fused heuristics + learned ML.
+"""Hybrid routing — the single documented decision facade for the agent loop.
 
-Tiers (in order of precedence):
-  0. explicit   — user override (`cloud:` prefix, "use cloud/local", /model)
-  1. det        — pure math expression → deterministic eval, NO LLM at all
-  2. ml         — learned classifier (bee.brain.mlrouter), only if trained on
-                  enough episodes and confident (shadow-logged always)
-  3. heuristic  — complexity cues + length (the original rules)
+`decide()` is THE entry the loop calls; it composes every tier in this order
+(first hit wins):
 
-route() returns a dict; route_task() keeps the legacy tuple API.
+  0. deterministic — pure math (`math_expr`) → eval_safe, NO LLM at all.
+  1. explicit      — user override: `cloud:` prefix, the session/`/engine`
+                     model argument, "use cloud/local" hints, and capability
+                     overrides (an image → the multimodal cloud tier).
+  2. smalltalk     — greetings/thanks/bye canned replies, no model call.
+  3. fast-path     — table-driven pure-Python handlers (bee/agent/fastpaths.py),
+                     BEFORE any LLM call; suppressed by an explicit override.
+  4. ml            — learned classifier (bee.brain.mlrouter), OPTIONAL: only
+                     when trained, enabled and confident (shadow-logged always);
+                     it may escalate a simple-looking task but never demote a
+                     structurally complex one (complexity floor).
+  5. heuristic     — complexity cues + length (the original rules).
+  6. escalate      — applied by run_agent right after decide(), not here:
+                     hybrid cloud-first for the session engine and the
+                     availability fallback (local offline → cloud; cloud
+                     unavailable → local/offline rules) — both need live
+                     service probes.
+
+`decide()` returns route()'s dict plus `"fastpath"`: the matched
+(FastPath, re.Match) pair, or None. route() keeps the pure tier decision
+(tiers 0-2, 4-5); route_task() keeps the legacy tuple API. The order above is
+pinned by tests/test_routing_order.py.
 """
 from __future__ import annotations
 
@@ -16,6 +33,7 @@ import time
 
 from ..config import Config
 from ..monitor import metrics
+from . import fastpaths
 
 CLOUD_HINT = re.compile(r"\b(use cloud|cloud mode|deep reasoning|use llm cloud)\b", re.I)
 LOCAL_HINT = re.compile(r"\b(use local|local model|local only|offline)\b", re.I)
@@ -333,6 +351,26 @@ def route(task: str, cfg: Config, model: str | None = None) -> dict:
         metrics.record("route_ml_fallback", reason=reason, ms=ml_ms)
         metrics.record("route_ml", pred="unavailable", used=False, ms=ml_ms)
     return {"name": heur, "escalated": heur == "cloud", "source": "heuristic", "conf": 0.5}
+
+
+def decide(task: str, cfg: Config, model: str | None = None) -> dict:
+    """The agent loop's single routing entry — the documented facade.
+
+    Runs the tier order from the module docstring and returns route()'s dict
+    plus `"fastpath"`: the matched (FastPath, re.Match) pair, or None. Fast
+    paths are consulted only when no explicit override won and the task was
+    not already claimed by the deterministic or smalltalk tier — exactly the
+    reachability the loop had when it matched them itself.
+
+    `fastpaths.match` is looked up on the module (called through the module
+    attribute) so tests that monkeypatch bee.agent.fastpaths.match keep seeing
+    the same behavior through this entry.
+    """
+    r = route(task, cfg, model)
+    r["fastpath"] = None
+    if r.get("source") != "explicit" and r["name"] not in ("det", "smalltalk"):
+        r["fastpath"] = fastpaths.match(task)
+    return r
 
 
 def route_task(task: str, cfg: Config, model: str | None = None) -> tuple[str, bool]:

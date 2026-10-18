@@ -454,14 +454,22 @@ tool calls — a fast path can never bypass permissions.
 
 ## 9. Hybrid intelligence (how it routes and verifies)
 
-| Tier | Trigger | Result |
+One facade owns the decision — `bee/agent/router.py:decide()` is the single routing
+entry the loop calls. First hit wins:
+
+| Stage | Trigger | Result |
 |---|---|---|
-| 0 explicit | `cloud:` / `local:` prefix, `/model` | as requested |
-| 1 deterministic | math incl. phrased ("what is 17*23?", "10% of 200", "5 plus 5"), greetings (smalltalk), **fast paths** (time, open app/URL/profile, search, weather, conversions, todo, creator identity, …) | `eval_safe` / canned reply / pure-Python handlers — **no LLM** (0 ms, offline where possible) |
-| 2 learned ML | TF-IDF + logistic regression over BEE's own episodes | votes only above 0.70 confidence after 150 labeled episodes; shadow-logged |
-| 3 heuristic | length + task cues (prove / multi-phase / long-form …) | local default → cloud when complex |
-| fallback | local runtime failure (overload, bad tool call, retries out) | cloud auto-escalation with re-prompt |
+| 0 deterministic | math incl. phrased ("what is 17*23?", "10% of 200", "5 plus 5") | `eval_safe` — **no LLM** (0 ms, offline) |
+| 1 explicit | `cloud:` / `local:` prefix, `/model`, "use local/cloud", image → vision | as requested |
+| 2 smalltalk | greetings / thanks / bye | canned reply — no model call |
+| 3 fast-path | time, open app/URL/profile, search, weather, conversions, todo, creator identity, … | pure-Python handlers — **no LLM** (0 ms, offline where possible) |
+| 4 learned ML | TF-IDF + logistic regression over BEE's own episodes | votes only above 0.70 confidence after 150 labeled episodes; shadow-logged |
+| 5 heuristic | length + task cues (prove / multi-phase / long-form …) | local default → cloud when complex |
+| 6 escalate | hybrid cloud-first (session engine) + local runtime failure (overload, bad tool call, retries out) | cloud auto-escalation with re-prompt |
 | offline | both models unreachable | deterministic rules: math, sort, file listing, clock, identity |
+
+Escalation runs in the loop right after `decide()` because it needs live service
+probes; the order is pinned end to end by `tests/test_routing_order.py`.
 
 **Verification, not vibes:** after every answer, `bee/brain/verifier.py` recomputes
 calculator claims, re-reads written files, and cross-checks cited URLs — one bounded fix

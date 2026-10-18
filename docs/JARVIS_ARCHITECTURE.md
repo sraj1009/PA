@@ -96,7 +96,7 @@ Supporting subsystems (not on the hot path per turn):
 | Agent loop / kernel | `bee/agent/loop.py` | 636 | `run_agent`: routing, engines, RAG, act loop, verifier, episodes |
 | Fastpath router | `bee/agent/fastpaths.py` | 536 | Regex fastpath system (answers/tools without LLM) |
 | ML router | `bee/brain/mlrouter.py` | — | TF-IDF + LogReg local/cloud classifier; complexity floor |
-| Heuristic router | `bee/agent/router.py` | 224 | Tier scoring fallback |
+| Router (facade) | `bee/agent/router.py` | — | `decide()`: the loop's single routing entry — deterministic → explicit → smalltalk → fast-path → ML → heuristic (order pinned by `tests/test_routing_order.py`) |
 | LLM client | `bee/agent/client.py` | 226 | litellm + native Ollama fallback, LLMError, num_ctx=8192 pin |
 | Context | `bee/agent/context.py` | 135 | Bag of cfg/workspace/tools; `client` assigned post-construction (untyped/optional) |
 | Engines | `bee/agent/engines.py` | 102 | local/cloud/hybrid/offline; settings.json read/write; module globals |
@@ -246,9 +246,11 @@ User
 1. User types in REPL (`cli.py` `_repl`); BOM/zero-width stripped.
 2. Command check (`/plan /draft /summarize /code /think /voice /eval …`).
 3. `run_agent(ctx, task, model=…)` (loop.py):
-   a. **Routing:** det-math regex → explicit engine hint → smalltalk →
-      `fastpaths.py` regex system → `brain/mlrouter.py` (may escalate, never
-      demote vs heuristic) → `router.py` tiers.
+   a. **Routing:** one facade — `router.py:decide()` (the loop's single entry):
+      det-math → explicit engine hint → smalltalk → `fastpaths.py` regex system
+      → `brain/mlrouter.py` (may escalate, never demote vs heuristic) →
+      heuristic; escalation (hybrid/availability) follows right after, with
+      live service probes.
    b. **Engine:** `engines.py` resolves local/cloud/hybrid/offline from
       settings.json + per-turn model override.
    c. **RAG:** `brain/rag.py` auto-injects top-k chunks (LanceDB + keyword, RRF).

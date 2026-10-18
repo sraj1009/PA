@@ -98,6 +98,9 @@ _UNIT = [
     # bee/agent/loop.py into bee/agent/policy.py — the loop only branches on
     # these booleans, and the legacy private names stay importable from loop.
     "test_agent_policy",
+    # Router facade (2026-10-18): bee/agent/router.py:decide() is the loop's
+    # single routing entry — the full tier order is pinned end to end.
+    "test_routing_order",
 ]
 _INTEGRATION = [
     "test_kernel_integration", "test_automation", "test_episodes",

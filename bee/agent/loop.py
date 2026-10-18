@@ -1,7 +1,9 @@
 """BEE core agent loop — production edition (Phase 4).
 
 Pipeline per task:
-  route (explicit > deterministic > ML > heuristic)
+  route — one entry: bee/agent/router.py:decide() (tier order documented
+  there: deterministic → explicit → smalltalk → fast-path → ML → heuristic
+  → escalate)
   → availability check (local down → cloud → offline rules)
   → RAG auto-context (grounding for dangling references)
   → think/act/observe loop with:
@@ -23,7 +25,8 @@ from ..config import Config
 from .client import LLMClient, LLMError
 from .context import Context, build_sub_system, build_system_prompt, module_api_card, compact_messages
 from .result import AgentResult
-from .router import route as route_v2, strip_cloud_prefix, CLOUD_PREFIX
+from . import router as routing
+from .router import strip_cloud_prefix, CLOUD_PREFIX
 
 from .. import guard, privacy
 from ..brain import rag as rag_mod
@@ -134,7 +137,7 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                 pass
 
     # ------------------------------------------------------------- routing
-    rinfo = route_v2(said, cfg, model)
+    rinfo = routing.decide(said, cfg, model)
     name, escalated = rinfo["name"], rinfo["escalated"]
     metrics.record("route", task=said[:200], route=name, source=rinfo.get("source"),
                    escalated=escalated, conf=rinfo.get("conf"))
@@ -176,16 +179,16 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                           model="deterministic", ok=True, verify="pass", route_source="deterministic")
         return _finish(ctx, said, episode, res, start, emit, sub)
 
-    # ------------------------------------ tier 0: fast paths (pure Python, no LLM)
-    # explicit model hints ('cloud: ...' / 'local: ...') always win over fast paths
-    if rinfo.get("source") != "explicit":
-        from . import fastpaths
-        hit = fastpaths.match(said)
-        if hit is not None:
-            done = _run_fastpath(ctx, cfg, said, hit[0], hit[1], episode, start, emit, sub,
-                                 on_ask=on_ask)
-            if done is not None:
-                return done
+    # ------------------------------ tier 3: fast paths (matched in decide())
+    # Pure Python, no LLM. decide() applies the gates: explicit model hints
+    # ('cloud: ...' / 'local: ...') win over fast paths, and det/smalltalk
+    # tasks never reach here (they returned above).
+    hit = rinfo.get("fastpath")
+    if hit is not None:
+        done = _run_fastpath(ctx, cfg, said, hit[0], hit[1], episode, start, emit, sub,
+                             on_ask=on_ask)
+        if done is not None:
+            return done
 
     # ------------------------------------------------- availability / fallback chain
     local_up = ctx.client.ollama_up()      # public provider API (Phase 6)

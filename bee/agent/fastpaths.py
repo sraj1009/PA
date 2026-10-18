@@ -1,6 +1,7 @@
 """Fast paths — pure-Python handlers for the most common user asks.
 
-Matched right after smalltalk/math, BEFORE any LLM call. Everything here is
+Matched by router.decide() (tier 3 of the documented routing order — after
+deterministic/explicit/smalltalk), BEFORE any LLM call. Everything here is
 deterministic, offline where possible, and answers in milliseconds:
 
     time · date · uptime · weather [city] · unit conversions · coin/dice/random

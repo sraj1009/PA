@@ -31,6 +31,13 @@
   Direct `run_agent()` callers (voice loop, tests, spawn) intentionally skip the
   capability gate when `ctx.capability_gate is None` — that `is not None` guard in
   `bee/agent/loop.py` is load-bearing for 30+ callers, not a bug to "fix".
+- Routing: one facade — `bee/agent/router.py:decide()` is the loop's single
+  entry. Tier order (first hit wins, documented in that module's docstring and
+  pinned by `tests/test_routing_order.py`): deterministic → explicit
+  (prefix/hints/engine, incl. vision) → smalltalk → fast-path → ML →
+  heuristic → escalate (hybrid cloud-first + availability fallback, applied by
+  `run_agent` with live probes). Fast paths stay table-driven
+  (`bee/agent/fastpaths.py`, ~5 lines per handler).
 - Config: `load_config()` merges 6 layers; `cloud.api_key` is the one deliberate
   exception (yaml wins over env). New `config.yaml` sections need a dataclass +
   `_section()` loader line + yaml block, all three.

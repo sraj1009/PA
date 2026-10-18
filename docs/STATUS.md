@@ -734,6 +734,19 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   `tests/test_agent_policy.py` (5) + focused router/fastpath/extractor/risk
   suites 121 passed; `-m core` green on the frozen tree (951 passed /
   84 deselected).
+- **Routing facade — one documented decision entry (2026-10-18).** The loop's
+  scattered routing is unified: `bee/agent/router.py:decide()` is now the single
+  entry `run_agent` calls. It composes the tiers in the documented order —
+  deterministic (math, no LLM) → explicit (`cloud:`/hints/engine, incl. vision)
+  → smalltalk → fast-path → ML → heuristic — and returns the fast-path hit
+  alongside the tier decision; escalation (hybrid cloud-first + availability
+  fallback) stays in `run_agent` right after, since it needs live service
+  probes. Fast-path registration stays table-driven (`fastpaths.FASTPATHS`,
+  ~5 lines per handler); `route()`/`route_task()` APIs unchanged (evals,
+  `smoke_offline`). Order documented in the router docstring + `AGENTS.md` +
+  README §9; new `tests/test_routing_order.py` (7) pins it end to end,
+  including that `run_agent` calls exactly one entry. `-m core` green
+  (958 passed / 84 deselected).
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
