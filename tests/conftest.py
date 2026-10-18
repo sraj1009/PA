@@ -101,6 +101,9 @@ _UNIT = [
     # Router facade (2026-10-18): bee/agent/router.py:decide() is the loop's
     # single routing entry — the full tier order is pinned end to end.
     "test_routing_order",
+    # Doctor (2026-10-18): `python -m bee.cli doctor` / `/doctor` — read-only
+    # report; probes mocked and CLI dispatch verified to start no service.
+    "test_doctor",
 ]
 _INTEGRATION = [
     "test_kernel_integration", "test_automation", "test_episodes",

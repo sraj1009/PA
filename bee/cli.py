@@ -74,6 +74,7 @@ def _cmd_help(p: _Print):
         "  /consolidate     run memory consolidation now (diary -> longterm)\n"
         "  /eval            run the agent eval suite\n"
         "  /health          environment + service health check\n"
+        "  /doctor          deep read-only report: config precedence, services, memory, disk, verdict\n"
         "  /dashboard       build & open the monitoring dashboard\n"
         "  /router          show ML router training status\n"
         "  /guard [on|off]  permission gates for destructive commands\n"
@@ -517,6 +518,9 @@ def _repl(cfg):
             elif cmd == "/health":
                 from .monitor import health
                 health.cli_report(cfg)
+            elif cmd == "/doctor":
+                from .monitor import doctor
+                doctor.cli_report(cfg)
             elif cmd == "/dashboard":
                 from .monitor import dashboard
                 f = dashboard.build()
@@ -970,7 +974,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="bee", description="BEE - local-first self-improving PA")
     ap.add_argument("mode", nargs="?", default="repl",
                     choices=["repl", "voice", "clap", "web", "plan", "speak", "eval", "setup",
-                              "consolidate", "livekit", "realtime", "full"])
+                              "consolidate", "livekit", "realtime", "full", "health", "doctor"])
     ap.add_argument("rest", nargs="*")
     ap.add_argument("--config", default=None, help="path to config.yaml")
     ap.add_argument("--host", default="127.0.0.1")
@@ -988,8 +992,20 @@ def main(argv=None):
         _setup()
         return 0
 
+    if args.mode == "doctor":
+        # Read-only report: dispatches BEFORE config load (it reports a broken
+        # config itself, exit 2) and before any background service starts.
+        from .monitor import doctor
+        return doctor.run(args.config)
+
     from .config import load_config
     cfg = load_config(args.config)
+
+    if args.mode == "health":
+        from .monitor import health
+        health.cli_report(cfg)
+        return 0
+
     p = _Print()
 
     # Start the native Go telemetry daemon in the background (never blocks startup).

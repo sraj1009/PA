@@ -60,7 +60,7 @@ bee/agent/loop.py :: run_agent()          ← the de-facto Agent Kernel (636 lin
   └─ 6. Post-processing
         agent/reflection.py (lessons → memory/lessons/)
         agent/episodes/logger.py (episode JSONL → train/episodes/)
-        monitor/metrics.py, monitor/health.py
+        monitor/metrics.py, monitor/health.py, monitor/doctor.py
         diary append (memory/diary/YYYY-MM-DD.md)
 ```
 
@@ -120,7 +120,7 @@ Supporting subsystems (not on the hot path per turn):
 | Tool base | `bee/tools/base.py` | — | `T` dataclass (name/description/parameters/handler); `build_default_tools()`; `eval_safe` (AST allowlist + H8 budgets: input 20k chars / 200 nodes / depth 20 / literals 10k / 90 ms deadline / C-call guards) |
  | Tool modules | `bee/tools/*.py` | 30 tools (2026-10-08, counted) | files (workspace jail), automate, shell, web (netguard SSRF-protected, multi-engine ddg→bing→wikipedia), code, calculator, sandbox (Docker, hardened flags), memory (structured), skills, planner, spawn_task (sub-agents inherit the capability gate — acceptance audit F1), automation_job, computer_use (observe/input/window/clipboard/stop), health, systemctl, scheduler |
 | Episodes | `bee/agent/episodes/logger.py` | 113 | JSONL episode records; **unredacted tool output** persisted (loop.py:579-580) |
-| Monitor | `bee/monitor/{metrics,health,dashboard}.py` | — | Metrics JSONL history (unbounded), health, static HTML dashboard |
+| Monitor | `bee/monitor/{metrics,health,doctor,dashboard}.py` | — | Metrics JSONL history (unbounded), health, doctor report, static HTML dashboard |
 | Native daemon | `bee/native/__init__.py` | 177 | Go telemetry daemon bootstrap |
 | Evals (code) | `bee/evals/` | — | Agent task runner (21 tasks in root `evals/tasks.yaml`) |
 | Evals (data) | `evals/` (root) | — | tasks.yaml, verify_suite.py (1259, Wilson 95% CIs), results.jsonl, bench_model.json |

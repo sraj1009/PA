@@ -747,8 +747,26 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   README §9; new `tests/test_routing_order.py` (7) pins it end to end,
   including that `run_agent` calls exactly one entry. `-m core` green
   (958 passed / 84 deselected).
+- **Doctor — `python -m bee.cli doctor` / `/doctor` (2026-10-18).** New
+  `bee/monitor/doctor.py`: a one-shot read-only report (python/platform/
+  workspace + free disk, config load + per-field precedence summary, guard
+  mode + capability inventory (24 capabilities, 4 default-deny), Ollama
+  reachability and required-model presence (`cfg.ollama.model` +
+  `embed_model`, tag-insensitive), cloud configured **yes/no only** (key
+  material never read out; config-error text is token-scrubbed), memory
+  vector-index age + dirty queue, last eval summary path). Exit codes: 0
+  healthy, 1 Ollama unreachable / required model missing, 2 config failed to
+  load (doctor loads config itself so it can report a broken file). CLI
+  dispatches before the native telemetry daemon and the Ollama autostart so
+  no service is ever started for a check; the pre-existing REPL-mode gap —
+  `python -m bee.cli health` was advertised in `monitor/health.py` but
+  argparse rejected it — is closed too. New `tests/test_doctor.py` (12,
+  probes mocked, includes a no-secrets leak test and a dispatch test that
+  fails if a background service starts). `-m core` green (970 passed /
+  84 deselected).
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 1042-test suite (`pytest tests -q`, re-measured
-2026-10-18 after the loop refactor + routing facade). Nothing here is marketing.*
+or to a green test in the 1054-test suite (`pytest tests -q`, re-measured
+2026-10-18 after the loop refactor + routing facade + doctor). Nothing here is
+marketing.*

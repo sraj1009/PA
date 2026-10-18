@@ -111,6 +111,7 @@ python -m pip install -r requirements-voice.txt        # STT/TTS (optional)
 docker build -t bee-sandbox:latest .\sandbox           # optional: ML/DL sandbox
 
 # verify everything, then launch
+python -m bee.cli doctor     # read-only system report; exit 0 = healthy
 python -m bee.cli setup
 python -m bee.cli
 ```
@@ -445,6 +446,7 @@ tool calls — a fast path can never bypass permissions.
 | `/reflect` · `/consolidate` | run self-review / nightly consolidation now |
 | `/eval` | run the 21-task agent eval suite |
 | `/health` · `/dashboard` | environment report / metrics dashboard **snapshot** (the web app serves the same page **live** at `GET /dashboard?token=…`, refreshing every 30 s) |
+| `/doctor` | deep read-only report — config precedence, guard + capability-gate status, Ollama reachability + `bee4b`/`nomic-embed-text` presence, memory index age + dirty queue, disk, last eval summary. CLI: `python -m bee.cli doctor` (exit 0 healthy · 1 no local core · 2 broken config; never prints keys) |
 | `/router` | learned-ML-router training status |
 | `/guard on\|off` · `/privacy on\|off` · `/rag on\|off` | session safety toggles |
 | `/clear` · `/exit` | screen / quit |
