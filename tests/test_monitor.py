@@ -112,6 +112,76 @@ try:
 finally:
     dashboard.metrics = _real_metrics
 
+print("== 5) training flywheel cards (P1-8) ==")
+import json as _json
+import tempfile as _tmpmod
+from datetime import datetime as _dtime
+
+from bee.memory import ratings as _ratings
+
+_fw_saved = {_k: getattr(paths, _k) for _k in
+             ("TRAIN_DIR", "EVALS_DIR", "MEMORY_DIR", "MODELS_YAML")}
+_fw = Path(_tmpmod.mkdtemp(prefix="bee_flywheel_"))
+try:
+    (_fw / "train" / "golden").mkdir(parents=True)
+    (_fw / "evals").mkdir(parents=True)
+    (_fw / "memory").mkdir(parents=True)
+    _today = _dtime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    (_fw / "train" / "golden" / "cloud_golden.jsonl").write_text("\n".join(
+        _json.dumps({"task": f"t{i}", "response": f"r{i}", "model": "cloud",
+                     "ts": _today}) for i in (1, 2)) + "\n", encoding="utf-8")
+    (_fw / "train" / "sft_v1.jsonl").write_text("\n".join(
+        _json.dumps({"messages": [], "metadata": {"type": t, "practice": p}})
+        for t, p in (("math", False), ("shell", True), ("shell", False))) + "\n",
+        encoding="utf-8")
+    (_fw / "train" / "gate_candidate.json").write_text(
+        _json.dumps({"model": "bee4b-v3"}), encoding="utf-8")
+    (_fw / "evals" / "baselines.json").write_text(_json.dumps({
+        "models": {"bee4b": {"model": "bee4b", "ts": "2026-10-17T01:00:00",
+                             "passed": 16, "total": 21, "score": "16/21"},
+                   "bee4b-v2": {"model": "bee4b-v2", "ts": "2026-10-18T02:00:00",
+                                "passed": 17, "total": 21, "score": "17/21"}},
+        "promotions": [{"ts": "2026-10-18T02:05:00", "from": "bee4b",
+                        "to": "bee4b-v2", "before": "16/21", "after": "17/21"}]}),
+        encoding="utf-8")
+    (_fw / "models.yaml").write_text("local_model: bee4b-v2\n", encoding="utf-8")
+    _ratings.record("rate this", "good answer", 1, db=_fw / "memory" / "ratings.db")
+    _ratings.record_pair("ptask-a", "chosen-a", "rejected-a", source="critique",
+                         db=_fw / "memory" / "ratings.db")
+    _ratings.record_pair("ptask-b", "chosen-b", "rejected-b", source="episode-derive",
+                         db=_fw / "memory" / "ratings.db")
+    paths.TRAIN_DIR = _fw / "train"
+    paths.EVALS_DIR = _fw / "evals"
+    paths.MEMORY_DIR = _fw / "memory"
+    paths.MODELS_YAML = _fw / "models.yaml"
+    fly = dashboard.render()
+    check("TRAINING FLYWHEEL" in fly.upper(), "flywheel section present (P1-8)")
+    check("· 2 total" in fly, "golden-rows/day counted", "(2 today)")
+    check("preference pairs · 2" in fly, "preference pairs counted")
+    check("critique" in fly and "episode-derive" in fly, "pairs shown per source")
+    check("· 3 samples" in fly and "practice share: 33%" in fly,
+          "SFT type-mix + practice share shown")
+    check("bee4b → bee4b-v2" in fly and "17/21" in fly,
+          "promotion lineage shown (adapter -> gate score)")
+    check("pending gate candidate: bee4b-v3" in fly
+          and "current override: bee4b-v2" in fly, "queue + current override shown")
+    _bare = Path(_tmpmod.mkdtemp(prefix="bee_flywheel_empty_"))
+    for _d in ("train", "evals", "memory"):
+        (_bare / _d).mkdir()
+    paths.TRAIN_DIR = _bare / "train"
+    paths.EVALS_DIR = _bare / "evals"
+    paths.MEMORY_DIR = _bare / "memory"
+    paths.MODELS_YAML = _bare / "models.yaml"
+    bare = dashboard.render()
+    check("TRAINING FLYWHEEL" in bare.upper() and "no data yet" in bare
+          and "no pairs yet" in bare and "no gate runs yet" in bare,
+          "all-empty flywheel renders empty states")
+    check(not (paths.MEMORY_DIR / "ratings.db").exists(),
+          "rendering did NOT create memory/ratings.db")
+finally:
+    for _k, _v in _fw_saved.items():
+        setattr(paths, _k, _v)
+
 src = Path(dashboard.__file__).read_text(encoding="utf-8")
 check("placeholder" not in src, "no leftover placeholder series in the dashboard")
 

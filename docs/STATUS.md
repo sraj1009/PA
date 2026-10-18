@@ -767,6 +767,27 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   real kernel, every user-state path sandboxed: fetch 200 / fenced, the write
   landed tagged, `auto_context` excluded the canary, and the `memory_write`
   row recorded `untrusted: true`. Full suite 1119 passed.
+- **Flywheel dashboard — the training loop's four ledgers on one page (P1-8,
+  2026-10-18).** The pipeline report was a CLI-only markdown file
+  (`python -m bee.pipeline.report`); nothing showed whether the flywheel was
+  actually turning. `/dashboard` now renders a "training flywheel" section from
+  the four ledgers that carry the loop: **golden-rows/day** (last 14 days +
+  total, `train/golden/cloud_golden.jsonl`), **preference pairs** (totals +
+  per-source breakdown, `memory/ratings.db`), **SFT type-mix** (per-sample
+  `metadata.type` distribution + the practice share, `train/sft_v1.jsonl`), and
+  **adapter → eval-score lineage** (`evals/baselines.json`: every scored model,
+  its promotions, the pending queue `train/gate_candidate.json`, and the current
+  `models.yaml` override). The same `render()` serves the live web route and the
+  written snapshot, so both surfaces got the cards. Design contract (pinned):
+  the renderer is READ-ONLY and tolerant — a missing/corrupt ledger renders an
+  empty state, never an error, and it may never CREATE the store it reads
+  (`_pairs_summary` refuses to open a non-existent `ratings.db`; a check pins
+  that rendering an empty flywheel leaves `memory/ratings.db` absent). Live
+  check on real state: goldens 5, pairs 7 (sources visible), SFT 87 samples,
+  practice share 0 %, lineage empty (bee4b-v2 still un-scored), all watched
+  files byte-identical after render. `tests/test_monitor.py` grew 9 checks
+  (section 5: fixtures for all four ledgers, per-source pairs, lineage + queue +
+  override, all-empty empty-states, the no-create pin). Full suite 1119 passed.
 - **CI portability pass (2026-10-18).** The first Actions run on the rewritten
   repo (Linux + Windows bare installs, both `-m core`) failed 18/12 tests that
   had only ever run on the author's box. Fixes: the Windows-only feature tests
@@ -1005,4 +1026,5 @@ hardening + web audit + packaging + the A69 live-skip fix + the A64
 registry + gate-guard closes + the N7 pin repair + the M12 import-graph lint
 + the P1-4 embed keep_alive + the P1-5 recall guard + the P1-6 practice
 job + the P1-7 untrusted-memory fence and the web_fetch streaming defect
-its live check exposed). Nothing here is marketing.*
+its live check exposed + the P1-8 flywheel dashboard). Nothing here is
+marketing.*
