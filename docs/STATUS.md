@@ -790,9 +790,25 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   question no longer outranks the profile fact" and stale-row deletion against
   a real LanceDB store) and +4 `tests/test_memory_status.py` (hermetic).
   Full suite green.
+- **Web route-table audit — `/health` no longer boots the runtime (2026-10-18).**
+  Every stateful route (chat, voice, engine set, cancel, permission answers,
+  dashboard, LiveKit token + state push, face state) was audited to require
+  the bearer token before anything else runs; the route table is now pinned
+  by `tests/test_webauth.py`: `test_route_table_is_fully_classified` fails on
+  any route that is not explicitly gated or open, and every gated route is
+  probed to answer 401 without a token. One real gap fixed: `/health` (open,
+  token-less) used `get_ctx()`, so a fresh `uvicorn bee.webapp:app` process
+  had the WHOLE runtime — context, kernel, scheduler automation — booted by
+  the first unauthenticated request; it now answers from the running context
+  or a bare `LLMClient` (models list only), and `/livekit/status` got the
+  same no-boot treatment. The `--host` default stays 127.0.0.1 and a
+  non-loopback bind (`0.0.0.0` & co) now prints a loud startup warning in
+  `web` and `full` modes — pinned by tests — because the token gates
+  shell/code tools running as the operator; `docs/SECURITY.md` §2 carries the
+  full endpoint table, the no-boot guarantee and the bind guidance.
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 1064-test suite (`pytest tests -q`, re-measured
+or to a green test in the 1069-test suite (`pytest tests -q`, re-measured
 2026-10-18 after the loop refactor + routing facade + doctor + memory
-hardening). Nothing here is marketing.*
+hardening + web audit). Nothing here is marketing.*

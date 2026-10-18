@@ -1,10 +1,17 @@
 """BEE web UI — FastAPI: chat (SSE), voice (upload -> STT -> answer -> JSON), skills list.
 
-Security (Phase 1): every stateful endpoint (chat, voice, engine set, livekit
-token mint, face state) requires a bearer token. The token is env-fixed
-(BEE_WEB_TOKEN) or auto-generated once per server start (printed in the
-console + saved to temp/web_token.txt, which is git-ignored). Static pages
-and read-only status endpoints stay open.
+Security (Phase 1): every stateful endpoint — chat, voice, engine set, cancel,
+permission answers, dashboard, livekit token mint / state push, face state —
+requires a bearer token. The token is env-fixed (BEE_WEB_TOKEN) or
+auto-generated once per server start (printed in the console + saved to
+temp/web_token.txt, which is git-ignored). Static pages and read-only status
+endpoints (/health, /skills, /engine GET, /livekit/status) stay open and never
+boot the agent runtime; `tests/test_webauth.py::test_route_table_is_fully_classified`
+fails on any route that is not explicitly classified.
+
+The server is meant for 127.0.0.1. A non-loopback bind (--host 0.0.0.0, ...)
+exposes the FULL agent — shell/code tools execute as the operator — to every
+host that can reach the port; `cli._warn_if_public_bind` prints the warning.
 
 Run:  python -m bee.cli web          (or: uvicorn bee.webapp:app --port 8787)
 """
@@ -98,6 +105,31 @@ def require_auth(request: Request) -> None:
             status_code=401,
             detail="unauthorized — send Authorization: Bearer <token> "
                    "(token: server console / temp/web_token.txt / BEE_WEB_TOKEN)")
+
+
+def is_loopback_bind(host: str) -> bool:
+    """True when a bind address is reachable only from this machine."""
+    h = (host or "").strip().strip("[]").lower()
+    return h in ("localhost", "::1") or h.startswith("127.")
+
+
+def public_bind_warning(host: str) -> str:
+    """Warning text for a non-loopback web bind, '' when it stays on loopback.
+
+    The web token gates the FULL agent: behind it, `shell` and `code_run`
+    execute commands as this user with no OS isolation. On 127.0.0.1 that is
+    a local-session problem; on 0.0.0.0 or a LAN IP it is a network problem.
+    Printed at startup by `cli._warn_if_public_bind` (web + full modes);
+    see docs/SECURITY.md §2.
+    """
+    if is_loopback_bind(host):
+        return ""
+    shown = (host or "").strip() or "(all interfaces)"
+    return ("\n  !!! WARNING: BEE web is bound to " + shown + " — reachable beyond this machine.\n"
+            "      The bearer token is the only gate, and behind it the agent can run\n"
+            "      shell / code with YOUR user privileges — anyone who reaches this port\n"
+            "      and reads the token (console / temp/web_token.txt) can run commands\n"
+            "      on this machine. Prefer the default 127.0.0.1; see docs/SECURITY.md.\n")
 
 
 def get_ctx() -> Context:
@@ -194,10 +226,32 @@ def index():
     return _page("index.html")
 
 
+def _models_without_boot() -> list:
+    """Ollama model list for /health on a fresh process — no app context.
+
+    Same client class the context would build (LLMClient), minus the parts
+    with side effects: no kernel, no scheduler automation, no global CTX.
+    models_list() swallows connection errors (returns [])."""
+    try:
+        from .config import load_config
+        from .agent.client import LLMClient
+        return LLMClient(load_config()).models_list()
+    except Exception:
+        return []
+
+
 @app.get("/health")
 def health():
-    ctx = get_ctx()
-    models = ctx.client.models_list()
+    """Liveness probe — open (no token) and deliberately side-effect-free.
+
+    This route used to call get_ctx(), so a fresh `uvicorn bee.webapp:app`
+    process had its WHOLE runtime (context, kernel, scheduler automation)
+    booted by the first unauthenticated request. It now answers from the
+    running context when there is one and otherwise from a bare LLM client —
+    no context, no kernel, no automation, no engine mutation.
+    """
+    ctx = CTX
+    models = ctx.client.models_list() if ctx is not None else _models_without_boot()
     return {"ok": True, "ollama_models": models,
             "voice_stt": _voice_available()}
 
@@ -462,7 +516,14 @@ def livekit_page():
 
 @app.get("/livekit/status")
 def livekit_status():
-    cfg = get_ctx().cfg
+    """Read-only LiveKit config probe — open, and never boots the runtime
+    (same reasoning as /health: a token-less request must not create the
+    context / kernel / scheduler; the response is public config only)."""
+    ctx = CTX
+    cfg = getattr(ctx, "cfg", None) if ctx is not None else None
+    if cfg is None:
+        from .config import load_config
+        cfg = load_config()
     lk = cfg.livekit
     return {"configured": bool(lk.url and lk.api_key and lk.api_secret),
             "room": lk.room, "url": lk.url or "", "enabled": lk.enabled}

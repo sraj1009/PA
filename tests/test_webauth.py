@@ -74,7 +74,13 @@ def test_query_string_token_rejected():
     assert c.get(f"/face/state?token={FIXED}").status_code == 401
 
 
-def test_open_routes_stay_open():
+def test_open_routes_stay_open(monkeypatch):
+    # Hermetic: /health and /livekit/status answer from a bare client + config
+    # (no runtime), so stub exactly those two seams.
+    import bee.agent.client as client_mod
+    import bee.config as config_mod
+    monkeypatch.setattr(config_mod, "load_config", lambda *a, **k: _stub_cfg())
+    monkeypatch.setattr(client_mod, "LLMClient", _StubLLM)
     c = _client()
     assert c.get("/health").status_code == 200
     assert c.get("/").status_code == 200
@@ -302,3 +308,123 @@ def test_dashboard_is_not_cacheable(dash_env):
     # the snapshot file the CLI writes must NOT auto-reload: it is a point in time
     html = _dash.render()
     assert 'http-equiv="refresh"' not in html
+
+
+# ------------------------------------------------ full route-table audit (2026-10-18)
+# The route table IS the security surface. Every route must be classified
+# below: gated -> 401 without a token; open -> static/read-only AND must not
+# boot the agent runtime. A route added, removed or re-methoded without being
+# classified here fails the audit on purpose.
+_FRAMEWORK_DOCS = {("GET", "/openapi.json"), ("GET", "/docs"),
+                   ("GET", "/docs/oauth2-redirect"), ("GET", "/redoc")}
+_OPEN = _FRAMEWORK_DOCS | {
+    ("GET", "/"), ("GET", "/face"), ("GET", "/livekit"),          # static pages
+    ("GET", "/health"), ("GET", "/skills"), ("GET", "/engine"),   # status/info
+    ("GET", "/livekit/status"),                                   # config probe
+}
+# Probe payloads: just enough for FastAPI to reach the handler, which calls
+# require_auth() before anything else. (/voice needs a file part or FastAPI
+# answers 422 during validation, before the handler could 401.)
+_GATED_PROBES = {
+    ("POST", "/chat"): {"json": {"task": "hi"}},
+    ("POST", "/voice"): {"files": {"file": ("a.webm", b"\x00\x01", "audio/webm")}},
+    ("POST", "/engine"): {"json": {"engine": "local"}},
+    ("POST", "/cancel"): {},
+    ("POST", "/permission"): {"json": {"id": "x", "grant": False}},
+    ("POST", "/livekit/token"): {"json": {"room": "bee-pa"}},
+    ("POST", "/livekit/state"): {"json": {"state": "idle"}},
+    ("GET", "/dashboard"): {},
+    ("GET", "/face/state"): {},
+}
+
+
+def _registered_routes() -> set:
+    from starlette.routing import Route        # APIRoute subclasses Route
+    out = set()
+    for r in webapp.app.routes:
+        if isinstance(r, Route):
+            for m in (getattr(r, "methods", None) or []):
+                if m in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+                    out.add((m, r.path))
+    return out
+
+
+def test_route_table_is_fully_classified():
+    actual = _registered_routes()
+    classified = _OPEN | set(_GATED_PROBES)
+    assert actual == classified, (
+        "route table changed — classify the difference as gated (add a 401 "
+        "probe in _GATED_PROBES) or open (static/read-only, add to _OPEN). "
+        f"Unclassified: {sorted(actual - classified)}; "
+        f"stale: {sorted(classified - actual)}")
+
+
+def test_every_gated_route_rejects_unauthenticated_requests():
+    c = _client()
+    for (method, path), kw in sorted(_GATED_PROBES.items()):
+        r = c.request(method, path, **kw)
+        assert r.status_code == 401, f"{method} {path} answered {r.status_code}"
+
+
+class _StubLLM:
+    def __init__(self, cfg):
+        pass
+
+    def models_list(self):
+        return ["stub-model"]
+
+
+def _stub_cfg():
+    return types.SimpleNamespace(
+        workspace=Path("."),
+        voice=types.SimpleNamespace(model="base.en", device="cpu",
+                                    compute_type="int8"),
+        livekit=types.SimpleNamespace(url="wss://lk.test", api_key="k",
+                                      api_secret="s", room="bee-pa",
+                                      enabled=True))
+
+
+def test_open_routes_never_boot_the_agent_runtime(monkeypatch):
+    """A fresh `uvicorn bee.webapp:app` used to have its WHOLE runtime booted
+    (context, kernel, scheduler automation) by the first unauthenticated
+    /health; /livekit/status did the same via get_ctx(). Token-less routes
+    must stay side-effect-free."""
+    import bee.agent.client as client_mod
+    import bee.config as config_mod
+    monkeypatch.setattr(config_mod, "load_config", lambda *a, **k: _stub_cfg())
+    monkeypatch.setattr(client_mod, "LLMClient", _StubLLM)
+
+    def _explode(*a, **kw):
+        raise AssertionError("a token-less request booted the agent runtime")
+
+    monkeypatch.setattr(webapp, "get_ctx", _explode)
+    webapp.CTX = None
+    try:
+        from fastapi.testclient import TestClient
+        c = TestClient(webapp.app)
+        r = c.get("/health")
+        assert r.status_code == 200
+        assert r.json()["ollama_models"] == ["stub-model"]
+        assert c.get("/livekit/status").status_code == 200
+        assert webapp.CTX is None, "an open route mutated the global context"
+    finally:
+        webapp.CTX = None
+
+
+def test_public_bind_warning_flags_only_non_loopback():
+    assert webapp.public_bind_warning("127.0.0.1") == ""
+    assert webapp.public_bind_warning("localhost") == ""
+    assert webapp.public_bind_warning("::1") == ""
+    assert webapp.public_bind_warning("127.0.0.9") == ""
+    w = webapp.public_bind_warning("0.0.0.0")
+    assert "WARNING" in w and "0.0.0.0" in w and "shell" in w.lower()
+    assert "192.168.1.20" in webapp.public_bind_warning("192.168.1.20")
+
+
+def test_cli_warns_before_a_public_bind(capsys):
+    from bee import cli
+    cli._warn_if_public_bind("127.0.0.1")
+    assert capsys.readouterr().out == ""
+    cli._warn_if_public_bind("0.0.0.0")
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "0.0.0.0" in out

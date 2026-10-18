@@ -612,6 +612,18 @@ def _on_event(p: _Print, ev: dict):
 
 
 # ------------------------------------------------------------------ web
+def _warn_if_public_bind(host: str) -> None:
+    """Loud warning when the web UI is bound beyond loopback.
+
+    The token gates the full agent (shell/code as the operator), so a LAN
+    bind is a network-exposed shell; the default is 127.0.0.1 (see
+    bee/webapp.py:public_bind_warning + docs/SECURITY.md §2)."""
+    from .webapp import public_bind_warning
+    w = public_bind_warning(host)
+    if w:
+        print(w)
+
+
 def _web(cfg, host: str, port: int):
     import uvicorn
     from .webapp import app
@@ -630,6 +642,7 @@ def _web(cfg, host: str, port: int):
     # console or temp/web_token.txt; it is never logged afterwards).
     print(f"\n  web auth token: {webapp._resolve_token()}")
     print(f"  (saved to temp/web_token.txt — git-ignored; override with BEE_WEB_TOKEN in .env)\n")
+    _warn_if_public_bind(host)
     try:
         from . import scheduler
         # Interactive kernel FIRST (found live 2026-10-17): start_automation
@@ -862,6 +875,7 @@ def _full(cfg, host: str, port: int, room: "str | None"):
         spawned.append((label, p, logf))
         print(f"  [full] {label} running (pid {p.pid}, log temp/{logname})")
 
+    _warn_if_public_bind(host)
     spawn("web UI", ["web", "--host", host, "--port", str(port)], "bee-full-web.log")
     lk = cfg.livekit
     if getattr(lk, "enabled", True) and (lk.url and lk.api_key and lk.api_secret):
@@ -982,7 +996,10 @@ def main(argv=None):
                               "memory"])
     ap.add_argument("rest", nargs="*")
     ap.add_argument("--config", default=None, help="path to config.yaml")
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="web bind address; the default 127.0.0.1 is the only safe "
+                         "choice — 0.0.0.0 exposes shell-capable tools to the network "
+                         "(see docs/SECURITY.md)")
     ap.add_argument("--port", type=int, default=8787)
     ap.add_argument("--room", default=None, help="LiveKit room name (livekit mode)")
     ap.add_argument("--always-on", action="store_true",

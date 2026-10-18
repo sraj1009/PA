@@ -72,8 +72,20 @@ on every stateful endpoint:
 
 | Endpoint | Auth |
 |---|---|
-| `POST /chat`, `POST /voice`, `POST /engine`, `POST /livekit/token`, `GET /face/state` | **required** |
-| `GET /`, `/health`, `/skills`, `/engine` (read), `/livekit`, `/livekit/status`, `/face` | open (read-only / static) |
+| `POST /chat`, `/voice`, `/engine`, `/cancel`, `/permission`, `/livekit/token`, `/livekit/state`; `GET /dashboard`, `/face/state` | **required** |
+| `GET /`, `/face`, `/livekit` (static pages); `/health`, `/skills`, `/engine` (read), `/livekit/status` (read-only status); framework docs (`/docs`, `/openapi.json`, `/redoc`) | open (read-only / static) |
+
+Open routes are side-effect-free: none of them boots the agent runtime, runs
+the agent, or mutates engine state. The route table is classified route by
+route and pinned by `tests/test_webauth.py`:
+`test_route_table_is_fully_classified` fails when a route is added without a
+class, and every gated route is probed to answer **401** unauthenticated
+(`test_every_gated_route_rejects_unauthenticated_requests`). The 2026-10-18
+audit found `/health` was the one open route with a side effect — on a fresh
+`uvicorn bee.webapp:app` process its `get_ctx()` call booted the full runtime
+(context, kernel, scheduler automation) from an unauthenticated request; it
+now answers from the running context or a bare `LLMClient`, and
+`/livekit/status` got the same no-boot treatment.
 
 Token precedence (`bee/webapp.py:_resolve_token`):
 
@@ -86,6 +98,21 @@ The UI stores the token in browser `localStorage` (🔑 button re-enters it),
 retries once after a 401, and compares with `hmac.compare_digest`
 (constant-time). This is a **local session credential** for a loopback
 server, not a cloud secret — but it gates the full agent, so don't share it.
+
+### Bind address — keep it on loopback
+
+`python -m bee.cli web` (and `full`) binds **127.0.0.1:8787** by default, and
+that is the only supported configuration. A non-loopback `--host` (`0.0.0.0`,
+a LAN IP) makes the UI reachable from other machines — and the token behind
+it gates the **full agent**: `shell` / `code_run` execute with the operator's
+user privileges and no OS isolation. Anyone who can reach the port and read
+the token (server console / `temp/web_token.txt`) can run commands on this
+machine. The CLI prints a loud warning on every non-loopback start
+(`bee/webapp.py:public_bind_warning`, printed by `cli._warn_if_public_bind`;
+pinned by `test_cli_warns_before_a_public_bind`). Do not port-forward or
+tunnel the port; if remote access is ever needed, put a hardened reverse
+proxy with its own authentication in front and set a dedicated
+`BEE_WEB_TOKEN`.
 
 ## 3. SSRF protection for web fetching
 
@@ -213,7 +240,7 @@ file** — credentials are masked inside the container.
 | `shell`, `code_run` (host) | trusted operator intent, model-suggested | guard + risk layers, **no** OS isolation |
 | `sandbox_run` | untrusted code | Docker boundary above |
 | `web_fetch` | untrusted content | netguard SSRF policy + untrusted markers |
-| web UI | local session | bearer token |
+| web UI | local session | bearer token + loopback bind (§2) |
 
 ## 6. LLM / provider layer (runtime, not strictly security)
 
