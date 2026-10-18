@@ -806,9 +806,40 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   `web` and `full` modes — pinned by tests — because the token gates
   shell/code tools running as the operator; `docs/SECURITY.md` §2 carries the
   full endpoint table, the no-boot guarantee and the bind guidance.
+- **Packaging — `pyproject.toml` added without touching the install flow
+  (2026-10-18).** PEP 621 metadata is additive: `setup.ps1`, `make install`
+  and CI keep installing from `requirements*.txt` (untouched, still the
+  canonical path), and `pip install -e .` now also works — with the five
+  extras (`voice`, `desktop`, `ml`, `vision`, `livekit`) mirroring the
+  pinned `requirements-<extra>.txt` files exactly, and a `bee` console
+  script reusing the existing `bee.cli:main` entry. The version is a static
+  `1.0.0` pinned equal to `bee.__version__` by a test — a dynamic `attr:`
+  loader resolved the root `bee.py` launcher at build time and aborted
+  (`ModuleNotFoundError`), caught by the clean-venv install; a static field
+  executes no package code. The web UI HTML ships
+  via package-data for non-editable installs. `tests/test_packaging.py`
+  pins the mirror: any drift between the pyproject lists and the
+  requirements files fails immediately. Verified end to end in a clean
+  venv: editable build → `import bee` from outside the repo → the `bee`
+  console script running `doctor` → `pytest -m core` green (the first venv
+  run surfaced A69 below — live LiveKit checks ran instead of skipping on a
+  bare install — fixed in this same push); `.gitignore` now covers
+  `*.egg-info/`/`/build/`/`/dist/` (an editable install writes egg-info
+  into the repo root).
+- **A69 — a live check that could not skip (2026-10-18).** `test_livekit_live`
+  gated on credentials only, but both checks import the livekit SDK *inside*
+  the test — so a bare install (`pip install -e .`, no extras) run from a
+  tree with a `.env` executed them under `-m core` and failed
+  `ModuleNotFoundError` (clean-venv: `2 failed, 989 passed, 5 skipped`;
+  CI never saw it — no `.env` there). Both checks now start with
+  `pytest.importorskip("livekit", …)` — skip, never fail — pinned by
+  `tests/test_debt_fixes.py::test_a69_live_checks_skip_when_the_sdk_is_absent`
+  (child pytest, SDK blocked, fake creds forced via `LIVEKIT_*` env:
+  `2 failed in 0.20s` before → `2 skipped in 0.08s` after).
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 1069-test suite (`pytest tests -q`, re-measured
+or to a green test in the 1081-test suite (`pytest tests -q`, re-measured
 2026-10-18 after the loop refactor + routing facade + doctor + memory
-hardening + web audit). Nothing here is marketing.*
+hardening + web audit + packaging + the A69 live-skip fix). Nothing here is
+marketing.*

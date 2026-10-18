@@ -1620,6 +1620,29 @@ live on the real config: `training.llama_cpp_dir` resolves to the unpacked
 b11711 dir, `adjudication_rounds: 2`, queue empty (nothing half-built).
 Suite after this pass: **1005 passed, 0 failed** in 125.9 s.
 
+## A69 — a live check that could not skip (2026-10-18, **CLOSED same day**)
+
+`tests/test_livekit_live.py` gated only on credentials (`requires_livekit`:
+creds present → run) while both checks import the livekit SDK *inside the test*
+(`bee/livekit/agent.py:44`, `tests/test_livekit_live.py:40`). So a bare install
+(`pip install -e .`, no extras) run from a tree that has a `.env` executed them
+under `-m core` and failed `ModuleNotFoundError: No module named 'livekit'` —
+CI could not see it (no `.env` there → the creds gate skipped them), so the
+failure only hit real users' bare installs. Clean-venv acceptance 2026-10-18:
+`2 failed, 989 passed, 5 skipped, 84 deselected`.
+
+**Closed:** both checks now start with
+`pytest.importorskip("livekit", reason="MISSING OPTIONAL DEPENDENCY: …")` — the
+Phase-7 idiom: a missing optional dep skips, never fails. (Design note: pytest
+9's `importorskip` skips on `ModuleNotFoundError` only — a module that exists but
+raises a generic `ImportError` stays a real error, deliberately.) Pinned by
+`tests/test_debt_fixes.py::test_a69_live_checks_skip_when_the_sdk_is_absent`,
+which runs the real file in a child pytest with the SDK blocked and fake creds
+forced via `LIVEKIT_*` env (honoured by `bee.config`) and asserts exit 0 with
+`2 skipped` for the missing-optional-dependency reason, not the creds reason.
+Same reproduction before → after: `2 failed in 0.20s` → `2 skipped in 0.08s`.
+
+
 
 
 

@@ -1,7 +1,10 @@
 """Live-credential verification for LiveKit Cloud (optional).
 
-Skipped when no credentials are configured (CI without .env). When creds
-exist it proves end-to-end: config loads keys, token minting works, and the
+Skipped when the livekit SDK is not installed (a bare install) or no
+credentials are configured (CI without .env) — creds alone are not enough,
+and the skip must never become a failure (A69, 2026-10-18: a bare install
+with a .env ran these and died with ModuleNotFoundError). When both are
+present it proves end-to-end: config loads keys, token minting works, and the
 LiveKit Cloud room-service API answers. No room is joined, no media flows —
 zero agent-minutes burned.
 """
@@ -27,6 +30,9 @@ requires_livekit = pytest.mark.skipif(
 
 @requires_livekit
 def test_live_token_mints():
+    pytest.importorskip(
+        "livekit", reason="MISSING OPTIONAL DEPENDENCY: livekit SDK — "
+        "make_token builds the JWT through livekit.api")
     from bee.livekit.agent import make_token, validate_room
     cfg = _live_cfg()
     room = validate_room(cfg.livekit.room or "bee-pa")
@@ -37,6 +43,9 @@ def test_live_token_mints():
 
 @requires_livekit
 def test_live_room_service_reachable():
+    pytest.importorskip(
+        "livekit", reason="MISSING OPTIONAL DEPENDENCY: livekit SDK — the "
+        "room-service call goes through livekit.api")
     from livekit.api import LiveKitAPI
     from livekit.protocol.room import ListRoomsRequest
     cfg = _live_cfg()

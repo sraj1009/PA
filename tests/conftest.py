@@ -107,6 +107,9 @@ _UNIT = [
     # Memory hardening (2026-10-18): `memory status` report (source counts,
     # index age, dirty queue) over a hermetic tmp memory tree.
     "test_memory_status",
+    # Packaging (2026-10-18): pyproject.toml mirrors the pinned requirements
+    # files (core + 5 extras) and adds the `bee` console script — drift fails.
+    "test_packaging",
 ]
 _INTEGRATION = [
     "test_kernel_integration", "test_automation", "test_episodes",

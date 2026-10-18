@@ -1,0 +1,87 @@
+# ============================================================
+# BEE packaging metadata (PEP 621) — ADDITIVE.
+#
+# The canonical install flow stays setup.ps1 + requirements*.txt
+# (Makefile `install`/`voice`, CI jobs). This file only adds:
+#   * editable / wheel installs:   pip install -e .
+#   * extras mirroring requirements-<extra>.txt:
+#         pip install -e ".[voice]"  (also: desktop, ml, vision, livekit)
+#   * the `bee` console script (same entry as `python -m bee.cli`)
+#
+# tests/test_packaging.py fails if these dependency lists drift from the
+# pinned requirements files, and pins version == bee.__version__ below
+# (setuptools' dynamic attr loader resolved module `bee` to the root bee.py
+# launcher during the build and aborted - a clean-venv install caught it;
+# a static field + equality test is deterministic and executes no code).
+# ============================================================
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bee-pa"
+description = "BEE - local-first, self-improving personal agent (CLI, web, voice)"
+readme = "README.md"
+requires-python = ">=3.10"
+version = "1.0.0"              # == bee.__version__, pinned by tests/test_packaging.py
+
+# Mirrors requirements.txt (core). Keep in lockstep.
+dependencies = [
+    "pyyaml==6.0.3",
+    "httpx==0.28.1",
+    "pydantic==2.13.4",
+    "litellm==1.104.0",        # unified local+cloud LLM gateway
+    "lancedb==0.39.0",         # embedded vector DB (no server)
+    "apscheduler==3.11.3",     # nightly consolidation / cron jobs
+    "fastapi==0.133.1",
+    "uvicorn==0.41.0",
+    "rich==14.3.3",
+    "pytest==9.1.1",           # core requirements; used by CI's bare install
+    "scikit-learn==1.9.0",     # learned router artifact — see requirements-ml.txt
+    "joblib==1.6.0",
+    "scipy==1.17.1",
+    "python-multipart==0.0.32",
+]
+
+[project.optional-dependencies]
+# Mirrors requirements-<extra>.txt. Keep in lockstep.
+voice = [
+    "faster-whisper==1.2.1",
+    "sounddevice==0.5.6",
+    "numpy==2.4.6",
+    "pyttsx3==2.99",
+]
+desktop = [
+    "pywin32==311",            # win32gui / win32clipboard
+    "mss==10.2.0",             # fast screenshots
+    "pyautogui==0.9.54",       # mouse / keyboard input
+]
+ml = [
+    "scikit-learn==1.9.0",
+    "numpy==2.4.6",
+    "scipy==1.17.1",
+    "joblib==1.6.0",
+]
+vision = [
+    "opencv-python==5.0.0.93",
+]
+livekit = [
+    "livekit-agents==1.4.6",
+    "livekit-plugins-silero==1.4.6",
+]
+
+[project.scripts]
+bee = "bee.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["bee*"]
+
+# Runtime data that must travel with a non-editable (wheel) install.
+# Editable installs map the source tree, so this only matters for wheels.
+[tool.setuptools.package-data]
+bee = [
+    "web/*.html",
+    "native/build.ps1",
+    "native/telemetry/*.go",
+    "native/telemetry/go.mod",
+]

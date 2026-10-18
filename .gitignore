@@ -11,6 +11,11 @@ venv/
 .coverage*
 .hf/
 
+# --- Packaging artifacts (pip install -e . / python -m build) ---
+*.egg-info/
+/build/
+/dist/
+
 # --- Secrets — NEVER commit (Phase 1 security) ---
 .env
 .env.*

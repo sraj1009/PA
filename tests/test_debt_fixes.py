@@ -1,5 +1,5 @@
 """Regression tests for the technical-debt items closed in the coherence
-pass (N3, N4, N9, H8). Each test pins the specific behavior so the fix
+pass (N3, N4, N9, H8, A69). Each test pins the specific behavior so the fix
 cannot silently regress.
 
 Run:  python -m pytest tests/test_debt_fixes.py -q
@@ -278,3 +278,45 @@ def test_repl_process_exits_after_slash_exit(tmp_path):
     assert p.returncode == 0, f"repl exited {p.returncode} after {elapsed:.1f}s:\n{tail}"
     assert "12 * 12 = 144" in (p.stdout or ""), tail
     assert elapsed < 120, f"repl took {elapsed:.1f}s — finalization deadlock back?\n{tail}"
+
+
+# --------------------------- A69: live checks skip, never fail (bare install)
+def test_a69_live_checks_skip_when_the_sdk_is_absent(tmp_path):
+    """A69 (2026-10-18): `-m core` on a bare install (no livekit SDK) run from
+    the repo root — where .env lives — executed the two live-credential checks
+    and FAILED with ModuleNotFoundError: creds alone gated them, the SDK never
+    did. CI could not see it (no .env there -> the creds gate skipped them),
+    so the failure only hit real users' bare installs.
+
+    This runs the REAL file in a child pytest with the SDK blocked and fake
+    creds forced through the env (LIVEKIT_* are honoured by bee.config) and
+    pins: exit 0, both checks SKIPPED for the missing-optional-dependency
+    reason — never the creds one. The blocker must raise ModuleNotFoundError:
+    pytest 9's importorskip only skips on that (a module that exists but
+    raises a generic ImportError is a real error and must stay one).
+    """
+    import os
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    blocker = tmp_path / "blocker"
+    blocker.mkdir()
+    (blocker / "livekit.py").write_text(
+        "raise ModuleNotFoundError(\"No module named 'livekit' (blocked by "
+        "test_a69)\")\n", encoding="utf-8")
+    pp = os.environ.get("PYTHONPATH", "")
+    env = dict(os.environ,
+               LIVEKIT_URL="ws://127.0.0.1:9",
+               LIVEKIT_API_KEY="fake-key",
+               LIVEKIT_API_SECRET="fake-secret")
+    env["PYTHONPATH"] = str(blocker) + (os.pathsep + pp if pp else "")
+    p = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/test_livekit_live.py",
+         "-q", "-rs", "-p", "no:cacheprovider", "--no-header"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(root), env=env, timeout=180)
+    out = (p.stdout or "") + "\n--stderr--\n" + (p.stderr or "")
+    assert p.returncode == 0, out[-1500:]
+    assert "2 skipped" in out, out[-1500:]
+    assert "MISSING OPTIONAL DEPENDENCY" in out, out[-1500:]
+    assert "no LiveKit credentials" not in out, out[-1500:]

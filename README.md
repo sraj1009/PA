@@ -110,6 +110,11 @@ python -m pip install -r requirements.txt
 python -m pip install -r requirements-voice.txt        # STT/TTS (optional)
 docker build -t bee-sandbox:latest .\sandbox           # optional: ML/DL sandbox
 
+# optional: PEP 621 packaging — editable install + `bee` console script
+# (does the same as requirements.txt above; extras: voice, desktop, ml,
+# vision, livekit — e.g. python -m pip install -e ".[voice]")
+python -m pip install -e .
+
 # verify everything, then launch
 python -m bee.cli doctor     # read-only system report; exit 0 = healthy
 python -m bee.cli setup
