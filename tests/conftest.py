@@ -119,6 +119,7 @@ _UNIT = [
     # (module-level + lazy edges); the nontrivial cycle groups must be exactly
     # the documented four.
     "test_import_graph",
+    "test_recall_guard",
 ]
 _INTEGRATION = [
     "test_kernel_integration", "test_automation", "test_episodes",

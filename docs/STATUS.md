@@ -670,6 +670,27 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   `test_keep_alive_native_embedding` / `test_keep_alive_litellm_embedding` —
   both fail against the pre-fix `embed()` (`KeyError: 'keep_alive'` /
   `None == '60s'`).
+- **Nightly recall-regression guard (P1-5, 2026-10-18).** Nothing measured
+  retrieval quality on the live index, so both documented failure species
+  stayed invisible: A28a (an index four days stale, found by hand) and A38a
+  (the vector half dying silently into keyword-only, suite green). New durable
+  job `recall_guard` (`bee.memory.recall_guard.run`, registered in
+  `bee/scheduler.py`, daily at `03:00 + 45 min` — after consolidation and the
+  flush that follows it). Read-only: samples 8 rows from the live LanceDB
+  table with a deterministic stride, quotes a distinctive middle slice of each
+  row's own text, and asks the production hybrid retriever (`rag.retrieve` —
+  keyword + vector RRF) to find that source back; one direct `vector_search`
+  call is the liveness canary (with rows present it must return results —
+  `vector_dead` otherwise). Records recall@k, index stats and verdict to the
+  metrics stream, then fails the job — the repo's existing alert surface — on
+  `vector_dead`, `index_empty`, or recall more than `0.15` under the trailing
+  median of the last 7 runs (`regressed`); the first runs record `baseline`
+  instead of guessing a threshold, and a fresh install records `empty` without
+  noise. Live first run on the real index: recall@8 **1.0**, `vector_alive`
+  true, 79 indexed rows / 93 disk chunks, 0 misses. Pinned by
+  `tests/test_recall_guard.py` (9 tests: the A38a canary, regression →
+  raise-but-still-record, index-lost, empty-install, the absolute/relativized
+  path bridge, sampling determinism, registry membership).
 - **CI portability pass (2026-10-18).** The first Actions run on the rewritten
   repo (Linux + Windows bare installs, both `-m core`) failed 18/12 tests that
   had only ever run on the author's box. Fixes: the Windows-only feature tests
@@ -901,8 +922,9 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 1090-test suite (`pytest tests -q`, re-measured
+or to a green test in the 1099-test suite (`pytest tests -q`, re-measured
 2026-10-18 after the loop refactor + routing facade + doctor + memory
 hardening + web audit + packaging + the A69 live-skip fix + the A64
 registry + gate-guard closes + the N7 pin repair + the M12 import-graph lint
-+ the P1-4 embed keep_alive). Nothing here is marketing.*
++ the P1-4 embed keep_alive + the P1-5 recall guard). Nothing here is
+marketing.*
