@@ -106,10 +106,64 @@ def test_h8_eval_safe_bounds_still_enforced():
     """Existing size/depth/literal limits remain in force alongside the
     exponent guard and step budget."""
     from bee.tools.base import eval_safe
-    with pytest.raises(ValueError):          # node-count limit
+    with pytest.raises(ValueError, match="too large"):   # node-count limit
         eval_safe("1+1+1+1" * 200)
-    with pytest.raises(ValueError):          # literal limit
-        eval_safe('"' + "x" * 60000 + '"')
+    with pytest.raises(ValueError, match="literal too large"):
+        eval_safe('"' + "x" * 12000 + '"')   # < input cap, > literal cap
+
+
+def test_h8_eval_safe_rejects_deep_and_huge_expressions():
+    """H8/R7: deliberately deep (nesting > 20) and huge (> 200 nodes) input is
+    rejected by the pre-evaluation bounds — before any evaluation work."""
+    from bee.tools.base import eval_safe
+    with pytest.raises(ValueError, match="too deep"):
+        eval_safe("1" + "+1" * 40)           # 41-deep left chain, 81 nodes
+    with pytest.raises(ValueError, match="too large"):
+        eval_safe("1+" * 300 + "1")          # 601 nodes, 301 deep
+    with pytest.raises(ValueError, match="too long"):
+        eval_safe("1+" * 15000 + "1")        # input cap, rejected before parse
+
+
+def test_h8_eval_safe_pathological_calls_are_bounded():
+    """Single C calls no step budget can interrupt are rejected up front:
+    sum(range(10**12)) loops, "x" * 10**9 allocates, (10**10000)**10000
+    builds a ~40 MB int, factorial(10**8) runs a pure-C loop."""
+    from bee.tools.base import eval_safe
+    t0 = time.time()
+    with pytest.raises(ValueError, match="range"):
+        eval_safe("sum(range(10**12))")
+    with pytest.raises(ValueError, match="repeat"):
+        eval_safe('"x" * 10**9')
+    with pytest.raises(ValueError, match="repeat"):
+        eval_safe("[0] * 10**9")
+    with pytest.raises(ValueError, match="factorial"):
+        eval_safe("factorial(10**8)")
+    with pytest.raises(ValueError, match="power result too large"):
+        eval_safe("(10**10000)**10000")
+    # >4300-digit ints cannot be printed (CPython digit ceiling): a bounded
+    # descriptor, never an internal error
+    assert "bits" in eval_safe("10**10000")
+    assert time.time() - t0 < 2.0, "guards must reject before computing"
+
+
+def test_h8_eval_safe_wall_clock_deadline_is_enforced(monkeypatch):
+    """The wall-clock budget is checked at every evaluator step; an elapsed
+    deadline aborts with a clear error instead of running to completion."""
+    import bee.tools.base as base
+    monkeypatch.setattr(base, "_MAX_SECONDS", -1.0)
+    with pytest.raises(ValueError, match="timed out"):
+        base.eval_safe("1+1")
+
+
+def test_h8_calculator_tool_reports_clear_errors():
+    """Tool boundary: pathological input -> an error string (never a hang);
+    legitimate input keeps the normal result envelope."""
+    from bee.tools.calculator import calc_tools
+    h = calc_tools()[0].handler
+    bad = h(None, expression="sum(range(10**12))")
+    assert "error" in bad and "range" in bad["error"]
+    ok = h(None, expression="2*21")
+    assert ok.get("result") == "42"
 
 
 # ------------------------------------------------------------------ N4 (kern)

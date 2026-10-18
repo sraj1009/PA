@@ -107,7 +107,7 @@ Statuses re-verified 2026-10-08 (coherence pass):
 | R4 | `.env` (LiveKit keys) in a OneDrive-synced dir, not in `.gitignore`, no VCS → future `git init` would commit credentials; sandbox workspace mount exposes `.env` to the container | .gitignore (absent entry), sandbox/Dockerfile | **CLOSED** (git + `.gitignore` + `.env.example` + secret scan, Phase 0 / C2; sandbox masks `.env`; OneDrive *history* rotation remains an operator action) |
 | R5 | Episodes persist unredacted tool output → feeds SFT + cloud teach-back | loop.py:579-580 | **CLOSED** (redaction at write, Phase 1 / H2) |
 | R6 | `sys.argv` mutation inside a running process (scheduler retrain job; livekit "start" hack) | scheduler.py:98-105, livekit/agent.py:298-306 | **HALF → MITIGATED**: scheduler fixed (explicit args); livekit swap retained — verified the installed SDK's `run_app` has no argv parameter (scoped swap + `finally` restore; see TECHNICAL_DEBT H6) |
-| R7 | `eval_safe` has no depth/size/time limits (DoS surface in calculator) | tools/base.py, tools/calculator.py:35 | **CLOSED** (nodes 512 / depth 64 / literal 10k + 250k-step computation budget, H8; `test_h8_*`) |
+| R7 | `eval_safe` has no depth/size/time limits (DoS surface in calculator) | tools/base.py, tools/calculator.py:35 | **CLOSED** (input 20k / nodes 200 / depth 20 / literal 10k + 90 ms wall-clock deadline + C-call argument guards: range span, seq-repeat, pow result-bits, factorial, bytes — H8; `test_h8_*` ×7) |
 | R8 | LiveKit state shared via temp-JSON file across processes (race/visibility) | livekit/state.py ↔ webapp.py:219-222 | **CLOSED** (bearer-auth HTTP push → in-memory state, 10-item #10 / H7) |
 
 ## 4. Missing capabilities (required for the target architecture)

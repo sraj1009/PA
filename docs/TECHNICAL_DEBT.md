@@ -91,6 +91,20 @@ eval/exec confirmed), but there is no AST depth/node-count limit or time
 budget; a crafted expression can hang or balloon the calculator tool.
 **Fix:** limits + timeout (Phase 1.3).
 
+**CLOSED — 2026-10-18 hardening pass.** All limits live in
+`bee/tools/base.py:119-131`: input 20k chars (`eval_safe` :319-339), AST 200
+nodes / depth 20 / 10k-char literals (`_check_bounds` :298-316), 250k-step
+budget + 90 ms wall-clock deadline checked at every `_ev` step (:231-239,
+per-call budget — the shared `_step_budget` global is gone), and argument
+guards for the single C calls no step budget can interrupt: exponent 10⁴ +
+result-bits 10⁶ for `**`/`pow` (`_check_pow` :134-143), sequence-repeat 10⁵ +
+int-product bits (`_guarded_mul` :168-184), `range()` span 10⁵
+(`_guarded_range` :187-197 — the first pass's `sum(range(10**18))` residual is
+now rejected at construction), `factorial` arg 10⁴ (:200-204), `bytes()` 10⁶
+(:207-211). Allowlist keys unchanged (router `_residue_is_math` contract);
+errors are one-line `ValueError`s surfaced as `{"error": ...}` by the
+calculator. Regressions `tests/test_debt_fixes.py::test_h8_*` (7).
+
 ## MEDIUM
 
 ### M1. 636-line implicit kernel; three Context bootstrap sites
@@ -287,7 +301,7 @@ Evidence: `docs/JARVIS_ACCEPTANCE_AUDIT.md` + `tests/test_debt_fixes.py`
 | N8 (LOW) | **CLOSED** | `evals/results_summary.json` is no longer tracked (`git ls-files evals/` = verify_suite.py, tasks.yaml, bench_model.json, REPORT.md only) |
 | N9 (LOW) | **CLOSED** | `ToolBus.from_default` records the FULL capability list (`ToolDef.capabilities`); `capability` kept as primary for compatibility; regression `test_n9_bus_records_full_capability_list` |
 | H6 (HIGH, half) | **MITIGATED + documented (SDK constraint)** | `livekit.agents.cli.run_app(server)` has no argv parameter (verified against the installed SDK source: `_build_cli(server)()` reads `sys.argv`); the scoped save/swap/`finally`-restore in `livekit/agent.py:306-314` is the only mechanism. Residual: concurrent argparse use INSIDE the livekit worker process while the worker runs (latent, single-user worker process). Revisit if the SDK gains an argv parameter. |
-| H8 (HIGH) | **CLOSED** | `eval_safe` now bounds syntax (nodes 512 / depth 64 / literal 10k), the single-op explosion (`_guarded_pow` exponent cap 10⁴ on both `**` and built-in `pow` — `9**9**9**9` and `pow(2, 10**9)` rejected in ms), and expression-complexity computation (250k-step budget in `_ev` — defense-in-depth; a pathological BUILT-IN call such as `sum(range(10**18))` remains a single C loop the budget cannot interrupt — residual documented, bus timeout N3 unblocks the agent). Regressions `test_h8_*` (3) |
+| H8 (HIGH) | **CLOSED** | Fully resource-bounded (`bee/tools/base.py:119-131`): input 20k chars (`eval_safe` :319-339), AST 200 nodes / depth 20 / literal 10k (`_check_bounds` :298-316), computation guards for the single C calls no step budget can interrupt (`_check_pow` :134-143 exponent 10⁴ + result-bits 10⁶; `_guarded_mul` :168-184 sequence-repeat/int-product; `_guarded_range` :187-197 span 10⁵ — closes the first pass's `sum(range(10**18))` residual; `_guarded_factorial` :200-204; `_guarded_bytes` :207-211) and a 90 ms wall-clock deadline checked at every `_ev` step (:231-239, per-call budget — the shared `_step_budget` global is gone, so concurrent evaluations cannot eat each other's limits; oversized ints return a bounded descriptor instead of CPython's digit-ceiling error). Regressions `test_h8_*` (7) |
 | M6 (MEDIUM) | **CLOSED** | One root per concern, documented: `train/NOTE.md` (runtime data) + `training/NOTE.md` (code) |
 | M7 (MEDIUM) | **CLOSED** | `cfg.automation.default_timezone` is the source (scheduler.py:228/311 with safe default fallback); the `offline.py` Kolkata label is gone |
 | M11 (MEDIUM) | **CLOSED** | `num_ctx` is `cfg.ollama.num_ctx` (client.py:437-440, default 8192) — surfaced in config |

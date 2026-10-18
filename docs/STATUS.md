@@ -686,6 +686,23 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   tracked-but-ignored; a latent capture bug). Verified after the pass:
   `git status` is clean of the artifacts, zero tracked-but-ignored paths
   remain, and `-m core` collects **936/1020** (84 deselected).
+- **H8/R7 hardening — `eval_safe` is fully resource-bounded (2026-10-18).**
+  Every unbounded path is closed (`bee/tools/base.py:119-131`): input cap 20k
+  chars, AST 200 nodes / depth 20 / literals 10k, 250k-step budget + a 90 ms
+  wall-clock deadline checked at every `_ev` step (per-call budget — the
+  shared `_step_budget` global is gone, so concurrent evals cannot eat each
+  other's limits), and argument guards for the single C calls no step budget
+  can interrupt: `range()` span 10⁵ (the previously documented
+  `sum(range(10**18))` residual is now rejected at construction),
+  sequence-repeat / int-product bits (`_guarded_mul` :168-184), `**`/`pow`
+  exponent + result-bits (`_check_pow` :134-143), `factorial`, `bytes()`;
+  oversized ints beyond CPython's 4300-digit print ceiling return a bounded
+  descriptor instead of an internal error (rest of `eval_safe` :319-339).
+  Allowlist keys unchanged (router `_residue_is_math` contract). Verified:
+  `test_h8_*` (7) green, the 10,000-case math family of `verify_suite.py`
+  re-run **100.000 %** (0 failures, 0.4 s), and `-m core` green on the frozen
+  tree (940 passed / 84 deselected). Closure evidence: H8 section + table row
+  in `docs/TECHNICAL_DEBT.md`, R7 row in `docs/JARVIS_ROADMAP.md`.
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit

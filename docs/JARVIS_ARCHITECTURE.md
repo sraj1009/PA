@@ -117,7 +117,7 @@ Supporting subsystems (not on the hot path per turn):
 | Memory vectors | `bee/memory/search.py` | 102 | LanceDB 768-dim; `rebuild()` (40-56) **appends** via `t.add(rows)` (55) — duplicate accumulation; module global `_cache` (68) |
 | RAG | `bee/brain/rag.py` | — | RRF fusion of vectors + keyword |
 | Verifier | `bee/brain/verifier.py` | — | Math recompute / file re-read / URL checks; 1 bounded fix round |
-| Tool base | `bee/tools/base.py` | — | `T` dataclass (name/description/parameters/handler); `build_default_tools()`; `eval_safe` (AST allowlist, **no depth/size/time limits**) |
+| Tool base | `bee/tools/base.py` | — | `T` dataclass (name/description/parameters/handler); `build_default_tools()`; `eval_safe` (AST allowlist + H8 budgets: input 20k chars / 200 nodes / depth 20 / literals 10k / 90 ms deadline / C-call guards) |
  | Tool modules | `bee/tools/*.py` | 30 tools (2026-10-08, counted) | files (workspace jail), automate, shell, web (netguard SSRF-protected, multi-engine ddg→bing→wikipedia), code, calculator, sandbox (Docker, hardened flags), memory (structured), skills, planner, spawn_task (sub-agents inherit the capability gate — acceptance audit F1), automation_job, computer_use (observe/input/window/clipboard/stop), health, systemctl, scheduler |
 | Episodes | `bee/agent/episodes/logger.py` | 113 | JSONL episode records; **unredacted tool output** persisted (loop.py:579-580) |
 | Monitor | `bee/monitor/{metrics,health,dashboard}.py` | — | Metrics JSONL history (unbounded), health, static HTML dashboard |
