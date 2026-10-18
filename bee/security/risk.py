@@ -23,6 +23,7 @@ bee.security.audit.
 from __future__ import annotations
 
 import ast
+import os
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -113,7 +114,9 @@ _SYSTEMCTL_ASK = {"lock", "sleep"}
 # import → deny (arbitrary exec / network / binary escape surface)
 _DENY_IMPORTS = {"subprocess", "socket", "ctypes"}
 # import → ask (state access, review-worthy)
-_ASK_IMPORTS = {"os", "sys", "importlib", "pickle", "shutil", "signal", "multiprocessing"}
+_ASK_IMPORTS = {"os", "sys", "importlib", "pickle", "shutil", "signal", "multiprocessing",
+                # network clients: egress from code_run needs approval
+                "requests", "httpx", "urllib", "aiohttp", "urllib3", "http"}
 # (module, attr) -> action — for `mod.attr(...)` calls
 _DENY_CALLS: dict[tuple[str, str], str] = {
     ("os", "system"): "deny", ("os", "popen"): "deny",
@@ -121,6 +124,7 @@ _DENY_CALLS: dict[tuple[str, str], str] = {
     ("os", "execl"): "deny", ("os", "execlp"): "deny",
     ("os", "spawnl"): "deny", ("os", "spawnle"): "deny",
     ("os", "remove"): "deny", ("os", "unlink"): "deny", ("os", "rmdir"): "deny",
+    ("os", "removedirs"): "deny", ("os", "truncate"): "deny",
     ("shutil", "rmtree"): "deny",
     ("socket", "socket"): "deny", ("socket", "create_connection"): "deny",
     ("ctypes", "CDLL"): "deny", ("ctypes", "cdll"): "deny",
@@ -134,6 +138,8 @@ _ASK_CALLS: dict[tuple[str, str], str] = {
     ("os", "kill"): "ask", ("os", "killpg"): "ask",
     ("os", "rename"): "ask", ("os", "replace"): "ask",
     ("shutil", "move"): "ask", ("shutil", "copy"): "ask",
+    ("shutil", "copy2"): "ask", ("shutil", "copytree"): "ask",
+    ("os", "mkdir"): "ask", ("os", "makedirs"): "ask", ("os", "symlink"): "ask",
     ("signal", "signal"): "ask",
 }
 # bare builtins — always deny when called (code injection / dynamic imports)
@@ -142,13 +148,156 @@ _DENY_NAMES = {"eval", "exec", "compile", "__import__"}
 _DENY_METHODS = {"unlink", "rmdir"}
 # open() modes that mutate
 _WRITE_MODE_CHARS = set("wax+")
+# H1+ (2026-10-18): network-client modules/calls — egress from code_run needs
+# approval; a non-public literal target (localhost/RFC1918/metadata) is
+# denied offline (no DNS at classification time). Raw `socket`/`ctypes`
+# imports stay outright deny (_DENY_IMPORTS).
+_NET_MODULES = {"requests", "httpx", "urllib", "aiohttp", "urllib3", "http"}
+_NET_CALLS = {"get", "post", "put", "delete", "patch", "head", "request",
+              "urlopen", "urlretrieve", "Session", "Client",
+              "HTTPConnection", "HTTPSConnection"}
+# pathlib/Path write + state methods (path-aware, mirroring the open() rules)
+_PATH_WRITE_METHODS = {"write_text", "write_bytes"}
+_PATH_STATE_METHODS = {"mkdir", "makedirs", "touch"}
 
 
-def _module_for_attr(f: ast.Attribute) -> tuple[str, str]:
-    """(module, attr) for a direct `mod.attr` call func; ('', attr) otherwise."""
-    if isinstance(f.value, ast.Name):
-        return f.value.id, f.attr
-    return "", f.attr
+def _attr_chain(f: ast.Attribute, mod_alias: dict) -> tuple[str, str]:
+    """(module, dotted-attr) for `mod.a.b` targets, alias-aware; ('', attr)
+    when the root is not a plain name (e.g. a call result like Path('x'))."""
+    parts: list[str] = []
+    v: ast.expr = f
+    while isinstance(v, ast.Attribute):
+        parts.append(v.attr)
+        v = v.value
+    attr = ".".join(reversed(parts))
+    if isinstance(v, ast.Name):
+        return mod_alias.get(v.id, v.id), attr
+    return "", attr
+
+
+def _import_aliases(tree: ast.AST) -> tuple[dict, dict]:
+    """Local-name maps so aliasing cannot hide a destructive call:
+       `import shutil as sh`       -> {'sh': 'shutil'}
+       `from os import system as s` -> {'s': ('os', 'system')}
+    """
+    mod_alias: dict[str, str] = {}
+    from_alias: dict[str, tuple[str, str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.asname:
+                    mod_alias[a.asname] = a.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom):
+            top = (node.module or "").split(".")[0]
+            for a in node.names:
+                from_alias[a.asname or a.name] = (top, a.name)
+    return mod_alias, from_alias
+
+
+def _literal_str_arg(node: ast.Call) -> str:
+    """First positional string-literal argument, else ''."""
+    for a in node.args:
+        if isinstance(a, ast.Constant) and isinstance(a.value, str):
+            return a.value
+        break
+    return ""
+
+
+def _ws_roots() -> list[str]:
+    """Accepted write roots: runtime workspace, project checkout, OS temp."""
+    roots: list[str] = []
+    try:
+        from .. import paths as _paths
+        roots.extend([str(_paths.WORKSPACE), str(_paths.PROJECT_ROOT)])
+    except Exception:
+        pass
+    try:
+        import tempfile
+        roots.append(tempfile.gettempdir())
+    except Exception:
+        pass
+    return roots
+
+
+def _under_any(path: str, roots: list[str]) -> bool:
+    try:
+        n = os.path.normcase(os.path.abspath(path))
+    except Exception:
+        return False
+    for r in roots:
+        try:
+            rn = os.path.normcase(os.path.abspath(str(r))).rstrip("\\/")
+        except Exception:
+            continue
+        if n == rn or n.startswith(rn + os.sep):
+            return True
+    return False
+
+
+def _outside_workspace(p: str) -> bool | None:
+    """True only when a LITERAL path clearly escapes workspace+project+temp.
+    None/False = inside, plain relative, or undecidable — dynamic and
+    in-tree writes keep the ordinary 'ask' behavior, never less."""
+    s = str(p or "").strip()
+    if not s:
+        return None
+    if s.startswith("~"):
+        s = os.path.expanduser(s)
+    roots = _ws_roots()
+    if not roots:
+        return None
+    drive = len(s) > 1 and s[1] == ":"
+    if os.path.isabs(s) or drive or s.startswith("\\\\"):
+        return not _under_any(s, roots)
+    if ".." in s.replace("\\", "/").split("/"):
+        for base in roots[:2]:
+            if _under_any(os.path.join(base, s), roots):
+                return None          # escaping one base can stay inside another
+        return True
+    return None
+
+
+def _url_risk(node: ast.Call) -> str:
+    """Offline (no DNS) SSRF check for a literal URL argument."""
+    u = _literal_str_arg(node)
+    if not u or "://" not in u:
+        return ""
+    try:
+        from . import netguard
+        reason = netguard.validate_url(u, resolver=lambda _h: [])
+    except Exception:
+        return ""
+    if reason.startswith("IP ") or reason.startswith("blocked hostname"):
+        return reason
+    return ""
+
+
+def _classify_call(mod: str, attr: str, node: ast.Call, add) -> bool:
+    """Table lookup for a resolved call target. True = a rule matched."""
+    last = attr.rsplit(".", 1)[-1] if attr else ""
+    if (mod, attr) in _DENY_CALLS:
+        add("deny", f"{mod}.{attr}()")
+        return True
+    if (mod, attr) in _ASK_CALLS:
+        add("ask", f"{mod}.{attr}()")
+        return True
+    if mod in _NET_MODULES and last in _NET_CALLS:
+        bad = _url_risk(node)
+        if bad:
+            add("deny", f"{mod}.{attr}() -> non-public target ({bad})")
+        else:
+            add("ask", f"{mod}.{attr}() (network egress; no host allowlist)")
+        return True
+    return False
+
+
+def _path_owner_literal(f: ast.Attribute) -> str:
+    """Literal path of a `Path('x').write_text(...)` owner, else ''."""
+    v = f.value
+    if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) \
+            and v.func.id in ("Path", "PurePath", "PurePosixPath", "PureWindowsPath"):
+        return _literal_str_arg(v)
+    return ""
 
 
 def _open_write_mode(node: ast.Call) -> str:
@@ -163,6 +312,11 @@ def _open_write_mode(node: ast.Call) -> str:
 def analyze_python(code: str, *, fail_closed: bool = True) -> list[tuple[str, str]]:
     """Analyze a Python payload. Returns [(action, detail), ...] with action
     in {'deny','ask'}; empty list = nothing suspicious.
+
+    Alias-aware (`import shutil as sh`, `from os import system`), path-aware
+    for writes (a write-mode open / Path.write_text on a LITERAL path that
+    escapes workspace+project+temp → deny), and offline SSRF-aware for
+    literal URLs (no DNS here; localhost/RFC1918/link-local targets deny).
 
     fail_closed=True (code_run): unparseable code → one 'ask' finding
       (a python -c payload that isn't valid python is suspicious).
@@ -184,6 +338,50 @@ def analyze_python(code: str, *, fail_closed: bool = True) -> list[tuple[str, st
             seen.add(key)
             findings.append((action, detail))
 
+    mod_alias, from_alias = _import_aliases(tree)
+
+    def do_call(node: ast.Call):
+        f = node.func
+        if isinstance(f, ast.Name):
+            if f.id in _DENY_NAMES:
+                add("deny", f"call to {f.id}()")
+            elif f.id == "open":
+                mode = _open_write_mode(node)
+                if any(c in _WRITE_MODE_CHARS for c in mode):
+                    p = _literal_str_arg(node)
+                    if p and _outside_workspace(p) is True:
+                        add("deny", f"open() write outside the workspace: {p}")
+                    else:
+                        add("ask", f"open() with write/truncate mode {mode!r}")
+            elif f.id == "getattr" and len(node.args) >= 2:
+                m, a = node.args[0], node.args[1]
+                if isinstance(m, ast.Name) and isinstance(a, ast.Constant) \
+                        and isinstance(a.value, str):
+                    mod = mod_alias.get(m.id, m.id)
+                    if (mod, a.value) in _DENY_CALLS:
+                        add("deny", f"getattr({mod}, {a.value!r})")
+                    elif (mod, a.value) in _ASK_CALLS:
+                        add("ask", f"getattr({mod}, {a.value!r})")
+            elif f.id in from_alias:
+                mod, attr = from_alias[f.id]
+                _classify_call(mod, attr, node, add)
+        elif isinstance(f, ast.Attribute):
+            mod, attr = _attr_chain(f, mod_alias)
+            last = attr.rsplit(".", 1)[-1] if attr else ""
+            if _classify_call(mod, attr, node, add):
+                return
+            if last in _DENY_METHODS:
+                owner = f.value.id if isinstance(f.value, ast.Name) else "obj"
+                add("deny", f"{owner}.{last}() (file destruction)")
+            elif last in _PATH_WRITE_METHODS:
+                p = _path_owner_literal(f)
+                if p and _outside_workspace(p) is True:
+                    add("deny", f"{last}() write outside the workspace: {p}")
+                else:
+                    add("ask", f"{last}() write")
+            elif last in _PATH_STATE_METHODS:
+                add("ask", f"{last}() (state change)")
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for a in node.names:
@@ -199,23 +397,13 @@ def analyze_python(code: str, *, fail_closed: bool = True) -> list[tuple[str, st
             elif top in _ASK_IMPORTS:
                 add("ask", f"from {node.module} import")
         elif isinstance(node, ast.Call):
-            f = node.func
-            if isinstance(f, ast.Name):
-                if f.id in _DENY_NAMES:
-                    add("deny", f"call to {f.id}()")
-                elif f.id == "open":
-                    mode = _open_write_mode(node)
-                    if any(c in _WRITE_MODE_CHARS for c in mode):
-                        add("ask", f"open() with write/truncate mode {mode!r}")
-            elif isinstance(f, ast.Attribute):
-                mod, attr = _module_for_attr(f)
-                if (mod, attr) in _DENY_CALLS:
-                    add("deny", f"{mod}.{attr}()")
-                elif (mod, attr) in _ASK_CALLS:
-                    add("ask", f"{mod}.{attr}()")
-                elif attr in _DENY_METHODS:
-                    owner = f.value.id if isinstance(f.value, ast.Name) else "obj"
-                    add("deny", f"{owner}.{attr}() (file destruction)")
+            do_call(node)
+        elif isinstance(node, ast.Attribute):
+            # deny-listed function merely REFERENCED (f = os.system) — the
+            # call branch reports the same detail; the seen-set dedupes.
+            mod, attr = _attr_chain(node, mod_alias)
+            if (mod, attr) in _DENY_CALLS:
+                add("deny", f"{mod}.{attr}()")
     return findings
 
 

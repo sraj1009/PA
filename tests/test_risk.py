@@ -110,3 +110,66 @@ def test_shell_inline_python_c_extraction():
     # benign python -c stays allow
     d = classify_risk("shell", {"command": "python -c \"print(1)\""})
     assert d.action == "allow"
+
+
+# ------------------- aliases, path escapes, network egress (H1+, 2026-10-18)
+def test_aliased_destructive_calls_denied():
+    assert "deny" in _actions("import shutil as sh\nsh.rmtree('/tmp/x')")
+    assert "deny" in _actions("from shutil import rmtree\nrmtree('/tmp/x')")
+    assert "deny" in _actions("from shutil import rmtree as rm\nrm('/tmp/x')")
+    assert "deny" in _actions("from os import system\nsystem('echo hi')")
+    assert "deny" in _actions("from os import remove\nremove('x.txt')")
+    assert "deny" in _actions("import os as _o\n_o.unlink('x.txt')")
+    # deny-listed function referenced without calling / reached via getattr
+    assert "deny" in _actions("import os\nf = os.system")
+    assert "deny" in _actions("import os\ngetattr(os, 'system')('x')")
+    # benign aliasing stays clean
+    assert analyze_python("import math as m\nprint(m.sqrt(2))") == []
+    assert analyze_python("from math import sqrt\nprint(sqrt(4))") == []
+
+
+def test_outside_workspace_writes_denied():
+    from bee import paths
+    outside = str(paths.PROJECT_ROOT.parent / "guard_escape.txt")
+    inside = str(paths.PROJECT_ROOT / "guard_inside.txt")
+    assert "deny" in _actions(f"open({outside!r}, 'w')")
+    assert "deny" in _actions(f"open({outside!r}, 'a')")
+    assert "deny" in _actions("open('/etc/passwd', 'w')")
+    assert "deny" in _actions("open('C:\\\\Windows\\\\System32\\\\drivers\\\\etc\\\\hosts', 'a')")
+    assert "deny" in _actions("open(%r, 'w')" % ("../" * 10 + "escape.txt"))
+    # in-tree and dynamic paths keep the old single ask
+    assert _actions(f"open({inside!r}, 'w')") == ["ask"]
+    assert _actions("open('out.txt', 'w')") == ["ask"]
+    assert analyze_python(f"open({outside!r})") == []      # read is not a write
+
+
+def test_pathlib_writes_and_state_methods():
+    from bee import paths
+    outside = str(paths.PROJECT_ROOT.parent / "guard_escape.txt")
+    assert "deny" in _actions(
+        f"from pathlib import Path\nPath({outside!r}).write_text('x')")
+    assert "ask" in _actions("from pathlib import Path\nPath('out.txt').write_text('x')")
+    assert "ask" in _actions("from pathlib import Path\nPath('d').mkdir()")
+    assert "ask" in _actions("from pathlib import Path\nPath('out.txt').touch()")
+
+
+def test_requests_egress_and_ssrf_literals():
+    assert "ask" in _actions("import requests\nrequests.get('https://example.com')")
+    assert "ask" in _actions("import httpx\nhttpx.post('https://example.com', json={})")
+    assert "ask" in _actions("from urllib.request import urlopen\nurlopen('https://example.com')")
+    # non-public literal targets deny outright (SSRF from code_run)
+    assert "deny" in _actions("requests.get('http://127.0.0.1:8080/x')")
+    assert "deny" in _actions("requests.get('http://169.254.169.254/latest/meta-data/')")
+    assert "deny" in _actions("requests.get('http://localhost:11434/api/tags')")
+    # raw sockets stay deny
+    assert "deny" in _actions("import socket")
+
+
+def test_alias_deny_reaches_classify_risk_and_guard():
+    d = classify_risk("code_run", {"code": "import shutil as sh; sh.rmtree('/tmp/x')"})
+    assert d.action == "deny"
+    from bee import guard
+    ok, action, _ = guard.check(
+        "code_run", {"code": "import shutil as sh; sh.rmtree('/tmp/x')"},
+        True, "unattended")
+    assert not ok and action == "deny"

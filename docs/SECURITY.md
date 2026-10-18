@@ -123,10 +123,26 @@ rebinding, redirect revalidation, size/timeout/content-type).
    `python -c …` fragments):
    - **deny**: `subprocess`, `socket`, `ctypes`, `eval`, `exec`,
      `compile`, `__import__`, `os.system/popen/exec*/spawn*`,
-     `os.remove/unlink/rmdir`, `shutil.rmtree`, `pickle.load(s)`,
-     `Path.unlink/rmdir` and other file-destruction calls;
-   - **ask**: file open in write modes, `os.chmod/chown/kill/rename`,
-     `shutil.move/copy`, imports of `os/sys/shutil/pickle/importlib/signal`;
+     `os.remove/unlink/rmdir/removedirs/truncate`, `shutil.rmtree`,
+     `pickle.load(s)`, `Path.unlink/rmdir` and other file-destruction
+     calls. The layer is **alias-aware**: `import shutil as sh; sh.rmtree(…)`,
+     `from os import system; system(…)`, `from shutil import rmtree as rm`
+     and `getattr(os, "system")` are all denied — as is a deny-listed
+     function merely *referenced* (`f = os.system`) without a call;
+   - **deny (path escape)**: write-mode `open()` / `Path.write_text` /
+     `Path.write_bytes` on a string-literal path that escapes the runtime
+     workspace, the project root and the OS temp dir (absolute system
+     paths, `~`, `..`-chains). Relative and dynamic paths stay **ask**;
+   - **deny (SSRF)**: literal-URL HTTP calls through
+     `requests/httpx/urllib/aiohttp/urllib3/http` targeting localhost,
+     RFC1918, link-local (e.g. `169.254.169.254`) or other non-public
+     addresses. Checked offline — no DNS at classification time;
+   - **ask**: file open in write modes (in-tree/dynamic), `Path.mkdir/
+     makedirs/touch`, `os.mkdir/makedirs/symlink`, `os.chmod/chown/kill/
+     rename`, `shutil.move/copy/copy2/copytree`, imports of
+     `os/sys/shutil/pickle/importlib/signal`, and imports of network
+     clients (`requests/httpx/urllib/aiohttp/urllib3/http` — no host
+     allowlist is configured, so egress needs approval);
    - unparseable `code_run` → **ask** (fail closed).
    The strictest layer wins (`RiskDecision(level, action, reason,
    capabilities, require_approval)` with `NONE→CRITICAL`).

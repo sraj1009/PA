@@ -703,6 +703,19 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   re-run **100.000 %** (0 failures, 0.4 s), and `-m core` green on the frozen
   tree (940 passed / 84 deselected). Closure evidence: H8 section + table row
   in `docs/TECHNICAL_DEBT.md`, R7 row in `docs/JARVIS_ROADMAP.md`.
+- **Guard hardening — `code_run` classification is alias-, path- and
+  SSRF-aware (2026-10-18).** `bee/security/risk.py` resolves import aliases
+  (`import shutil as sh; sh.rmtree(…)`, `from os import system; system(…)`,
+  `from shutil import rmtree as rm`) and `getattr(os, "system")`; a
+  deny-listed function merely referenced (`f = os.system`) denies too.
+  Write-mode `open()` / `Path.write_text/write_bytes` on a string-literal
+  path that escapes workspace+project+temp deny (absolute system paths,
+  `~`, `..`-chains); in-tree and dynamic paths keep the single `ask`.
+  Network-client imports (`requests/httpx/urllib/aiohttp/urllib3/http`)
+  ask (no host allowlist) and literal non-public targets (localhost,
+  RFC1918, 169.254.169.254) deny offline (no DNS at classify time).
+  Shell regex layer untouched; new `tests/test_risk.py` cases and
+  `docs/SECURITY.md` §4 updated.
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
