@@ -143,6 +143,21 @@ def test_outside_workspace_writes_denied():
     assert analyze_python(f"open({outside!r})") == []      # read is not a write
 
 
+def test_outside_workspace_windows_style_on_posix():
+    """CI (Linux) regression: a C:\\... literal must classify as OUTSIDE even
+    though posixpath.abspath would hoist it under the repo cwd."""
+    from bee.security import risk
+    import os as _os
+    real = _os.name
+    try:
+        _os.name = "posix"          # simulate the CI runner's host
+        assert risk._outside_workspace("C:\\Windows\\System32\\drivers\\etc\\hosts") is True
+        assert risk._outside_workspace("\\\\server\\share\\evil.txt") is True
+        assert risk._outside_workspace("out.txt") is None
+    finally:
+        _os.name = real
+
+
 def test_pathlib_writes_and_state_methods():
     from bee import paths
     outside = str(paths.PROJECT_ROOT.parent / "guard_escape.txt")

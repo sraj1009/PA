@@ -715,7 +715,11 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   ask (no host allowlist) and literal non-public targets (localhost,
   RFC1918, 169.254.169.254) deny offline (no DNS at classify time).
   Shell regex layer untouched; new `tests/test_risk.py` cases and
-  `docs/SECURITY.md` §4 updated.
+  `docs/SECURITY.md` §4 updated. CI fix (Linux): a Windows drive/UNC
+  literal (`C:\...`, `\\host\share`) on a POSIX host is foreign by
+  construction and now denies — `posixpath` had hoisted it under the repo
+  cwd (CI saw `open('C:\Windows\...', 'a')` classify 'ask'); regression
+  test `test_outside_workspace_windows_style_on_posix`, Windows unchanged.
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit

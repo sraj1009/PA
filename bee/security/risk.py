@@ -247,7 +247,14 @@ def _outside_workspace(p: str) -> bool | None:
     if not roots:
         return None
     drive = len(s) > 1 and s[1] == ":"
-    if os.path.isabs(s) or drive or s.startswith("\\\\"):
+    unc = s.startswith("\\\\")
+    if (drive or unc) and os.name != "nt":
+        # A Windows-style literal on a POSIX host is foreign by definition:
+        # posixpath.abspath would otherwise hoist it UNDER the repo cwd and
+        # classify a system-path write as inside the workspace (CI caught
+        # exactly that: open('C:\Windows\...', 'a') came back 'ask').
+        return True
+    if os.path.isabs(s) or drive or unc:
         return not _under_any(s, roots)
     if ".." in s.replace("\\", "/").split("/"):
         for base in roots[:2]:
