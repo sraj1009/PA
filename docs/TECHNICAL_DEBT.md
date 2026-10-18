@@ -1463,6 +1463,21 @@ name must exist on disk, and `ci.yml` must keep running the five marker pockets
 it feeds. Proved to bite: unregistering `test_native` fails the meta-test naming
 it, and a stale synthetic entry fails the dangling-name test naming it.
 
+**Closed 2026-10-18 — the gate-seeding item:** the comparability guard in
+`bee/evals/gate.py:model_quality_gate` is now **set-based and symmetric**: both
+arms must have scored the identical task ids, whichever side is bigger. A
+baseline seeded from a partial run can no longer be compared against a larger
+candidate — the old count guard refused only a *smaller* candidate, so a loss on
+a baseline task could hide behind passes on tasks the baseline never ran. Proved
+to bite on the pre-fix code: `test_a_baseline_seeded_from_a_partial_run_is_not_comparable_later`
+fails against the old guard with `{'ok': True, 'promoted': 'bee4b-v2', 'before':
+'8/8'}` — the candidate lost `t0`, a task the baseline passed, and still
+promoted. Identical partial sets (both arms skipped the same tasks) stay
+comparable (`test_two_arms_that_skipped_identically_are_comparable`); eight
+cross-set fixtures in the same file were re-fixtured to equal sets with their
+intent preserved (`test_adjudication_flips_a_flaky_verdict` now runs `margin=0`:
+on an identical task set the flipped task is the decider).
+
 ## A65 — the preference corpus could only grow when the user typed `/correct` (2026-10-17, **CLOSED same day**)
 
 RLAIF stage 2 (preference tuning) reads `train/prefs.jsonl`, and

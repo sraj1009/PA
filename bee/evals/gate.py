@@ -326,15 +326,29 @@ def model_quality_gate(ctx, candidate: str | None = None, margin: int | None = N
             + " — comparison void (provider availability, not model quality); "
             "re-run when the quota recovers"]}
 
-    # A62: both sides count only tasks that actually RAN (skipped rows are excluded),
-    # so their denominators can differ — and the score test below is a raw pass COUNT.
-    # A candidate that skipped the hard half of the suite therefore read as a clean
-    # 12/12 against a baseline of 10/21 and would have been promoted.
-    if cand["total"] < base["total"]:
+    # A62 + A64 (2026-10-18): skipped rows are dropped from BOTH sides, so the
+    # arms can score different task sets while the score test below is a raw pass
+    # COUNT. A candidate that skipped the hard half read as a clean 12/12 against
+    # a baseline of 10/21 (A62); and a baseline SEEDED from a partial run could be
+    # compared against a larger candidate, letting a loss on a baseline task hide
+    # behind passes on tasks the baseline never ran (A64). Only an identical task
+    # set is comparable, whichever side is bigger.
+    base_tasks = set(base.get("per_task") or {})
+    cand_tasks = set(cand["per_task"])
+    if base_tasks != cand_tasks:
+        diff = []
+        if base_tasks - cand_tasks:
+            diff.append(f"{len(base_tasks - cand_tasks)} baseline task(s) did not "
+                        "run for the candidate")
+        if cand_tasks - base_tasks:
+            diff.append(f"{len(cand_tasks - base_tasks)} task(s) ran only for "
+                        "the candidate")
         return {"ok": False, "reasons": [
-            f"candidate was scored on {cand['total']} task(s) but the {active} baseline "
-            f"has {base['total']} — a smaller task set is not comparable. Re-run with "
-            "the skipped tasks available (usually: cloud up)."]}
+            f"not comparable: the {active} baseline scored {len(base_tasks)} task(s) "
+            f"and the candidate {len(cand_tasks)} — " + "; ".join(diff)
+            + ". Both arms must cover the same task set: re-run with the skipped "
+            "tasks available (usually: cloud up), and re-seed the baseline if it "
+            "was itself recorded from a partial run."]}
 
     # P0-5: majority-vote re-runs for the tasks the two arms DISAGREE on, BEFORE
     # judging (statistical power; see ModelGateCfg.adjudication_rounds). A

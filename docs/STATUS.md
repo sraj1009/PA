@@ -848,10 +848,22 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   selectable items) and `test_livekit` (optional SDK, no CI job installs it)
   are documented exemptions with reasons; the meta-test also pins that
   `ci.yml` still runs the five marker pockets it feeds.
+- **Model gate — arm comparability is set-based (A64 item closed,
+  2026-10-18).** The A62 guard refused a candidate that ran *fewer* tasks, but
+  a baseline seeded from a partial run could still be compared against a
+  larger candidate — raw pass counts across different task sets, where a loss
+  on a baseline task could hide behind passes on tasks the baseline never ran
+  (reproduced on the pre-fix code: the gate promoted `bee4b-v2` at `8/8` vs
+  `9/10` even though the candidate lost `t0`). `model_quality_gate` now
+  requires both arms to have scored the identical task ids, whichever side is
+  bigger; identical partial sets (both arms skipped the same tasks) still
+  compare. Pinned by
+  `test_a_baseline_seeded_from_a_partial_run_is_not_comparable_later` and
+  `test_two_arms_that_skipped_identically_are_comparable`.
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 1085-test suite (`pytest tests -q`, re-measured
+or to a green test in the 1087-test suite (`pytest tests -q`, re-measured
 2026-10-18 after the loop refactor + routing facade + doctor + memory
 hardening + web audit + packaging + the A69 live-skip fix + the A64
-registry close). Nothing here is marketing.*
+registry + gate-guard closes). Nothing here is marketing.*

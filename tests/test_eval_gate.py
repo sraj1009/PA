@@ -83,9 +83,9 @@ def test_unknown_candidate_rejected_before_spending_an_eval(env, monkeypatch):
 
 
 def test_first_run_seeds_baseline_then_promotes(env, monkeypatch):
-    # active model scores 10/10, candidate scores 11/11 -> +1 margin met
-    _fake_suite({"bee4b": {f"t{i}": True for i in range(10)},
-                 "bee4b-v2": {f"t{i}": True for i in range(11)}}, monkeypatch)
+    # same task set both arms: active scores 9/10, candidate 10/10 -> +1 margin met
+    _fake_suite({"bee4b": {**{f"t{i}": True for i in range(10)}, "t9": False},
+                 "bee4b-v2": {f"t{i}": True for i in range(10)}}, monkeypatch)
     r = gate.model_quality_gate(env["ctx"], candidate="bee4b-v2", margin=1)
     assert r["ok"] and r["promoted"] == "bee4b-v2", r
     assert env["models_yaml"].exists()
@@ -98,9 +98,9 @@ def test_first_run_seeds_baseline_then_promotes(env, monkeypatch):
 
 
 def test_candidate_below_margin_rejected(env, monkeypatch):
-    # active 10/10; candidate 10/11 — equal or worse score, no margin
+    # active 10/10; candidate 9/10 on the same tasks — worse score, no margin
     _fake_suite({"bee4b": {f"t{i}": True for i in range(10)},
-                 "bee4b-v2": {**{f"t{i}": True for i in range(10)}, "t99": False}},
+                 "bee4b-v2": {**{f"t{i}": True for i in range(10)}, "t9": False}},
                 monkeypatch)
     r = gate.model_quality_gate(env["ctx"], candidate="bee4b-v2", margin=1)
     assert not r["ok"]
@@ -122,13 +122,47 @@ def test_a_candidate_that_ran_fewer_tasks_cannot_be_compared(env, monkeypatch):
     assert not env["models_yaml"].exists()
 
 
-def test_structural_regression_blocks_promotion(env, monkeypatch):
-    # candidate scores HIGHER overall but breaks a structural task that
-    # passed in the baseline — promotion must still be refused
-    _fake_suite({"bee4b": {**{f"t{i}": True for i in range(10)}, "t1": True},
-                 "bee4b-v2": {**{f"t{i}": True for i in range(12)}, "t1": False}},
+def test_a_baseline_seeded_from_a_partial_run_is_not_comparable_later(env, monkeypatch):
+    """A64 close (2026-10-18): the A62 guard refused only a SMALLER candidate.
+    A baseline SEEDED from a partial run (cloud was down: 8 of 10 tasks ran)
+    compared against a later larger candidate, raw pass COUNTS again — the
+    candidate here even loses t0, a task the baseline passed, and the old code
+    still promoted it on the two extra wins. The task sets must be identical,
+    whichever side is bigger."""
+    _fake_suite({"bee4b": {f"t{i}": True for i in range(8)},          # partial seed
+                 "bee4b-v2": {**{f"t{i}": True for i in range(10)}, "t0": False}},
                 monkeypatch)
+    assert gate.set_baseline(env["ctx"], "bee4b")["ok"]
     r = gate.model_quality_gate(env["ctx"], candidate="bee4b-v2", margin=1)
+    assert not r["ok"], r
+    assert any("not comparable" in reason for reason in r["reasons"]), r["reasons"]
+    assert any("ran only for the candidate" in reason for reason in r["reasons"]), r["reasons"]
+    assert not env["models_yaml"].exists()
+
+
+def test_two_arms_that_skipped_identically_are_comparable(env, monkeypatch):
+    """The guard is about identical task sets, not about the full suite: when
+    both arms skipped the same tasks the comparison is fair and must proceed
+    (here to the score test, which refuses on the margin)."""
+    _fake_suite({"bee4b": {f"t{i}": True for i in range(8)},
+                 "bee4b-v2": {**{f"t{i}": True for i in range(8)}, "t7": False}},
+                monkeypatch)
+    assert gate.set_baseline(env["ctx"], "bee4b")["ok"]
+    r = gate.model_quality_gate(env["ctx"], candidate="bee4b-v2", margin=1)
+    assert not r["ok"], r
+    assert not any("not comparable" in reason for reason in r["reasons"]), r["reasons"]
+    assert any("score" in reason for reason in r["reasons"]), r["reasons"]
+
+
+def test_structural_regression_blocks_promotion(env, monkeypatch):
+    # raw counts are LEVEL (9/10 both sides; margin=0 clears the score test) but
+    # the candidate breaks a structural task the baseline passed — the
+    # structural guard must refuse promotion on its own
+    _fake_suite({"bee4b": {**{f"t{i}": True for i in range(10)}, "t9": False},
+                 "bee4b-v2": {**{f"t{i}": True for i in range(10)}, "t1": False,
+                              "t9": True}},
+                monkeypatch)
+    r = gate.model_quality_gate(env["ctx"], candidate="bee4b-v2", margin=0)
     assert not r["ok"]
     assert r["regressed"] == ["t1"]
     assert any("structural" in reason for reason in r["reasons"])
@@ -229,7 +263,7 @@ def test_queued_candidate_is_picked_up_and_consumed_on_reject(env, monkeypatch):
     assert env["gate_candidate"].exists()
     assert gate.pending_candidate() == "bee4b-v2"
     _fake_suite({"bee4b": {f"t{i}": True for i in range(10)},
-                 "bee4b-v2": {**{f"t{i}": True for i in range(10)}, "t99": False}},
+                 "bee4b-v2": {**{f"t{i}": True for i in range(10)}, "t9": False}},
                 monkeypatch)
     r = gate.model_quality_gate(env["ctx"], margin=1)      # no explicit candidate
     assert not r["ok"] and any("score" in x for x in r["reasons"]), r
@@ -239,8 +273,8 @@ def test_queued_candidate_is_picked_up_and_consumed_on_reject(env, monkeypatch):
 
 def test_queued_candidate_promotes_and_is_consumed(env, monkeypatch):
     gate.queue_candidate("bee4b-v2", src="auto-chain")
-    _fake_suite({"bee4b": {f"t{i}": True for i in range(10)},
-                 "bee4b-v2": {f"t{i}": True for i in range(11)}}, monkeypatch)
+    _fake_suite({"bee4b": {**{f"t{i}": True for i in range(10)}, "t9": False},
+                 "bee4b-v2": {f"t{i}": True for i in range(10)}}, monkeypatch)
     r = gate.model_quality_gate(env["ctx"], margin=1)
     assert r["ok"] and r.get("promoted") == "bee4b-v2", r
     assert not env["gate_candidate"].exists()
@@ -270,8 +304,8 @@ def test_explicit_candidate_never_consumes_the_queue(env, monkeypatch):
     """`/gate other-model` evaluates the operator's choice; the queued artifact
     is a DIFFERENT candidate and must survive for its own attempt."""
     gate.queue_candidate("bee4b-v3", src="auto-chain")
-    _fake_suite({"bee4b": {f"t{i}": True for i in range(10)},
-                 "bee4b-v2": {f"t{i}": True for i in range(11)}}, monkeypatch)
+    _fake_suite({"bee4b": {**{f"t{i}": True for i in range(10)}, "t9": False},
+                 "bee4b-v2": {f"t{i}": True for i in range(10)}}, monkeypatch)
     r = gate.model_quality_gate(env["ctx"], candidate="bee4b-v2", margin=1)
     assert r["ok"] and r.get("promoted") == "bee4b-v2", r
     assert gate.pending_candidate() == "bee4b-v3"          # untouched
@@ -281,7 +315,9 @@ def test_adjudication_flips_a_flaky_verdict(env, monkeypatch):
     """P0-5: at n=21, one flaky task could flip a verdict either way (the live
     2026-10-17 run sat inside ±2-3 stochastic noise). Tasks the two arms
     DISAGREE on are re-run per side and a majority decides: a single flaky
-    fail is no longer a structural regression."""
+    fail is no longer a structural regression. margin=0 so the promotion
+    condition stays reachable on an identical task set: the flipped task is
+    the decider."""
     calls = []
 
     def fake_run_suite(ctx, model=None, only=None):
@@ -290,11 +326,11 @@ def test_adjudication_flips_a_flaky_verdict(env, monkeypatch):
             return _rows({tid: True for tid in only}, model)
         per = {f"t{i}": True for i in range(10)}
         if model == "bee4b-v2":
-            per = {**per, "t1": False, "t10": True}   # flaky t1 + one extra win
+            per = {**per, "t1": False}   # flaky t1 fail; adjudication must flip it
         return _rows(per, model)
     monkeypatch.setattr("bee.evals.runner.run_suite", fake_run_suite)
     assert gate.set_baseline(env["ctx"], "bee4b")["ok"]
-    r = gate.model_quality_gate(env["ctx"], candidate="bee4b-v2", margin=1)
+    r = gate.model_quality_gate(env["ctx"], candidate="bee4b-v2", margin=0)
     assert r["ok"] and r.get("promoted") == "bee4b-v2", r
     reruns = [c for c in calls if c[1] is not None]
     assert reruns and all(c[1] == ["t1"] for c in reruns), calls
@@ -311,7 +347,7 @@ def test_adjudication_rounds_zero_restores_single_shot(env, monkeypatch):
         calls.append((model, only))
         per = {f"t{i}": True for i in range(10)}
         if model == "bee4b-v2":
-            per = {**per, "t1": False, "t10": True}
+            per = {**per, "t1": False}
         return _rows(per, model)
     monkeypatch.setattr("bee.evals.runner.run_suite", fake_run_suite)
     assert gate.set_baseline(env["ctx"], "bee4b")["ok"]
