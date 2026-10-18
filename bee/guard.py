@@ -108,10 +108,20 @@ def preview_call(tool: str, args: dict | None, limit: int = 300) -> str:
 
 
 def make_approver(mode: str = "cli"):
-    """mode: cli (prompt), unattended (auto-deny), always (auto-approve, unsafe)."""
+    """mode: cli (prompt), unattended (auto-deny), always (auto-approve).
+
+    WARNING: "always" auto-approves every destructive/exec call with no human
+    in the loop. It exists for scripted tests and programmatic use only —
+    load_config() REFUSES it from config.yaml (falls back to "cli" with a
+    loud warning), so the one-line operator footgun cannot reach production.
+    """
     if mode == "unattended":
         return lambda tool, args, reason: False
     if mode == "always":
+        import logging as _logging
+        _logging.getLogger("bee.guard").warning(
+            "guard.mode=always: auto-approving without human review "
+            "(refused from config.yaml; programmatic/test use only)")
         return lambda tool, args, reason: True
     def cli_approver(tool, args, reason) -> bool:
         preview = preview_call(tool, args)

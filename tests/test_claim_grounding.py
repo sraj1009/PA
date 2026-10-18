@@ -178,3 +178,33 @@ def test_a_phantom_file_claim_is_not_delivered_as_success(tmp_path, monkeypatch)
     assert res.ok is False, (res.ok, res.error, res.output)
     assert res.verify == "fail", res.verify
     assert "NOT done" in res.output, res.output
+
+
+# ---------------------------------------------------- preference pairs (P0-4)
+
+def test_a_verify_fix_becomes_a_preference_pair(tmp_path, monkeypatch):
+    """P0-4 (2026-10-17): a draft the verifier FAILED and the loop then fixed
+    is a free preference pair — chosen=the shipped fix, rejected=the caught
+    draft. Before this, the preference corpus waited on hand-typed /correct
+    rows and sat at 0."""
+    from bee import paths as bee_paths
+    from bee.agent.context import Context
+    from bee.agent.loop import run_agent
+    from bee.config import load_config
+    from bee.memory import ratings
+    monkeypatch.setattr(bee_paths, "MEMORY_DIR", tmp_path / "memory")
+    _no_fastpath(monkeypatch)
+    cfg = load_config()
+    cfg.cloud.enabled = False
+    cfg.learning.self_critique = False   # isolate: only the verify-fix pair fires
+    client = ScriptedClient([PHANTOM, HONEST])
+    ctx = Context(cfg, workspace=tmp_path, client=client, episodes_on=False,
+                  rag_on=False)
+    res = run_agent(ctx, "Create a file called eval_probe.txt containing exactly: BEE EVAL OK.")
+    assert res.ok and res.output.startswith(HONEST[:40]), (res.ok, res.output, res.error)
+    rows = ratings.pairs()
+    assert len(rows) == 1, rows
+    assert rows[0]["source"] == "verify-fix"
+    assert rows[0]["chosen"].startswith(HONEST[:30])
+    assert "eval_probe.txt" in rows[0]["rejected"]
+    assert rows[0]["task"].startswith("Create a file")

@@ -39,6 +39,8 @@ automation/
 
 # --- Model weights (large; live on this machine, not in VCS) ---
 models/faster-whisper-base.en/
+models/bee-qlora-*/
+models/bee-merged-*/
 
 # --- OS / logs ---
 .DS_Store

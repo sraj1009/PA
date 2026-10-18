@@ -4,6 +4,7 @@ For anything heavy/GPU/destructive use sandbox_run (Docker) instead.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 from .. import paths
@@ -11,6 +12,15 @@ from .base import envelope, T
 from .cancelable import run_cancelable
 
 _PY = sys.executable
+
+# Model-generated snippets run with the host interpreter — they must never see
+# host secrets. The full environment (API keys, tokens, private keys) used to
+# be inherited verbatim, so any printed os.environ or exfiltrating snippet
+# reached credentials. Functional vars (PATH, SYSTEMROOT, PYTHONIOENCODING…)
+# are kept; anything shaped like a secret is dropped.
+_SECRET_ENV_RE = re.compile(
+    r"(API[_-]?KEY|API[_-]?SECRET|SECRET[_-]?KEY|PRIVATE[_-]?KEY|AUTH[_-]?TOKEN"
+    r"|ACCESS[_-]?TOKEN|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIALS)$", re.I)
 
 
 def _child_env() -> dict:
@@ -22,7 +32,8 @@ def _child_env() -> dict:
     only the cwd on sys.path, so with any workspace but the project root
     `import bee.dsa` — which the skill index tells the model to use — failed.
     The root goes AFTER the user's own PYTHONPATH so it shadows nothing of theirs."""
-    env = dict(os.environ)
+    env = {k: v for k, v in os.environ.items()
+           if not _SECRET_ENV_RE.search(k)}
     env["PYTHONIOENCODING"] = "utf-8"
     root = str(paths.PROJECT_ROOT)
     parts = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]

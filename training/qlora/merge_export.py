@@ -18,56 +18,11 @@ from pathlib import Path
 
 MODFILE = r'''FROM {gguf}
 
-TEMPLATE """{{- if .Messages }}
-{{- if or .System .Tools }}<|im_start|>system
-{{- if .System }}
-{{ .System }}
-{{- end }}
-{{- if .Tools }}
-
-# Tools
-
-You may call one or more functions to assist with the user query.
-
-You are provided with function signatures within <tools></tools> XML tags:
-<tools>
-{{- range .Tools }}
-{"type": "function", "function": {{ .Function }}}
-{{- end }}
-</tools>
-
-For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
-<tool_call>
-{"name": <function-name>, "arguments": <args-json-object>}
-</tool_call>
-{{- end }}<|im_end|>
-{{ end }}
-{{- range $i, $_ := .Messages }}
-{{- $last := eq (len (slice $.Messages $i)) 1 -}}
-{{- if eq .Role "user" }}<|im_start|>user
-{{ .Content }}<|im_end|>
-{{ else if eq .Role "assistant" }}<|im_start|>assistant
-{{ if .Content }}{{ .Content }}
-{{- else if .ToolCalls }}<tool_call>
-{{ range .ToolCalls }}{"name": "{{ .Function.Name }}", "arguments": {{ .Function.Arguments }}}
-{{ end }}</tool_call>
-{{- end }}{{ if not $last }}<|im_end|>
-{{ end }}
-{{- else if eq .Role "tool" }}<|im_start|>user
-<tool_response>
-{{ .Content }}
-</tool_response><|im_end|>
-{{ end }}
-{{- if and (ne .Role "assistant") $last }}<|im_start|>assistant
-{{ end }}
-{{- end }}
-{{- else }}
-{{- if .System }}<|im_start|>system
-{{ .System }}<|im_end|>
-{{ end }}{{ if .Prompt }}<|im_start|>user
-{{ .Prompt }}<|im_end|>
-{{ end }}<|im_start|>assistant
-{{ end }}{{ .Response }}{{ if .Response }}<|im_end|>{{ end }}"""
+# Deliberately NO TEMPLATE directive: the GGUF embeds tokenizer.chat_template
+# from tokenizer_config.json — the same Jinja template the SFT data was
+# rendered with. An explicit Modelfile TEMPLATE would OVERRIDE it and drift
+# from the training distribution (verified 2026-10-17: FROM-gguf + no
+# TEMPLATE keeps tool-calling intact; see models/bee4b-v2.Modelfile).
 
 SYSTEM """You are BEE, an elite executive & personal assistant: sharp, organized, proactive, direct, warm, and energetic.
 - Answer directly and concisely. Begin with the answer or the action.
@@ -78,14 +33,23 @@ SYSTEM """You are BEE, an elite executive & personal assistant: sharp, organized
 - If a tool is available and the task needs it, call the tool; otherwise answer directly.
 """
 
-PARAMETER stop "<|im_start|>"
-PARAMETER stop "<|im_end|>"
+# Speed-tuned for a 3B model on a 4 GB GPU: whole model + KV cache on-GPU
+# (same parameters as the production bee4b.Modelfile).
+PARAMETER num_ctx 4096
 PARAMETER temperature 0.2
-PARAMETER num_ctx 8192
+PARAMETER num_predict 1024
+PARAMETER repeat_penalty 1.15
 '''
 
 
 def main():
+    # cp1252 consoles: the "merged → ..." prints killed a successful merge
+    # with UnicodeEncodeError at exit; force UTF-8 like train.py does.
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--adapter", required=True)
     ap.add_argument("--base", default="Qwen/Qwen2.5-3B-Instruct")
@@ -107,31 +71,43 @@ def main():
                   f"or use --skip-merge to only generate export files.")
             return 1
         print(f"loading base {args.base} (bf16) + adapter {args.adapter} ...")
+        # Plain load, deliberately NO device_map="auto": accelerate's dispatch
+        # installs offload hooks that break PEFT's merge_and_unload on this
+        # adapter (KeyError: 'base_model.model.model.embed_tokens.weight' in
+        # accelerate/utils/offload.py). A one-off export fits in CPU RAM
+        # (~6 GB bf16) and merging on CPU is deterministic on a 4 GB GPU box.
         model = AutoModelForCausalLM.from_pretrained(
-            args.base, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True)
+            args.base, torch_dtype=torch.bfloat16, trust_remote_code=True)
         model = PeftModel.from_pretrained(model, str(args.adapter))
         model = model.merge_and_unload()
         model.save_pretrained(str(out))
         AutoTokenizer.from_pretrained(str(args.adapter), trust_remote_code=True).save_pretrained(str(out))
         print(f"merged → {out}")
 
-    # llama.cpp conversion commands (run in a clone of ggml-org/llama.cpp)
+    # llama.cpp export recipe (verified 2026-10-17 on llama.cpp b11711).
+    # Current convert_hf_to_gguf.py --outtype accepts ONLY
+    # {f32,f16,bf16,q8_0,tq1_0,tq2_0,auto} — Q4_K_M comes from a second
+    # llama-quantize step (Windows binaries:
+    # llama-<build>-bin-win-cpu-x64.zip from ggml-org/llama.cpp releases).
+    f16 = out / "bee4b-f16.gguf"
+    q4 = out / "bee4b-q4_k_m.gguf"
     cmds = [
-        f"python convert_hf_to_gguf.py {out} --outfile {out / 'bee4b-q4_k_m.gguf'} --outtype q4_k_m   # ~2 GB, best for 3050 4 GB",
-        f"python convert_hf_to_gguf.py {out} --outfile {out / 'bee4b-q5_k_m.gguf'} --outtype q5_k_m   # ~2.5 GB, quality bump",
+        f"python convert_hf_to_gguf.py {out} --outfile {f16} --outtype f16",
+        f"llama-quantize.exe {f16} {q4} Q4_K_M   # ~1.9 GB, fits the 3050 4 GB fully on-GPU",
     ]
     (out / "convert_commands.txt").write_text("\n".join(cmds) + "\n", encoding="utf-8")
 
     (out / "Modelfile").write_text(
-        MODFILE.replace("{gguf}", str(out / "bee4b-q4_k_m.gguf")), encoding="utf-8")
+        MODFILE.replace("{gguf}", q4.as_posix()), encoding="utf-8")
     (out / "DEPLOY.md").write_text(
         f"# Deploy BEE fine-tune to Ollama\n\n"
-        f"1. llama.cpp: {cmds[0]}\n"
-        f"2. ollama create bee4b-ft -f {out / 'Modelfile'}\n"
-        f"3. models.yaml → fine_tunes: add name bee4b-ft, trained_on {args.adapter}\n"
-        f"4. config.yaml ollama.model: bee4b-ft\n"
-        f"5. GATE: python -m bee.cli eval — adopt only if score improves vs base.\n"
-        f"6. Rollback: config.yaml ollama.model: qwen2.5:3b\n",
+        f"1. convert to f16 GGUF:  {cmds[0]}\n"
+        f"2. quantize to Q4_K_M:   {cmds[1]}\n"
+        f"3. ollama create <name> -f {out / 'Modelfile'}   (FROM points at {q4.name})\n"
+        f"4. models.yaml -> fine_tunes: add name <name>, trained_on {args.adapter}\n"
+        f"5. config.yaml model_gate.candidate: <name>, then run /gate — the J3\n"
+        f"   gate adopts the model only on an eval win (writes models.yaml local_model)\n"
+        f"6. Rollback: remove `local_model` from models.yaml (config.yaml wins again)\n",
         encoding="utf-8")
     print(f"export files → {out}  (Modelfile, convert_commands.txt, DEPLOY.md)")
     return 0

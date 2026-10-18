@@ -1,8 +1,8 @@
 """Web auth (Phase 1 / critical C1): stateful endpoints require a bearer token.
 
 Covers: 401 without token, 401 with wrong token, 200 with correct token,
-query-string token form, env-fixed token, open routes stay open, and the
-token-file persistence path.
+query-string token REJECTED (header-only), env-fixed token, open routes stay
+open, per-start rotation, and the token-file path.
 
 Run:  python -m pytest tests/test_webauth.py -q
 """
@@ -68,9 +68,10 @@ def test_correct_token_accepted():
     assert c.get("/face/state", headers=H).status_code == 200
 
 
-def test_query_string_token_form():
+def test_query_string_token_rejected():
     c = _client()
-    assert c.get(f"/face/state?token={FIXED}").status_code == 200
+    # ?token= used to be accepted, leaking the credential into history/logs.
+    assert c.get(f"/face/state?token={FIXED}").status_code == 401
 
 
 def test_open_routes_stay_open():
@@ -92,9 +93,11 @@ def test_env_token_precedence_and_file_fallback(monkeypatch, tmp_path):
     assert len(t1) == 32                      # token_hex(16)
     assert webapp._TOKEN_FILE.exists()
     assert webapp._TOKEN_FILE.read_text().strip() == t1
-    # A fresh process (fresh module state) must pick the same token up.
+    # A fresh process (fresh module state) mints a NEW token — leaked tokens
+    # die with the process that minted them; the file only carries the latest.
     webapp.reset_token_for_tests()
-    assert webapp._resolve_token() == t1
+    t2 = webapp._resolve_token()
+    assert t2 != t1 and len(t2) == 32
     # ...and the env override always wins.
     monkeypatch.setenv("BEE_WEB_TOKEN", FIXED)
     webapp.reset_token_for_tests()
@@ -275,7 +278,7 @@ def test_dashboard_requires_auth(dash_env):
     assert c.get("/dashboard", headers={"Authorization": "Bearer wrong"}).status_code == 401
     r = c.get("/dashboard", headers=H)
     assert r.status_code == 200 and "MONITORING" in r.text
-    assert c.get(f"/dashboard?token={FIXED}").status_code == 200
+    assert c.get(f"/dashboard?token={FIXED}").status_code == 401
 
 
 def test_dashboard_serves_live_data_not_a_snapshot(dash_env):

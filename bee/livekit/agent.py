@@ -165,22 +165,30 @@ def _edge_tts_mp3(text: str, voice: str, rate: int) -> bytes:
 
 
 def _pyttsx3_wav(text: str, voice: str, rate: int) -> bytes:
-    import io
-
     import pyttsx3
     from ..voice.speak import _pick_py_voice
 
+    # pyttsx3.save_to_file to a BytesIO silently yields 0 bytes — use a real
+    # temp path (found by live-room verification: the greeting produced no
+    # audio with the BytesIO form).
+    out = Path(tempfile.gettempdir()) / f"bee_pyttsx3_{uuid.uuid4().hex}.wav"
     eng = pyttsx3.init()
     try:
         if voice:
             _pick_py_voice(eng, voice)
         eng.setProperty("rate", rate)
-        f = io.BytesIO()
-        eng.save_to_file(text, f)
+        eng.save_to_file(text, str(out))
         eng.runAndWait()
-        return f.getvalue()
+        return out.read_bytes() if out.exists() else b""
     finally:
-        eng.stop()
+        try:
+            eng.stop()
+        except Exception:
+            pass
+        try:
+            out.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def make_tts(cfg):
@@ -204,23 +212,26 @@ def make_tts(cfg):
             super().__init__(capabilities=TTSCapabilities(streaming=False),
                              sample_rate=TTS_RATE, num_channels=1)
 
-        async def synthesize(self, text, *, conn_options):
+        # NOTE: synthesize MUST be sync and return the ChunkedStream —
+        # the framework drives _run() itself. An `async def synthesize`
+        # hands back a coroutine, which crashes inside the SDK's
+        # `async with ...synthesize(...)` (third live-room crash class).
+        def synthesize(self, text, *, conn_options):
             text = (text or "").strip()
             if not text:
                 raise ValueError("empty TTS text")
 
-            try:
-                audio = await asyncio.to_thread(_edge_tts_mp3, text, voice, rate)
-                mime = "audio/mp3"
-            except Exception as e:
-                log.info("edge-tts failed (%s) — pyttsx3 fallback", str(e)[:120])
-                audio = await asyncio.to_thread(_pyttsx3_wav, text, voice, rate)
-                mime = "audio/wav"
-            if not audio:
-                raise RuntimeError("TTS produced no audio")
-
             class _Stream(ChunkedStream):
                 async def _run(self, output_emitter) -> None:
+                    try:
+                        audio = await asyncio.to_thread(_edge_tts_mp3, text, voice, rate)
+                        mime = "audio/mp3"
+                    except Exception as e:
+                        log.info("edge-tts failed (%s) — pyttsx3 fallback", str(e)[:120])
+                        audio = await asyncio.to_thread(_pyttsx3_wav, text, voice, rate)
+                        mime = "audio/wav"
+                    if not audio:
+                        raise RuntimeError("TTS produced no audio")
                     output_emitter.initialize(
                         request_id=uuid.uuid4().hex, sample_rate=TTS_RATE,
                         num_channels=1, mime_type=mime, frame_size_ms=20)
@@ -263,6 +274,12 @@ def run(cfg, room: str | None = None) -> int:
     user = cfg.user.name or "Boss"
     stt = make_stt(cfg)
     tts = make_tts(cfg)
+    # VAD + streaming wrapper are built HERE (worker main thread): livekit
+    # plugins register on import and refuse to load inside the job task
+    # thread, so importing silero inside entrypoint() crashes every job.
+    from livekit.agents import stt as _stt
+    from livekit.plugins import silero as _silero
+    stream_stt = _stt.StreamAdapter(stt=stt, vad=_silero.VAD.load())
 
     class BeeAgent(Agent):
         def __init__(self):
@@ -272,15 +289,22 @@ def run(cfg, room: str | None = None) -> int:
                 "sentences unless asked for detail. Never read markdown or code aloud."
             ))
 
-        async def on_enter(self, agent_session: AgentSession) -> None:
-            await agent_session.say(f"Welcome home, {user}. I'm BEE — what are we working on?")
+        async def on_enter(self) -> None:
+            # livekit-agents 1.4.6: callbacks take no session arg — the live
+            # session hangs off self.session.
+            await self.session.say(f"Welcome home, {user}. I'm BEE — what are we working on?")
 
-        async def on_user_turn_completed(self, agent_session: AgentSession,
-                                         user_message) -> None:
-            reply = await asyncio.to_thread(brain, user_message.content)
+        async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
+            content = getattr(new_message, "content", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    getattr(p, "text", "") for p in content
+                    if getattr(p, "text", "")).strip()
+            text = (content if isinstance(content, str) else str(content)).strip()
+            reply = await asyncio.to_thread(brain, text)
             if reply:
                 st.set_state("listening")
-                await agent_session.say(reply)
+                await self.session.say(reply)
 
     async def entrypoint(ctx: JobContext) -> None:
         # the worker runs in its own process (spawned by livekit's CLI), so it
@@ -289,7 +313,12 @@ def run(cfg, room: str | None = None) -> int:
         setup_logging()
         agent = BeeAgent()
         await ctx.connect()
-        await AgentSession(start_agent=agent, stt=stt, tts=tts).start(agent=agent, room=ctx.room)
+        # livekit-agents 1.4.6: the initial agent goes to start(), not the
+        # constructor (verified against the installed SDK signature; the old
+        # start_agent= kwarg crashed every dispatched job — found by a live
+        # room dispatch, which no mocked test could reach). stream_stt is the
+        # silero-wrapped BeeSTT built in run() on the main thread.
+        await AgentSession(stt=stream_stt, tts=tts).start(agent=agent, room=ctx.room)
 
     opts = WorkerOptions(entrypoint_fnc=entrypoint)
     opts.ws_url = lk.url

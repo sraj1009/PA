@@ -368,3 +368,52 @@ def test_netguard_suite_is_hermetic():
     assert "resolver=" in src and "transport=" in src
     for needle in ("socket", "getaddrinfo", "requests.", "urllib"):
         assert needle not in src, f"test_netguard.py uses real network: {needle}"
+
+
+# ------------------------------------------------------- threshold auto-tuning
+def _tune_rows(pairs):
+    """Synthetic (conf, pred, task-ok) joined rows with increasing timestamps."""
+    import time as _t
+    now = round(_t.time(), 3)
+    rows = []
+    for i, (conf, pred, ok) in enumerate(pairs):
+        rows.append({"ts": now + i * 2, "event": "route_ml", "pred": pred,
+                     "conf": conf, "used": True, "ms": 1.0})
+        rows.append({"ts": now + i * 2 + 1, "event": "task", "model": "local",
+                     "ok": ok, "escalated": False})
+    return rows
+
+
+def _write_metrics(metrics_file, rows):
+    with metrics_file.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+
+def test_tune_keeps_current_on_thin_data(p7):
+    from bee.brain import ml_report
+    _, metrics_file = p7
+    _write_metrics(metrics_file, _tune_rows([(0.9, "local", True)] * 3))
+    rec = ml_report.tune_thresholds(window_hours=1, min_samples=50)
+    assert rec["recommended"] == rec["current"] == 0.70
+    assert "only 3 joined" in rec["reason"]
+
+
+def test_tune_raises_threshold_when_low_conf_fails(p7):
+    from bee.brain import ml_report
+    _, metrics_file = p7
+    pairs = ([(0.55, "local", False)] * 10 + [(0.72, "local", True)] * 10
+             + [(0.72, "local", False)] * 10 + [(0.90, "local", True)] * 20)
+    _write_metrics(metrics_file, _tune_rows(pairs))
+    rec = ml_report.tune_thresholds(window_hours=1, min_samples=10)
+    assert rec["joined"] == 50, rec
+    assert rec["recommended"] == 0.75, rec
+    assert rec["grid"]["0.9"]["local_success"] == 1.0
+
+
+def test_apply_threshold_rejects_out_of_range(tmp_path):
+    from bee.brain import ml_report
+    with pytest.raises(ValueError):
+        ml_report.apply_threshold(0.40)
+    with pytest.raises(ValueError):
+        ml_report.apply_threshold(1.00)

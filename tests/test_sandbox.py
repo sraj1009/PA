@@ -36,6 +36,31 @@ def _track_run_calls(monkeypatch, calls, responses=()):
     monkeypatch.setattr(sb.subprocess, "run", fake_run)
 
 
+def test_non_none_network_refused(monkeypatch):
+    """A non-'none' network mode silently voids the SECURITY.md boundary —
+    refuse instead of launching."""
+    monkeypatch.setattr(sb, "_nvidia_runtime", lambda: False)
+    calls = []
+    _track_run_calls(monkeypatch, calls)
+    ctx = _ctx(gpu=False)
+    ctx.cfg.sandbox.network = "bridge"
+    out = sb.sandbox_tools()[0].handler(ctx, command="echo hi")
+    assert not calls, "docker run must not launch with network=bridge"
+    assert "refused" in str(out).lower() and "none" in str(out)
+
+
+def test_mask_failure_refuses_run(monkeypatch):
+    """If the .env mask cannot be created, fail closed instead of running
+    unmasked with credentials visible."""
+    monkeypatch.setattr(sb, "_nvidia_runtime", lambda: False)
+    monkeypatch.setattr(sb, "_ensure_env_mask_file", lambda: None)
+    calls = []
+    _track_run_calls(monkeypatch, calls)
+    out = sb.sandbox_tools()[0].handler(_ctx(gpu=False), command="echo hi")
+    assert not calls, "docker run must not launch unmasked"
+    assert "mask" in str(out).lower()
+
+
 def test_no_gpus_flag_without_nvidia_runtime(monkeypatch):
     monkeypatch.setattr(sb, "_nvidia_runtime", lambda: False)
     calls = []

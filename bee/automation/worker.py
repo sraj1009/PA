@@ -105,6 +105,11 @@ def _fn_build_sft(ctx) -> dict:
     return scheduler.maybe_build_sft(ctx)
 
 
+def _fn_train_qlora(ctx) -> dict:
+    from .. import scheduler
+    return scheduler.maybe_train_qlora(ctx)
+
+
 def _fn_rotate_logs(ctx) -> dict:
     from ..monitor.rotate import rotate_all
     return rotate_all(str(ctx.workspace))
@@ -146,6 +151,7 @@ FUNCTIONS: dict[str, Callable] = {
     "bee.scheduler.maybe_train_router": _fn_train_router,
     "bee.scheduler.maybe_teach_back": _fn_teach_back,
     "bee.scheduler.maybe_build_sft": _fn_build_sft,
+    "bee.scheduler.maybe_train_qlora": _fn_train_qlora,
     "bee.monitor.rotate_all": _fn_rotate_logs,
     "bee.monitor.alert_scan": _fn_alert_scan,
     "bee.skills.gate_candidates": _fn_skill_gate,
@@ -431,8 +437,22 @@ class JobWorker:
         now = self.now()
         # cross-process duplicate guard (file claim, TTL = max_runtime + grace)
         if not self.store.try_claim(job.id, self.claim_ttl(job)):
-            log.info("job %s claimed by another process — skipping", job.id)
+            # Retried every tick until the holder's TTL lapses (crash takeover).
+            # One INFO per streak, then DEBUG: a crashed holder is a normal
+            # situation and this tick loop produced ~215 identical lines in
+            # 18 minutes of web-server logs.
+            skipped = getattr(self, "_claim_skips", None)
+            if skipped is None:
+                skipped = self._claim_skips = set()
+            if job.id in skipped:
+                log.debug("job %s still claimed by another process — skipping", job.id)
+            else:
+                skipped.add(job.id)
+                log.info("job %s claimed by another process — skipping until its TTL lapses", job.id)
             return
+        skipped = getattr(self, "_claim_skips", None)
+        if skipped:
+            skipped.discard(job.id)
         job.state = RUNNING
         self.store.save_job(job)           # persisted BEFORE the run (dup guard)
         ex = JobExecution(job_id=job.id, attempt=job.attempts + 1,

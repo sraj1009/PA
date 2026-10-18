@@ -1,9 +1,14 @@
-"""Episodes + cloud goldens → SFT dataset (Qwen3 chat format, loss-masked, PII-scrubbed).
+"""Episodes + cloud goldens → SFT dataset (Qwen chat format, loss-masked, PII-scrubbed).
 
 Pipeline: load episodes → validate → keep pass (or --loose: pass+unknown)
 → merge cloud_golden.jsonl (successful cloud answers — curated by construction,
 so they bypass the strict deterministic verdict: the cloud is the teacher)
 → dedupe by task (keep most-recent) → scrub → emit train/sft_v1.jsonl + stats.
+
+P1 SFT/inference parity: every emitted sample is prefixed with the canonical
+system prompt the local route answers under (identity, rules, the fitted tool
+surface — `bee.agent.context.canonical_system_prompt`). `--no-parity` opts out
+for one-off ablations.
 
 Run:  python -m bee.pipeline.build_sft [--loose] [--out train/sft_v1.jsonl]
 """
@@ -16,6 +21,7 @@ import sys
 from pathlib import Path
 
 from .. import paths
+from ..memory import ratings as _ratings
 from . import sanitize, validate
 
 
@@ -140,7 +146,8 @@ def row_to_messages(row: dict) -> tuple[list[dict] | None, int]:
 
 def build(keep_unknown: bool = False, workspace: Path | None = None,
           out: Path | None = None, min_quality: float = 0.0,
-          n_paraphrase: int = 0, gen_fn=None) -> dict:
+          n_paraphrase: int = 0, gen_fn=None, max_paraphrase: int = 0,
+          parity: bool = True) -> dict:
     rows = load_episodes()
     golden = load_golden()
     out = out or (paths.TRAIN_DIR / "sft_v1.jsonl")
@@ -148,7 +155,26 @@ def build(keep_unknown: bool = False, workspace: Path | None = None,
     stats = {"episodes": len(rows), "golden": len(golden), "golden_in": 0,
              "by_verdict": {}, "dropped_dup": 0, "redactions": 0,
              "dropped_bad_events": 0, "dropped_low_quality": 0,
-             "paraphrases": 0, "quality_dist": {}}
+             "paraphrases": 0, "quality_dist": {},
+             "dropped_disliked": 0, "corrections_in": 0,
+             "parity_in": 0}
+    # P1 (SFT/inference parity): every emitted sample carries the canonical
+    # system prompt the local route answers under (identity, rules, the fitted
+    # tool surface). Inference has always sent it; training never did, so the
+    # model was fine-tuned on a frame it never sees at serving time.
+    sys_content = ""
+    if parity:
+        try:
+            from ..agent.context import canonical_system_prompt
+            sys_content = canonical_system_prompt()
+        except Exception as e:
+            stats["parity_error"] = f"{type(e).__name__}: {e}"
+    # Human feedback (RLAIF): tasks rated -1 are blocklisted — a disliked
+    # answer must not become a lesson even if its episode verified clean.
+    try:
+        blocked = _ratings.blocklisted()
+    except Exception:
+        blocked = set()
     for row in rows:
         v = validate.validate(row, workspace)
         stats["by_verdict"][v["verdict"]] = stats["by_verdict"].get(v["verdict"], 0) + 1
@@ -157,6 +183,9 @@ def build(keep_unknown: bool = False, workspace: Path | None = None,
         if v["verdict"] == "unknown" and not keep_unknown:
             continue
         key = _task_key(row.get("task", ""))
+        if key in blocked:
+            stats["dropped_disliked"] += 1
+            continue
         if key in seen:
             stats["dropped_dup"] += 1
             continue
@@ -179,9 +208,28 @@ def build(keep_unknown: bool = False, workspace: Path | None = None,
                      "events": [], "model": row.get("model", "cloud"),
                      "date": (row.get("ts") or "")[:10]}
         stats["golden_in"] += 1
+    # User corrections (/correct) are teacher samples: the user's wording is
+    # what the local model should have said. Deduped like everything else,
+    # still PII-scrubbed below, tagged so the report shows their share.
+    try:
+        corr_rows = _ratings.corrections()
+    except Exception:
+        corr_rows = []
+    for row in corr_rows:
+        task = (row.get("task") or "").strip()
+        text = (row.get("correction") or "").strip()
+        key = _task_key(task)
+        if not key or not text or key in seen:
+            continue
+        seen[key] = {"task": task, "output": text[:4000], "ok": True,
+                     "events": [], "model": (row.get("model") or "") + " (user-corrected)",
+                     "date": (row.get("ts") or "")[:10], "corrected": True}
+        stats["corrections_in"] += 1
     # Opt-in cloud-teacher paraphrase augmentation (robustness to phrasing).
     if n_paraphrase > 0 and gen_fn is not None:
         base = [r for r in seen.values() if not r.get("augmented")]
+        if max_paraphrase > 0:
+            base = base[:max_paraphrase]  # bound cloud spend per run
         for pr in paraphrase_augment(base, n_paraphrase, gen_fn):
             key = _task_key(pr["task"])
             if key not in seen:
@@ -205,8 +253,14 @@ def build(keep_unknown: bool = False, workspace: Path | None = None,
             if q < min_quality:
                 stats["dropped_low_quality"] += 1
                 continue
+            if sys_content:
+                msgs = [{"role": "system", "content": sys_content, "loss": False}] + msgs
+                stats["parity_in"] += 1
             bucket = f"{int(q * 10) / 10:.1f}"
             stats["quality_dist"][bucket] = stats["quality_dist"].get(bucket, 0) + 1
+            tmix = validate.detect_type(clean.get("task", ""), clean.get("events", []))
+            stats.setdefault("type_mix", {})
+            stats["type_mix"][tmix] = stats["type_mix"].get(tmix, 0) + 1
             f.write(json.dumps({
                 "messages": msgs,
                 "metadata": {"date": clean.get("date"), "model": clean.get("model"),
@@ -223,14 +277,24 @@ def build(keep_unknown: bool = False, workspace: Path | None = None,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--loose", action="store_true", help="include unknown-verdict episodes")
+    ap.add_argument("--loose", action="store_true", default=True,
+                    help="include unknown-verdict episodes (default on; --strict for pass-only)")
+    ap.add_argument("--strict", action="store_true",
+                    help="pass-only dataset (starves below ~150 samples; debugging only)")
     ap.add_argument("--out", default=None)
-    ap.add_argument("--min-quality", type=float, default=0.0,
-                    help="drop SFT samples scoring below this quality (0..1)")
+    ap.add_argument("--min-quality", type=float, default=0.6,
+                    help="drop SFT samples scoring below this quality (0..1; nightly default 0.6)")
     ap.add_argument("--paraphrase", type=int, default=0,
                     help="cloud-teacher paraphrase augmentation: N variants per "
                          "no-tool task (0 = off; costs N cloud calls per example)")
+    ap.add_argument("--max-paraphrase", type=int, default=0,
+                    help="cap paraphrased source tasks per run (0 = all; bounds spend)")
+    ap.add_argument("--no-parity", dest="parity", action="store_false", default=True,
+                    help="omit the canonical system prompt from SFT rows "
+                         "(P1 parity is on by default; this is for one-off ablations)")
     args = ap.parse_args()
+    if args.strict:
+        args.loose = False
     from ..config import load_config
     cfg = load_config()
     gen_fn = None
@@ -252,7 +316,8 @@ def main():
         gen_fn = _gen
     stats = build(keep_unknown=args.loose, workspace=cfg.workspace,
                   out=Path(args.out) if args.out else None,
-                  min_quality=args.min_quality, n_paraphrase=args.paraphrase, gen_fn=gen_fn)
+                  min_quality=args.min_quality, n_paraphrase=args.paraphrase, gen_fn=gen_fn,
+                  parity=args.parity)
     print(json.dumps(stats, indent=1))
     return 0
 

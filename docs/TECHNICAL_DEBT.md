@@ -1356,7 +1356,7 @@ through the fixed builder emits 9 samples with **0** hex prompts.
 
 **Suite after A63:** included in the 928 above.
 
-## A64 — `_golden()` teaches the model the kernel's prompt, not the user's (2026-10-15, OPEN)
+## A64 — `_golden()` teaches the model the kernel's prompt, not the user's (2026-10-15, **CLOSED 2026-10-17**)
 
 The 5 kernel-headed rows above are the visible half. `_golden()` appends
 `task[:500]`, and by the time the loop has a `task`, the kernel has already
@@ -1366,6 +1366,25 @@ a machine-written context block. Not patched in this pass: the fix needs a decis
 about where the user's original wording is carried (kernel input vs `Context.task`),
 and doing it halfway would put the same class of junk in the corpus from a different
 call site. `docs/STATUS.md` lists it as an open item.
+
+**Closed 2026-10-17 — the decision A64 was waiting on:** the user's wording is
+the kernel's `route_text`; `bee/kernel/kernel.py` already separates `exec_text`
+(context block prepended, for the model) from `raw_text` (what the user typed)
+and passes both. `run_agent` derives `said` from it (`bee/agent/loop.py:519`),
+and the main success path now hands it to `_finish(..., raw=said)`
+(`loop.py:1384`), which stores it in the golden instead of the prompt-inflated
+`task` (`_finish` → `_golden`, `loop.py:434-448`).
+
+The same change fixed the capture CONDITION, which was the larger leak: `_golden`
+fired on `res.escalated`, but the hybrid speed tier routes routine work to cloud
+and deliberately clears that flag, so cloud-first successes never became
+training material (live ledger 2026-10-17: 556 cloud-served episodes, 5 goldens
+— 3 of them test residue per A63). Capture now keys on the serving tier
+(`loop.py:_served_cloud`: escalated, model `cloud`, `*:cloud` Ollama models, or
+a cloud-provider name per `cfg.get_llm`) with the same verify-fail gate as
+before. Pinned in `tests/test_fastpaths.py`
+(`test_golden_written_for_cloud_first_ok`,
+`test_golden_records_raw_wording_not_context_block`).
 
 **Also open, deliberately not patched here:**
 - **Gate seeding from a partial run** — `gate.py` now *refuses* to compare across
@@ -1410,6 +1429,174 @@ comments changed since): **928 passed in 94.4 s**, and the same eight digests
 (`memory`, `metrics`, `train`, `skills`, `evals`, `audit.jsonl`, `audit.jsonl.1`,
 `settings.json`) again report **DIFFERING KEYS: NONE**
 (`temp/bee-docsync/{pre,post}_final3.json`).
+
+## A65 — the preference corpus could only grow when the user typed `/correct` (2026-10-17, **CLOSED same day**)
+
+RLAIF stage 2 (preference tuning) reads `train/prefs.jsonl`, and
+`training/dpo/export_prefs.py` built that file from exactly one source:
+`ratings.db` rows carrying a hand-typed `correction`. Nothing else ever wrote
+them — `build_sft` trains on ratings but not pairs, and the CLI `/correct` path
+is the only writer — so the measured corpus was **0 pairs**, and the trainer's
+own 10-pair floor made the stage structurally unreachable no matter how much
+the system ran. Meanwhile the loop produced the very material RLAIF wants and
+discarded it on every pass: the critique pass makes (draft, rewrite) pairs, the
+verify-fix loop makes (rejected draft, shipped fix) pairs, and the ledger holds
+the third source — the same task failing once and succeeding later, including
+the cloud-after-local-failure case ("everything cloud does gets taught to the
+local model").
+
+**Closed:** `bee/memory/ratings.py` gained a `pairs` table (`record_pair` /
+`pairs`; `pair_key` = sha256 of the triple, so re-recording is idempotent).
+Three producers feed it:
+
+- **live in `bee/agent/loop.py`** — the critique call site records
+  (chosen=rewrite, rejected=pre-rewrite) when the serving tier was local (a
+  cloud answer rewritten by the 3B would be the wrong direction), and the
+  verify-fix path records every verifier-FAILED draft against the fix that
+  then passed;
+- **offline, `bee/pipeline/derive_prefs.py`** (`python -m
+  bee.pipeline.derive_prefs`, idempotent, `--dry-run` first) — rule A pairs a
+  cloud golden against a failed run of the same `task_key`; rule B pairs
+  verifier-fail → verifier-pass runs of the same task;
+- **user rows** stay honored — `export_prefs.py` merges corrections with the
+  pairs table and dedupes (source counts printed for the trainer).
+
+Conservative by measurement: the first dry run on the real ledger offered 24
+"pairs" that were all meta-ramble preferred over `(stopped: max iterations
+reached)` — harness text is not an answer. Derivation refuses as "chosen"
+sides: the loop's status sentinels, the fallbacks the loop writes for
+empty/wrap-stopped episodes (matched by `error` field), and model-authored
+error explanations ("does not accept keyword arguments…"). Meta-ramble stays
+legal as the *rejected* side ("prefer the answer over talking about tool
+calls" is the lesson). After the gates the same ledger yields **7 genuine
+pairs**; recorded → exported → `train_dpo.py --dry-run` validates the recipe
+and correctly refuses below the 10-pair floor.
+
+ORPO status, verified against the installed trainer: TRL 1.16.0 ships no
+`ORPOTrainer` and no `orpo` loss. ORPO's headline benefit (no frozen second
+model) is already covered here — `train_dpo.py` passes `ref_model=None` with a
+PEFT adapter, which TRL reads as "the same weights with the adapter disabled".
+`--loss-type` now passes TRL's unified preference losses (`apo_zero` etc.) for
+later experiments. Pinned by `tests/test_pipeline.py` (derive rules,
+blocklist, harness-text refusal), `tests/test_self_improve.py` (pairs
+roundtrip, export merge) and `tests/test_claim_grounding.py`
+(`test_a_verify_fix_becomes_a_preference_pair`). Suite after this pass:
+**990 passed, 0 failed** in 137.2 s.
+
+## A66 — the tool-schema floor alone starved the local context (2026-10-17, **CLOSED same day**)
+
+A59 gave the local route an honest `num_ctx` (8192) and a logged compaction
+path, but the *floor* went unmeasured: all 30 tool schemas weigh ~17.1k chars,
+which `_token_estimate` prices at ≈6.0k of the 7168-token budget once a
+representative system + task block is added. A live `web_search_tool` turn
+showed the consequence — **8434 est tokens with NOTHING left to compact**: the
+history was not the problem, the schema list was, and every local call paid it
+before a single tool result existed.
+
+**Closed:** per-route schemas. `bee/tools/__init__.py` grew
+`LOCAL_TOOL_NAMES` (20 tools: files/shell/code_run/calculator, memory,
+skills, planner, web_search/web_fetch, system_health, scheduler) and
+`tools_litellm(local=True)`; `bee/agent/loop.py:tools_for` picks per call —
+cloud keeps the complete set, local gets the subset, mid-run de-escalation
+switches sets with the model. The executor registry (`tools_by_name`) and the
+guard/risk path are untouched, so nothing became uncallable, and the dropped
+capability tools (automate 2.2k, automation_job 1.3k, systemctl 842,
+computer_* ≈3.0k combined, sandbox_run 579, spawn_task 511 chars) still reach
+the model the moment the task is served by cloud — which the hybrid does first
+for anything hard.
+
+Measured with a representative system+task floor: full set 6,039 est vs subset
+3,166 est → history headroom **1,129 → 4,002 est tokens** (freed ~2.9k est
+≈ 9.8k chars of conversation). Pinned by `tests/test_fastpaths.py`
+(`test_local_route_gets_the_fitted_schema_subset` — also asserts every listed
+name exists, so a typo cannot silently shrink the set;
+`test_cloud_route_keeps_the_full_schema_set`). Suite after this pass:
+**992 passed, 0 failed** in 123.9 s.
+
+## A67 — one provider's 429 disabled the whole cloud tier for the day (2026-10-17, **CLOSED same day**)
+
+`cloud.llm` was the only provider the cloud tier could ever use. The Gemini
+free tier allows ~20 requests/day; when it ran out, every later cloud call
+got a 429, the loop de-escalated to local turn by turn, and the whole cloud
+side of the product was gone until the quota window reset — the 2026-10-17 J3
+gate run (candidate `bee4b-v2` vs seeded baseline) came back **VOID** for
+exactly this reason ("retry ~9.5 h"), and the planned cloud head-to-head died
+with it. The information was all there (rate-limit kind, provider registry,
+key handling) — there was simply no second provider to go to, and no memory
+of "this provider is exhausted" once one call had found out.
+
+**Closed:** the quota is now a managed resource.
+`bee/agent/client.py` keeps a per-provider-kind cooldown (`_COOLDOWN` /
+`_cooling`; in-process by design — a fresh process re-probes once and the
+probe is cheap). When a call to the managed primary fails with a
+rate-limit / auth / overloaded / server error and `cloud.fallback_llm` is
+configured + credentialed, `_cloud_failover` cools the primary kind for
+`cloud.quota_cooldown` seconds (floor 30 s) and the caller re-issues the same
+call; `_call_info` then resolves the fallback with **its own** `fallback_api_key`
+/ `fallback_base_url` (no cross-provider credential leaks — pinned), and
+later calls skip the cooling primary entirely. If the fallback fails too the
+error surfaces honestly (`_cooling(primary)` is already set, so no
+provider ping-pong). `chat_stream` gets the same treatment for pre-token
+failures. Config: `CloudCfg.fallback_llm` / `fallback_api_key` /
+`fallback_base_url` / `quota_cooldown` (dataclass + `_section` + the yaml
+block, all three layers), shipped as `zai/glm-5.3-flash` — the z.ai (GLM)
+provider was added to the registry (`ProviderKind.ZAI`, `ZAI_API_KEY` /
+`ZHIPUAI_API_KEY`, legacy `zhipuai/` alias), `ProviderRegistry.from_config`
+lists it, and `cloud_available` reports a fallback-only tier as UP
+(`fallback-only: zai credentials present (primary gemini has none)`) so the
+hybrid keeps escalating. Activation on this box is one env var: no ZAI key
+exists yet, so the code path is dormant but live-tested hermetically (fake
+litellm: primary 429 → same call on the fallback, next call straight to the
+fallback, cooldown expiry re-probes the primary, missing credentials refuse
+failover). Pinned by `tests/test_providers.py`
+(`test_cloud_failover_switches_and_cools`,
+`test_cloud_failover_requires_fallback_credentials`,
+`test_expired_cooldown_probes_primary_again`,
+`test_cloud_available_fallback_only`, `test_zai_provider_kind_and_keys`).
+Suite after this pass: **997 passed, 0 failed** in 123.2 s.
+
+## A68 — the self-improvement loop stopped at the adapter, and the gate flipped on flake (2026-10-17, **CLOSED same day**)
+
+`auto_qlora` could train an adapter overnight, but nothing downstream was
+automatic: the adapter sat in `models/bee-qlora-<tag>`, the
+merge/convert/quantize/`ollama create` steps were manual shell work (the very
+session that produced `bee4b-v2` — its recipe still lives in
+`models/bee-merged-v2/convert_commands.txt`), and even a hand-built model had
+to be re-typed into `config.yaml model_gate.candidate` before the J3 gate
+would look at it. So the "self-improving" nightly loop was really: train
+(opt-in, GPU-gated), then WAIT FOR A HUMAN. And the gate closing it compared
+single-shot suite runs whose 21-task deltas sit inside ±2-3 stochastic noise:
+the live 2026-10-17 run went VOID on quota, and the planned promotion call
+was ±1 on the raw count — a single flaky task could flip a verdict either
+way.
+
+**Closed:** two mechanisms.
+(1) `bee/scheduler.py:_auto_chain` runs after every successful nightly
+training: `merge_export.py` (torch merge; `--skip-merge` on re-runs),
+`convert_hf_to_gguf.py` → f16 GGUF, `llama-quantize` → Q4_K_M,
+`ollama create bee-qlora-<tag>` — the physical steps gated on
+`training.llama_cpp_dir` (an unpacked llama.cpp: convert script + quantize
+binary; without it the chain stops with the exact remedy and queues
+nothing). The imported model is queued atomically in
+`train/gate_candidate.json`; `model_quality_gate` resolves the candidate as
+explicit arg > queue > `config.yaml` and consumes the queue on a decisive
+verdict only — promote/reject clear it, a 429-VOID keeps it for a retry.
+`/gate show` displays the queue and the adjudication setting.
+(2) `model_gate.adjudication_rounds` (default 2): tasks the two arms
+DISAGREE on are re-run that many extra times PER SIDE and a majority decides
+— a couple of minutes, not a second full suite; only disagreements are
+touched; a failed re-run degrades to fewer votes, never a crash; 0 restores
+single-shot. Pinned by `test_queued_candidate_is_picked_up_and_consumed_on_reject`,
+`test_queued_candidate_promotes_and_is_consumed`,
+`test_queued_candidate_survives_a_void`,
+`test_explicit_candidate_never_consumes_the_queue`,
+`test_adjudication_flips_a_flaky_verdict`,
+`test_adjudication_rounds_zero_restores_single_shot` (tests/test_eval_gate.py)
+and `test_auto_chain_stops_cleanly_without_llama_cpp`,
+`test_auto_chain_imports_and_queues_the_model` (tests/test_sft.py). Verified
+live on the real config: `training.llama_cpp_dir` resolves to the unpacked
+b11711 dir, `adjudication_rounds: 2`, queue empty (nothing half-built).
+Suite after this pass: **1005 passed, 0 failed** in 125.9 s.
 
 
 

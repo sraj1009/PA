@@ -69,7 +69,37 @@ def tools_meta() -> dict:
     return {t.name: t for t in build_default_tools()}
 
 
-def tools_litellm() -> list[dict]:
+# P0-1 (2026-10-17): context floor for the local route. num_ctx is 8192 and the
+# compaction budget 7168 est tokens; all 30 schemas are ~16.0k chars ≈ 5.2k of
+# that — a live web_search_tool turn measured 8434 est tokens with NOTHING left
+# to compact, i.e. the schema list alone starved the history before any tool
+# result arrived. The local route now gets this fitted subset (≈7.2k chars ≈
+# 2.4k est) that keeps everything an offline session needs day to day. The
+# heavy capability tools it drops (automate 2.2k, automation_job 1.3k,
+# systemctl 842, computer_input/window/clipboard/observe/stop ≈3.0k combined,
+# sandbox_run 579, spawn_task 511 chars) stay fully callable — cloud keeps the
+# complete set, the executor registry is unchanged, and a local task that needs
+# one fails over through the hybrid/kernel retry instead of every local call
+# paying the schema cost.
+LOCAL_TOOL_NAMES = frozenset({
+    # exec / files / math — the everyday core
+    "file_read", "file_write", "file_edit", "file_list",
+    "shell", "code_run", "calculator",
+    # memory
+    "memory_search", "profile_add", "diary_add", "memory_longterm",
+    # skills — the system prompt tells the model to load and distill them
+    "skill_search", "skill_list", "skill_get", "skill_create",
+    # planning / web / health / reminders
+    "planner", "web_search", "web_fetch", "system_health", "scheduler",
+})
+
+
+def tools_litellm(local: bool = False) -> list[dict]:
+    """Model-loop schemas. `local=True` = the P0-1 fitted subset above; the
+    default full set is what cloud calls and the API surfaces get."""
+    tools = build_default_tools()
+    if local:
+        tools = [t for t in tools if t.name in LOCAL_TOOL_NAMES]
     return [
         {
             "type": "function",
@@ -79,7 +109,7 @@ def tools_litellm() -> list[dict]:
                 "parameters": t.parameters,
             },
         }
-        for t in build_default_tools()
+        for t in tools
     ]
 
 

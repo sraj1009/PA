@@ -150,6 +150,82 @@ def test_guard_blocks_fastpath_exec(ctx, monkeypatch):
     assert "Guard blocked" in res.output
 
 
+def test_fastpath_guard_blocks_real_destructive_python(ctx):
+    """P1-3: no monkeypatched guard here — the run_code fastpath hands user
+    Python to the REAL guard, whose AST risk layer (bee.security.risk) denies
+    shutil.rmtree / subprocess / eval payloads. The payload never executes and
+    the refusal is the honest blocked text plus a deny guard event."""
+    ctx.client = DeadClient()
+    for payload in ("import shutil; shutil.rmtree('C:/Windows/System32')",
+                    "import subprocess; subprocess.run(['whoami'])",
+                    "eval('2+2')"):
+        seen: list[dict] = []
+        res = run_agent(ctx, f"run python: {payload}", on_event=seen.append)
+        assert res.ok and res.route_source == "fastpath", payload
+        assert res.tool_calls == 0, payload             # nothing executed
+        assert "not allowed" in res.output, payload     # honest blocked text
+        assert any(e.get("type") == "guard" and e.get("action") == "deny"
+                   for e in seen), payload
+
+
+class _SchemaRecClient:
+    """Records the tool-schema count each route call received (P0-1)."""
+
+    def __init__(self, text):
+        self.text = text
+        self.seen = []
+
+    def models_list(self):
+        return ["stub"]
+
+    def ollama_up(self):
+        return True
+
+    def _has_ollama(self):
+        return True
+
+    def chat(self, name, messages, tools=None, **kw):
+        self.seen.append((name, len(tools) if tools else 0))
+        return {"content": self.text}
+
+
+def test_local_route_gets_the_fitted_schema_subset(ctx, tmp_path, monkeypatch):
+    """P0-1: all 30 schemas are ~5.2k est tokens of the 7168 local budget — a
+    live turn measured 8434 with NOTHING left to compact, so the tool list alone
+    starved the history. The local route must receive the fitted subset."""
+    from bee.tools import LOCAL_TOOL_NAMES, tools_litellm
+    monkeypatch.setattr(bee_paths, "TRAIN_DIR", tmp_path)
+    full, sub = tools_litellm(), tools_litellm(local=True)
+    # every listed name must exist in the registry (a typo would silently drop it)
+    assert {t["function"]["name"] for t in sub} == set(LOCAL_TOOL_NAMES)
+    assert len(sub) < len(full)
+    ctx.cfg.cloud.enabled = False          # local serves this one
+    client = _SchemaRecClient("The three notes show steady progress on the release.")
+    ctx.client = client
+    res = run_agent(ctx, "summarize the three project notes into one short paragraph")
+    assert res.ok, (res.output, res.error)
+    assert client.seen, "the model loop never ran"
+    name, count = client.seen[-1]
+    assert name == "local"
+    assert count == len(sub)
+
+
+def test_cloud_route_keeps_the_full_schema_set(ctx, tmp_path, monkeypatch):
+    """P0-1: the diet is local-only — cloud calls still see every schema."""
+    from bee.agent import providers
+    from bee.tools import tools_litellm
+    monkeypatch.setattr(bee_paths, "TRAIN_DIR", tmp_path)
+    monkeypatch.setattr(providers, "cloud_available", lambda cfg: (True, "test"))
+    ctx.cfg.cloud.enabled = True
+    client = _SchemaRecClient("The three notes show steady progress on the release.")
+    ctx.client = client
+    res = run_agent(ctx, "summarize the three project notes into one short paragraph")
+    assert res.ok, (res.output, res.error)
+    name, count = client.seen[-1]
+    assert name == "cloud"
+    assert count == len(tools_litellm(local=False))
+
+
 def test_explicit_model_hint_beats_fastpath(ctx):
     # 'local: what time is it' is explicit routing — the user asked for the model
     r = fastpaths.match("what time is it")
@@ -173,6 +249,49 @@ def test_golden_not_written_for_local_ok(ctx, tmp_path, monkeypatch):
     res = AgentResult(output="local answer", model="local", ok=True, escalated=False)
     _finish(ctx, "easy task", None, res, time.time(), lambda e: None, False)
     assert not (tmp_path / "golden").exists() or not (tmp_path / "golden" / "cloud_golden.jsonl").exists()
+
+
+def test_golden_written_for_cloud_first_ok(ctx, tmp_path, monkeypatch):
+    """Hybrid speed tier: the CLOUD model answered with escalated=False (the
+    flag is cleared by the cloud-first override). Before 2026-10-17 the trigger
+    checked `escalated` alone, so these cloud-served successes (556 in the
+    live ledger) never reached the local model's training corpus."""
+    monkeypatch.setattr(bee_paths, "TRAIN_DIR", tmp_path)
+    res = AgentResult(output="the cloud answer", model="cloud", ok=True, escalated=False)
+    _finish(ctx, "routine ask", None, res, time.time(), lambda e: None, False)
+    f = tmp_path / "golden" / "cloud_golden.jsonl"
+    assert f.exists()
+    assert json.loads(f.read_text(encoding="utf-8").strip())["task"] == "routine ask"
+
+
+def test_golden_records_raw_wording_not_context_block(ctx, tmp_path, monkeypatch):
+    """Goldens carry the user's own words (kernel route_text), not the
+    context-augmented prompt the model saw."""
+    monkeypatch.setattr(bee_paths, "TRAIN_DIR", tmp_path)
+    res = AgentResult(output="the cloud answer", model="cloud", ok=True, escalated=False)
+    _finish(ctx, "SESSION CONTEXT: recent tasks: alpha, beta\n\nwhat is the plan?",
+            None, res, time.time(), lambda e: None, False, raw="what is the plan?")
+    f = tmp_path / "golden" / "cloud_golden.jsonl"
+    assert json.loads(f.read_text(encoding="utf-8").strip())["task"] == "what is the plan?"
+
+
+def test_golden_not_written_on_verify_fail(ctx, tmp_path, monkeypatch):
+    """A cloud answer the verifier FAILED must never become training material,
+    even though it succeeded at the tool level."""
+    monkeypatch.setattr(bee_paths, "TRAIN_DIR", tmp_path)
+    res = AgentResult(output="confident but wrong answer", model="gemini-3-flash-preview",
+                      ok=True, escalated=True, verify="fail")
+    _finish(ctx, "tricky task", None, res, time.time(), lambda e: None, False)
+    assert not (tmp_path / "golden").exists() or not (tmp_path / "golden" / "cloud_golden.jsonl").exists()
+
+
+def test_golden_written_when_unverified(ctx, tmp_path, monkeypatch):
+    """verify=None is absence of a check, not evidence of wrongness — record."""
+    monkeypatch.setattr(bee_paths, "TRAIN_DIR", tmp_path)
+    res = AgentResult(output="the cloud answer", model="gemini-3-flash-preview",
+                      ok=True, escalated=True, verify=None)
+    _finish(ctx, "hard task", None, res, time.time(), lambda e: None, False)
+    assert (tmp_path / "golden" / "cloud_golden.jsonl").exists()
 
 
 def test_teach_back_distills_skill(ctx, monkeypatch):

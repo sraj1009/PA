@@ -87,7 +87,14 @@ def sandbox_tools():
         elif want_gpu:
             gpu_ok = "no-nvidia-runtime"  # requested but unavailable -> CPU fallback
         # --- Phase 1 hardening flags (see module docstring) ---
-        args += ["--network", str(cfg.network or "none")]
+        # The container boundary in docs/SECURITY.md assumes NO network.
+        # Any other mode silently voids it, so refuse instead of launching.
+        net = str(cfg.network or "none")
+        if net != "none":
+            return {"error": f"sandbox network mode {net!r} refused: only 'none' is "
+                             "allowed (docs/SECURITY.md boundary). Relaxing this "
+                             "needs a code change, not a config edit."}
+        args += ["--network", net]
         if cfg.memory:
             args += ["--memory", str(cfg.memory), "--memory-swap", str(cfg.memory)]
         if cfg.cpus:
@@ -106,9 +113,13 @@ def sandbox_tools():
             # Mask the host .env by bind-mounting an empty file over it, so
             # untrusted code cannot read credentials from inside the sandbox.
             # (tmpfs cannot mount onto a *file* inside a bind, hence a file bind.)
+            # Fail closed: an unmaskable run must not proceed with secrets visible.
             mask = _ensure_env_mask_file()
-            if mask is not None:
-                args += ["-v", f"{mask}:{cfg.workdir}/.env:ro"]
+            if mask is None:
+                return {"error": "sandbox .env mask could not be created — refusing "
+                                 "to run unmasked (set sandbox.mask_env_file=false to "
+                                 "override explicitly)"}
+            args += ["-v", f"{mask}:{cfg.workdir}/.env:ro"]
         args += [image, "/bin/sh", "-c", str(command)]
         timeout = int(timeout or cfg.timeout)
         timeout = max(1, min(timeout, 3600))

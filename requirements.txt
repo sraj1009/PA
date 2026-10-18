@@ -1,23 +1,24 @@
-# BEE core
-pyyaml>=6.0
-httpx>=0.27
-pydantic>=2.0
-litellm>=1.40          # unified local+cloud LLM gateway
-lancedb>=0.39          # embedded vector DB (no server); needs the list_tables() API
-apscheduler>=3.10      # nightly consolidation / cron jobs
-fastapi>=0.110
-uvicorn>=0.29
-rich>=13.7
+# BEE core — pinned 2026-10-15 (verified set: 928 pytest + 71,914 verify ALL PASS).
+# Re-pin after upgrades: pip install -U <pkg>, run full suite, then freeze here.
+pyyaml==6.0.3
+httpx==0.28.1
+pydantic==2.13.4
+litellm==1.104.0          # unified local+cloud LLM gateway
+lancedb==0.39.0          # embedded vector DB (no server); needs the list_tables() API
+apscheduler==3.11.3      # nightly consolidation / cron jobs
+fastapi==0.133.1
+uvicorn==0.41.0
+rich==14.3.3
 
 # DSA / evals (CPU-only, small)
-pytest>=8.0
+pytest==9.1.1
 
-# Hybrid brain: learned router artifact
-scikit-learn>=1.3
-joblib>=1.3
-scipy>=1.10
+# Hybrid brain: learned router artifact (must match requirements-ml.txt pins)
+scikit-learn==1.9.0
+joblib==1.6.0
+scipy==1.17.1
 
 # NOTE: torch/sklearn/polars etc. live in the DOCKER sandbox image (sandbox/Dockerfile),
 # not in the host env — keeps the host light and the GPU isolated.
 # For host-side code_run ML (optional): pip install torch --index-url https://download.pytorch.org/whl/cu124
-python-multipart>=0.0.9
+python-multipart==0.0.32

@@ -198,12 +198,189 @@ def maybe_build_sft(ctx) -> dict:
     Runs nightly so the QLoRA dataset always contains the latest responses —
     including successful cloud answers (teach-back) that the local model will
     learn from on the next training run.
+
+    keep_unknown=True with a quality floor: strict pass-only starves the
+    dataset (157 pass of 1360 episodes — never trainable), while unknown is
+    'no cheap check', not 'wrong'. The quality heuristic + bad-event dropping
+    + PII scrub in build() are the honesty levers; fail is still never trained.
     """
     try:
         from .pipeline.build_sft import build
-        return build(workspace=ctx.workspace)
+        return build(workspace=ctx.workspace, keep_unknown=True, min_quality=0.6)
     except Exception as e:
         return {"error": str(e)}
+
+
+def _auto_chain(ctx, adapter_dir: Path, logf: Path) -> dict:
+    """P0-5: merge -> GGUF -> `ollama create` -> queue for the J3 gate.
+
+    Runs right after a successful nightly training (the operator already opted
+    into the GPU burn). Each step is reported; a missing llama.cpp or a failed
+    import never loses the adapter — the chain stops with a note and the next
+    successful training supersedes it. Only a FULLY IMPORTED model is queued
+    (train/gate_candidate.json), so the J3 gate can never score a half-built
+    artifact.
+    """
+    import shutil as _sh
+    import subprocess as _sp
+    import sys as _sys
+
+    t = getattr(ctx.cfg, "training", None)
+    tag = adapter_dir.name.replace("bee-qlora-", "") or adapter_dir.name
+    merged = paths.PROJECT_ROOT / "models" / f"bee-merged-{tag}"
+    model_name = f"bee-qlora-{tag}"
+    try:
+        logf.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    def run_step(cmd, cwd=None, timeout=3600.0) -> bool:
+        with logf.open("a", encoding="utf-8") as lf:
+            lf.write("\n$ " + " ".join(str(c) for c in cmd) + "\n")
+            lf.flush()
+            r = _sp.run([str(c) for c in cmd], cwd=(str(cwd) if cwd else None),
+                        stdout=lf, stderr=_sp.STDOUT, timeout=timeout)
+        return getattr(r, "returncode", 1) == 0
+
+    # 1. merge the adapter into the base (torch step; skipped when re-run)
+    cmd = [_sys.executable, str(paths.PROJECT_ROOT / "training" / "qlora" / "merge_export.py"),
+           "--adapter", str(adapter_dir), "--out", str(merged)]
+    if (merged / "model.safetensors").exists():
+        cmd.append("--skip-merge")
+    try:
+        if not run_step(cmd, timeout=7200.0):
+            return {"merged": str(merged), "error": "merge_export.py exited nonzero"}
+    except Exception as e:
+        return {"merged": str(merged), "error": f"merge failed: {e}"}
+    modelfile = merged / "Modelfile"
+    if not modelfile.exists():
+        return {"merged": str(merged), "error": "merge_export.py produced no Modelfile"}
+
+    # 2. convert + quantize + import, when an unpacked llama.cpp is configured
+    lc_arg = str(getattr(t, "llama_cpp_dir", "") or "").strip() if t else ""
+    lc = Path(lc_arg) if lc_arg else None
+    convert = lc / "convert_hf_to_gguf.py" if lc else None
+    if not lc or not convert.exists():
+        return {"merged": str(merged),
+                "note": "merge done; set training.llama_cpp_dir (unpacked llama.cpp: "
+                        "convert_hf_to_gguf.py + llama-quantize*.exe) to import + queue"}
+    f16 = merged / "bee4b-f16.gguf"
+    q4 = merged / "bee4b-q4_k_m.gguf"
+    try:
+        if not run_step([_sys.executable, str(convert), str(merged),
+                         "--outfile", str(f16), "--outtype", "f16"], cwd=lc, timeout=7200.0):
+            return {"merged": str(merged), "error": "convert_hf_to_gguf.py exited nonzero"}
+        qexe = next(iter(sorted(lc.glob("llama-quantize*.exe"))), None) \
+            or _sh.which("llama-quantize")
+        if not qexe:
+            return {"merged": str(merged), "f16": str(f16),
+                    "note": "converted to f16; no llama-quantize*.exe in "
+                            "training.llama_cpp_dir (nor PATH) — quantize + import by hand"}
+        if not run_step([str(qexe), str(f16), str(q4), "Q4_K_M"], cwd=lc, timeout=3600.0):
+            return {"merged": str(merged), "error": "llama-quantize exited nonzero"}
+        oll = _sh.which("ollama") or "ollama"
+        if not run_step([oll, "create", model_name, "-f", str(modelfile)], timeout=3600.0):
+            return {"merged": str(merged), "gguf": str(q4),
+                    "error": "ollama create exited nonzero"}
+    except Exception as e:
+        return {"merged": str(merged), "error": f"export chain failed: {e}"}
+
+    # 3. queue for the J3 gate
+    try:
+        from .evals.gate import queue_candidate
+        queue_candidate(model_name, src="auto-chain",
+                        adapter=str(adapter_dir), merged=str(merged))
+    except Exception as e:
+        return {"merged": str(merged), "model": model_name,
+                "error": f"model imported but queue write failed: {e}"}
+    return {"merged": str(merged), "gguf": str(q4), "model": model_name, "queued": True}
+
+
+def maybe_train_qlora(ctx) -> dict:
+    """Nightly QLoRA refresh trigger (GPU-gated, bounded, stateful).
+
+    Runs train/sft_v1.jsonl through training/qlora/train.py when ALL hold:
+      training.auto_qlora is true (operator opt-in — a multi-hour GPU burn
+        must never start by surprise on a daily-driver machine),
+      CUDA torch + the HF stack import (else: report why, skip),
+      samples >= training.min_samples,
+      no adapter trained in the last training.min_interval_days.
+    Bounded by the --fast preset + --max-samples so one night cannot run away.
+    P0-5 auto-chain: a successful run is merged (merge_export.py), GGUF-
+    converted + Q4_K_M-quantized + `ollama create`d when training.llama_cpp_dir
+    points at an unpacked llama.cpp, and the finished model is queued for the
+    J3 gate (train/gate_candidate.json). Promotion still only happens when the
+    gate adopts it on an eval win.
+    """
+    import sys as _sys
+    cfg = ctx.cfg
+    t = getattr(cfg, "training", None)
+    if t is None or not getattr(t, "auto_qlora", False):
+        return {"skipped": "training.auto_qlora=false (opt-in; no surprise GPU burn)"}
+    try:
+        import torch
+        cuda = bool(getattr(torch, "cuda", None) and torch.cuda.is_available())
+    except Exception:
+        cuda = False
+    if not cuda:
+        return {"skipped": "no CUDA torch (train needs the cu124 stack)"}
+    for mod in ("transformers", "peft", "datasets", "bitsandbytes"):
+        try:
+            __import__(mod)
+        except Exception:
+            return {"skipped": f"missing HF stack module: {mod} (training/requirements.txt)"}
+    import json as _json
+    data = paths.TRAIN_DIR / "sft_v1.jsonl"
+    try:
+        n = sum(1 for ln in data.read_text(encoding="utf-8").splitlines() if ln.strip())
+    except Exception:
+        n = 0
+    min_n = int(getattr(t, "min_samples", 150) or 150)
+    if n < min_n:
+        return {"skipped": f"only {n} samples (< min_samples {min_n})"}
+    state_f = paths.TRAIN_DIR / "qlora_state.json"
+    try:
+        state = _json.loads(state_f.read_text(encoding="utf-8")) if state_f.exists() else {}
+    except Exception:
+        state = {}
+    interval = float(getattr(t, "min_interval_days", 7) or 7) * 86400.0
+    if time.time() - float(state.get("last_train_ts", 0) or 0) < interval:
+        return {"skipped": "adapter trained within min_interval_days"}
+    import datetime as _dt
+    import subprocess as _sp
+    tag = _dt.datetime.now().strftime("%Y%m%d")
+    out = paths.PROJECT_ROOT / "models" / f"bee-qlora-{tag}"
+    logf = paths.TRAIN_DIR / f"qlora_{tag}.log"
+    cmd = [_sys.executable, str(paths.PROJECT_ROOT / "training" / "qlora" / "train.py"),
+           "--data", str(data), "--out", str(out),
+           "--max-samples", str(int(getattr(t, "max_samples", 500) or 500))]
+    if str(getattr(t, "preset", "fast") or "fast") == "fast":
+        cmd.append("--fast")
+    try:
+        with logf.open("w", encoding="utf-8") as lf:
+            r = _sp.run(cmd, capture_output=False, stdout=lf, stderr=_sp.STDOUT,
+                        timeout=float(getattr(t, "max_seconds", 6 * 3600) or 6 * 3600))
+        ok = r.returncode == 0
+    except Exception as e:
+        return {"error": f"train launch failed: {e}"}
+    if ok:
+        state["last_train_ts"] = time.time()
+        state["last_out"] = str(out)
+        chain = _auto_chain(ctx, out, logf)
+        state["last_chain"] = chain
+        try:
+            state_f.write_text(_json.dumps(state, indent=1), encoding="utf-8")
+        except Exception:
+            pass
+        if chain.get("queued"):
+            note = f"merged, imported as {chain.get('model')}, queued for the J3 gate"
+        elif chain.get("note"):
+            note = chain["note"]
+        else:
+            note = f"merge/export incomplete: {chain.get('error', chain)}"
+        return {"trained": True, "out": str(out), "log": str(logf),
+                "chain": chain, "note": note}
+    return {"error": f"train.py exited nonzero (see {logf})"}
 
 
 def run_nightly(ctx) -> dict:
@@ -213,6 +390,7 @@ def run_nightly(ctx) -> dict:
     out["router"] = maybe_train_router(ctx)
     out["teach_back"] = maybe_teach_back(ctx)
     out["sft"] = maybe_build_sft(ctx)
+    out["qlora"] = maybe_train_qlora(ctx)
     from .memory.md import diary_add
     diary_add(f"nightly job: {out}")
     log.info("nightly job done: %s", out)
@@ -235,7 +413,7 @@ def _cron_time(cron: str) -> str:
 # The maintenance jobs this module owns. A test pins that this list matches the
 # specs actually registered, so the disable path can never pause a stale set.
 _SYSTEM_JOB_IDS = ("nightly_consolidate", "vector_rebuild", "memory_index_flush",
-                   "router_retrain", "teach_back", "sft_build", "log_rotation",
+                   "router_retrain", "teach_back", "sft_build", "qlora_train", "log_rotation",
                    "alert_scan", "skill_gate", "model_gate")
 
 
@@ -294,6 +472,9 @@ def _register_nightly_jobs(worker, cfg) -> None:
         ("sft_build", "SFT dataset rebuild",
          JobTrigger(kind="daily", time=_plus(75)),
          {"type": "function", "fn": "bee.scheduler.maybe_build_sft"}, 1800.0),
+        ("qlora_train", "QLoRA refresh (GPU-gated, opt-in via training.auto_qlora)",
+         JobTrigger(kind="daily", time=_plus(135)),
+         {"type": "function", "fn": "bee.scheduler.maybe_train_qlora"}, 21600.0),
         ("log_rotation", "rotate + cap all JSONL streams (M13)",
          JobTrigger(kind="daily", time=_plus(90)),
          {"type": "function", "fn": "bee.monitor.rotate_all"}, 1800.0),
@@ -334,8 +515,9 @@ def start_automation(ctx, cfg, kernel=None):
       at startup (worker.restore);
     * nightly maintenance becomes durable function jobs (never no-op);
     * agent_task jobs run through the SAME AgentKernel as interactive
-      requests — created here if absent and stored on ctx.kernel, which the
-      web /chat path then reuses (auto-deny approver: unattended);
+      requests; interactive owners (REPL, web) pass theirs in — when created
+      HERE the approver auto-denies (jobs have no browser stream attached,
+      so approvals fail closed either way);
     * proactive rules load from the store (user-authorized only).
     Returns the JobWorker, or None when automation is disabled/unavailable.
     """

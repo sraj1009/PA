@@ -190,3 +190,37 @@ def test_successive_different_tool_calls_are_not_locked(tmp_path):
     r = k.run("Read a.txt, b.txt and c.txt and tell me their contents", session_id="okflow")
     assert r.ok
     assert len(client.calls) == 4, "legitimate multi-step tool use must not be locked"
+
+
+# ------------------------------------------- /exit finalization deadlock (CLI)
+def test_repl_process_exits_after_slash_exit(tmp_path):
+    """`python -m bee repl` must EXIT — promptly — after /exit.
+
+    Observed 2026-10-17: the process hung for minutes AFTER '/exit'. CPython's
+    shutdown freezes daemon threads (TTS speaker, event watchers) wherever they
+    are; one frozen mid-import leaks the import lock, and a litellm __del__
+    importing aiohttp_transport then blocks on that lock forever (faulthandler
+    dump: the lock wait, main thread already inside finalization). cli._hard_exit
+    flushes and os._exit()s past finalization; this pins the process contract:
+    answer delivered, exit code 0, bounded time, real /metrics untouched
+    (BEE_WORKSPACE points at a temp dir).
+    """
+    if sys.platform != "win32":
+        pytest.skip("the freeze was observed on Windows (SAPI/COM shutdown path)")
+    import os
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    env = dict(os.environ, BEE_WORKSPACE=str(ws))
+    t0 = time.time()
+    p = subprocess.run(
+        [sys.executable, "-u", "-m", "bee", "repl", "--config", str(root / "config.yaml")],
+        input="what is 12 * 12\n/exit\n", text=True, capture_output=True,
+        encoding="utf-8", errors="replace", cwd=str(root), env=env, timeout=150)
+    elapsed = time.time() - t0
+    tail = (p.stdout or "")[-1500:] + "\n--stderr--\n" + (p.stderr or "")[-1200:]
+    assert p.returncode == 0, f"repl exited {p.returncode} after {elapsed:.1f}s:\n{tail}"
+    assert "12 * 12 = 144" in (p.stdout or ""), tail
+    assert elapsed < 120, f"repl took {elapsed:.1f}s — finalization deadlock back?\n{tail}"

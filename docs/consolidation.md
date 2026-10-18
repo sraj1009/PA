@@ -14,7 +14,8 @@
 1. Collect diary files older than 7 days.
 2. Local LLM summarizes them into ≤ 8 durable bullets.
 3. Bullets appended to `longterm.md` (dedupe by eyeball: agent edits).
-4. Old diary files pruned (they're in git history / backup if you keep one).
+4. Old diary files archived to `memory/diary/archive/` (never deleted — a bad
+   summary must not destroy the originals; see `bee/scheduler.py:56-72`).
 5. LanceDB index rebuilt from all current markdown.
 
 ## The self-improvement loops

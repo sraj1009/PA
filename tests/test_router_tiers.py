@@ -22,6 +22,22 @@ def test_explicit():
     assert _r("use cloud please")["name"] == "cloud"
 
 
+def test_vision_routes_to_cloud():
+    # bee4b is text-only: pictures go to the multimodal cloud tier
+    for task in ("describe this photo for me",
+                 "what is in this picture C:/pics/shot.png",
+                 "take a screenshot and tell me what you see",
+                 "read the text in diagram.jpg"):
+        r = _r(task)
+        if cfg.cloud.enabled and cfg.cloud.llm:
+            assert r["name"] == "cloud" and r["source"] == "vision", (task, r)
+    # ...but explicit offline intent still wins (privacy over capability)
+    assert _r("use local: describe this photo")["name"] == "local"
+    # ...and container references are not pictures
+    assert router.needs_vision("docker image prune -f") is False
+    assert router.needs_vision("list docker images") is False
+
+
 def test_deterministic():
     assert _r("2+2*3")["name"] == "det"
     assert _r("127*43+15")["name"] == "det"

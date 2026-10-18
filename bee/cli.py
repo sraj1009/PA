@@ -69,6 +69,8 @@ def _cmd_help(p: _Print):
         "  /skills          list skills\n"
         "  /mem <query>     search memory (hybrid vector+keyword)\n"
         "  /reflect         run self-review on the last task now\n"
+        "  /like | /dislike  rate the last answer (+1/-1) for training\n"
+        "  /correct <text>  supply the wording it should have used (teacher sample)\n"
         "  /consolidate     run memory consolidation now (diary -> longterm)\n"
         "  /eval            run the agent eval suite\n"
         "  /health          environment + service health check\n"
@@ -297,6 +299,35 @@ def _repl(cfg):
                     continue
                 lesson = reflection.reflect(ctx, last_task[0], last_task[1])
                 p.bee(lesson or "(nothing to add)")
+            elif cmd in ("/like", "/dislike", "/correct"):
+                # RLAIF input: rate the last answer (+1/-1) or supply the
+                # wording it should have used. Stored in memory/ratings.db;
+                # the nightly SFT build blocklists -1 tasks and trains on
+                # corrections, so feedback becomes weights automatically.
+                if last_task is None:
+                    p.error("no task to rate yet")
+                    continue
+                from .memory import ratings as _ratings
+                task_text, res = last_task[0], last_task[1]
+                out_text = getattr(res, "output", "") or ""
+                model = getattr(res, "model", "") or ""
+                if cmd == "/correct" and not arg:
+                    p.error("usage: /correct <what the answer should have said>")
+                    continue
+                rating = -1 if cmd in ("/dislike", "/correct") else +1
+                try:
+                    _ratings.record(task_text, out_text, rating,
+                                    correction=arg if cmd == "/correct" else "",
+                                    model=model, source="repl")
+                except ValueError as e:
+                    p.error(f"not recorded: {e}")
+                    continue
+                if cmd == "/like":
+                    p.bee("recorded +1 — similar answers stay in the training set.")
+                elif cmd == "/dislike":
+                    p.bee("recorded -1 — this task is blocklisted from future training.")
+                else:
+                    p.bee("correction recorded — it becomes a teacher sample tonight.")
             elif cmd == "/consolidate":
                 from . import scheduler
                 out = scheduler.run_nightly(ctx)
@@ -414,7 +445,11 @@ def _repl(cfg):
                         p.info(f"  promotion: {pr.get('from')} -> {pr.get('to')} "
                                f"({pr.get('before')} -> {pr.get('after')})  {pr.get('ts', '')}")
                     p.info(f"  candidate: {cfg.model_gate.candidate or '(none — set model_gate.candidate in config.yaml)'}  "
-                           f"margin: {cfg.model_gate.margin}")
+                           f"margin: {cfg.model_gate.margin}  "
+                           f"adjudication: {getattr(cfg.model_gate, 'adjudication_rounds', 0)}")
+                    _queued = mgate.pending_candidate()
+                    if _queued:
+                        p.info(f"  queued (auto-chain): {_queued} — the nightly gate consumes it")
                 elif sub == "baseline":
                     try:
                         r = mgate.set_baseline(ctx, val or None)
@@ -520,13 +555,14 @@ def _repl(cfg):
             p.info("  (cancelled)")
         else:
             p.bee(result.output)
-            # text AND voice output: speak the answer when TTS is enabled (/tts off to mute)
+            # text AND voice output: speak the answer when TTS is enabled (/tts off
+            # to mute). Queue it — an inline call stalled the prompt (and /exit)
+            # behind the full TTS backend timeouts on a wedged audio stack;
+            # failures are logged by the speaker worker.
             if result.ok and cfg.voice.enabled and cfg.voice.speak:
                 try:
                     from .voice import speak as _speak
-                    if not _speak.speak(result.output, cfg):
-                        log.info("TTS produced no audio — backend missing or "
-                                 "playback failed (see /tts voices)")
+                    _speak.enqueue(result.output, cfg)
                 except Exception as e:
                     log.warning("TTS raised: %s: %s", type(e).__name__, e)
             meta = f"model={result.model} iters={result.iterations} tools={result.tool_calls}"
@@ -573,7 +609,10 @@ def _web(cfg, host: str, port: int):
     from .webapp import app
     from .agent.context import create_context
     from . import webapp
-    ctx = create_context(cfg)
+    # Unattended surface: a guard 'ask' must never call input() from a
+    # worker thread. The interactive kernel below answers via the browser
+    # card and falls back to deny when no stream is attached.
+    ctx = create_context(cfg, guard_mode="unattended")
     from .agent import engines
     engine = engines.ask_engine()
     ctx.model_override = engines.override_for(engine)
@@ -585,7 +624,11 @@ def _web(cfg, host: str, port: int):
     print(f"  (saved to temp/web_token.txt — git-ignored; override with BEE_WEB_TOKEN in .env)\n")
     try:
         from . import scheduler
-        scheduler.start_automation(ctx, cfg)
+        # Interactive kernel FIRST (found live 2026-10-17): start_automation
+        # would otherwise install an auto-deny kernel on ctx, and every
+        # /chat permission ask would silently reuse it — the browser never
+        # saw a card for gated calls.
+        scheduler.start_automation(ctx, cfg, kernel=webapp.get_kernel(ctx))
     except Exception:
         pass
     # pre-warm the STT model in the background so the first voice upload
@@ -880,6 +923,43 @@ def setup_logging(level: str = "") -> None:
     root._bee_configured = True
 
 
+def _hard_exit(code) -> None:
+    """Flush user-visible state, then os._exit — skipping CPython finalization.
+
+    The CLI spawns daemon threads (TTS speaker, event watchers, automation,
+    native boot). At interpreter shutdown CPython freezes daemons wherever
+    they are; a daemon frozen mid-import leaks the import lock, and the next
+    finalizer can then block forever. Observed on this machine: every
+    `python -m bee repl` hung AFTER `/exit` for minutes — faulthandler dump:
+    a litellm __del__ importing aiohttp_transport stuck on the module lock,
+    main thread already gone (inside Py_FinalizeEx). Task receipts and ratings
+    are written per task, so everything user-visible is already durable:
+    release the native daemon if we launched it, flush the log handlers, and
+    leave deterministically.
+    """
+    if code is None:
+        code = 0
+    elif not isinstance(code, int):
+        sys.stderr.write(f"{code}\n")
+        code = 1
+    try:
+        from . import native as _native
+        _native.stop()               # no-op unless THIS process launched it
+    except Exception:
+        pass
+    try:
+        import logging as _logging
+        _logging.shutdown()          # flush file/CSV handlers
+    except Exception:
+        pass
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.flush()
+        except Exception:
+            pass
+    os._exit(code)
+
+
 def main(argv=None):
     # Windows consoles default to cp1252 — force UTF-8 so symbols never crash the CLI
     for _s in (sys.stdout, sys.stderr):
@@ -993,4 +1073,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        _hard_exit(main())
+    except SystemExit as e:          # modes that call sys.exit() inside main()
+        _hard_exit(e.code)
+    except KeyboardInterrupt:        # Ctrl-C at shutdown must still leave
+        _hard_exit(130)

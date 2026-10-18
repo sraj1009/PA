@@ -10,6 +10,7 @@ Run:  python -m bee.cli web          (or: uvicorn bee.webapp:app --port 8787)
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -43,10 +44,12 @@ _TOKEN_FILE = paths.PROJECT_ROOT / "temp" / "web_token.txt"
 def _resolve_token() -> str:
     """Bearer token for the web UI. Precedence:
     1. BEE_WEB_TOKEN env (operator-fixed, e.g. in .env)
-    2. previous start's token file (temp/web_token.txt)
-    3. freshly generated (saved to that file, printed once by the CLI)
-    This is a LOCAL session credential for a loopback server — not a cloud
-    secret — but it still gates the full agent, so it is never logged."""
+    2. freshly generated per start (saved to temp/web_token.txt, printed
+       once by the CLI). Previous starts' tokens are NOT reused: a leaked
+       token dies with the process that minted it, and the web UI re-prompts
+       on 401. This is a LOCAL session credential for a loopback server —
+       not a cloud secret — but it still gates the full agent, so it is
+       never logged and its file gets owner-only permissions."""
     global _TOKEN
     if _TOKEN:
         return _TOKEN
@@ -54,15 +57,14 @@ def _resolve_token() -> str:
     if env:
         _TOKEN = env
         return _TOKEN
-    if _TOKEN_FILE.exists():
-        t = _TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if t:
-            _TOKEN = t
-            return _TOKEN
     _TOKEN = secrets.token_hex(16)
     try:
         _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
         _TOKEN_FILE.write_text(_TOKEN + "\n", encoding="utf-8")
+        try:
+            os.chmod(_TOKEN_FILE, 0o600)
+        except Exception:
+            pass  # Windows ACLs: best effort; loopback + rotation carry the weight
     except Exception:
         pass
     return _TOKEN
@@ -74,12 +76,12 @@ def reset_token_for_tests() -> None:
 
 
 def require_auth(request: Request) -> None:
-    """401 unless Authorization: Bearer <token> (or ?token=) matches."""
+    """401 unless Authorization: Bearer <token> matches. Header-only: a
+    ?token= query parameter used to be accepted, putting the full-agent
+    credential in browser history, proxy logs, and referers — removed."""
     tok = _resolve_token()
     auth = request.headers.get("authorization", "")
     provided = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-    if not provided:
-        provided = request.query_params.get("token", "")
     # Compare BYTES: hmac.compare_digest raises TypeError on strings that
     # contain non-ASCII, so an odd-shaped (or deliberately malformed) header
     # used to answer 500 instead of 401. A 500 also leaks that the handler
@@ -108,14 +110,83 @@ def get_ctx() -> Context:
         # stdin. guard mode "cli" would make a guard 'ask' call input() from
         # a worker thread (hangs the web worker, or worse, steals a keypress
         # typed into the console) — fail closed instead (audit 2026-10-06).
-        # /chat is unaffected: its kernel already auto-denies 'ask'.
+        # /chat is the exception: its kernel carries the SSE permission card
+        # and fails closed only when no browser stream is attached.
         CTX = create_context(cfg, guard_mode="unattended")
         try:
             from . import scheduler
-            scheduler.start_automation(CTX, cfg)
+            # Register the interactive kernel BEFORE automation starts:
+            # start_automation() reuses ctx.kernel when present and otherwise
+            # installs one with an auto-deny approver — which get_kernel()
+            # would silently reuse, so the browser never saw a permission
+            # card (found live 2026-10-17: `import os` was denied in /chat).
+            scheduler.start_automation(CTX, cfg, kernel=get_kernel(CTX))
         except Exception as e:
             log.warning("automation not started: %s", e)
     return CTX
+
+
+def get_kernel(ctx):
+    """Kernel for web routes, built once with the interactive approver.
+
+    Every data route (/chat, /voice, ...) must run through THIS builder.
+    /voice used to reference a get_kernel() that was never defined, so every
+    voice upload died with a NameError->500 before the kernel ever ran.
+    """
+    if getattr(ctx, "kernel", None) is None:
+        from .kernel import AgentKernel
+        ctx.kernel = AgentKernel(ctx, approver=_web_approver)
+    return ctx.kernel
+
+
+# ------------------------------------------------------- interactive approval
+# The web server is unattended, so every guard 'ask' ("import os", file
+# writes, capability confirmations) used to auto-deny — the same task worked
+# in the REPL and failed in the browser. Now a /chat stream can carry the
+# question to the human: the approver pushes a permission_request event onto
+# the caller's SSE queue and waits for the browser's decision
+# (POST /permission, bearer-authed, one-time id). Surfaces without a watching
+# stream (/voice uploads, scheduled jobs) keep the fail-closed behavior, and
+# timeout or a closed tab also denies.
+APPROVAL_TIMEOUT = 100.0        # < the /chat SSE stall timeout (120s)
+_APPROVALS: dict[str, tuple] = {}
+_APPROVALS_LOCK = threading.Lock()
+_TLS = threading.local()        # approver runs on the kernel.run() caller's thread
+
+
+def _web_approver(tool: str, args: dict, reason: str) -> bool:
+    q = getattr(_TLS, "queue", None)
+    if q is None:
+        return False            # no human attached -> fail closed (unchanged)
+    try:
+        from .guard import preview_call
+        preview = preview_call(tool, args)
+    except Exception:
+        preview = ""
+    rid = uuid.uuid4().hex
+    box = {"grant": False}
+    ev = threading.Event()
+    with _APPROVALS_LOCK:
+        _APPROVALS[rid] = (ev, box)
+    try:
+        q.put({"type": "permission_request", "id": rid, "tool": tool,
+               "reason": reason, "preview": preview})
+        granted = False
+        deadline = time.time() + APPROVAL_TIMEOUT
+        while time.time() < deadline:
+            if ev.wait(0.5):
+                granted = bool(box["grant"])
+                break
+            # Stop must interrupt a pending approval, not wait out the timeout
+            c = getattr(getattr(_TLS, "ctx", None), "cancel_event", None)
+            if isinstance(c, threading.Event) and c.is_set():
+                break
+    except Exception:
+        granted = False
+    finally:
+        with _APPROVALS_LOCK:
+            _APPROVALS.pop(rid, None)
+    return granted
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -183,6 +254,25 @@ def cancel_task(request: Request):
                     "no task was running — nothing to stop"}
 
 
+@app.post("/permission")
+async def permission(body: dict, request: Request):
+    """Answer a pending guard 'ask' from the browser (the Allow/Deny card).
+
+    Bearer-authed like every stateful route; the id is a one-time random
+    value that only exists while its task is actually waiting, so a stale or
+    guessed id is a 404 — and never a grant."""
+    require_auth(request)
+    rid = str(body.get("id") or "")
+    with _APPROVALS_LOCK:
+        entry = _APPROVALS.get(rid)
+    if entry is None:
+        return JSONResponse({"error": "unknown or expired approval"}, status_code=404)
+    ev, box = entry
+    box["grant"] = bool(body.get("grant"))
+    ev.set()
+    return {"ok": True, "granted": box["grant"]}
+
+
 @app.post("/chat")
 async def chat(body: dict, request: Request):
     require_auth(request)
@@ -203,22 +293,25 @@ async def chat(body: dict, request: Request):
         # Phase 2: web tasks run through the kernel too (state, verification,
         # receipts, session continuity). The web UI is unattended: 'ask'
         # decisions AUTO-DENY (fail closed) instead of blocking on input().
-        if ctx.kernel is None:
-            from .kernel import AgentKernel
-            ctx.kernel = AgentKernel(ctx, approver=lambda tool, args, reason: False)
+        k = get_kernel(ctx)
         q: "queue.Queue" = queue.Queue()
 
         def on_event(ev):
             q.put(ev)
 
         def worker():
+            # approvals raised by THIS task must come back to THIS browser
+            # stream (thread-local: the kernel serializes runs, so the only
+            # task executing is the one whose thread registered the queue)
+            _TLS.queue = q
+            _TLS.ctx = ctx
             try:
-                result = ctx.kernel.run(task, session_id=str(body.get("session") or "web"),
-                                        on_event=on_event, model=model,
-                                        # truthy on_token switches the loop to
-                                        # genuine chat_stream; token events
-                                        # also arrive live through on_event
-                                        on_token=lambda _t: None)
+                result = k.run(task, session_id=str(body.get("session") or "web"),
+                               on_event=on_event, model=model,
+                               # truthy on_token switches the loop to
+                               # genuine chat_stream; token events
+                               # also arrive live through on_event
+                               on_token=lambda _t: None)
                 q.put({"type": "result", "ok": result.ok,
                        "model": result.model, "escalated": result.escalated,
                        "iterations": result.iterations,
@@ -228,6 +321,8 @@ async def chat(body: dict, request: Request):
             except Exception as e:
                 q.put({"type": "error", "error": f"{type(e).__name__}: {e}"})
             finally:
+                _TLS.queue = None
+                _TLS.ctx = None
                 q.put(None)
 
         th = threading.Thread(target=worker, daemon=True, name="BeeWebChat")
@@ -249,7 +344,12 @@ async def chat(body: dict, request: Request):
 
 @app.post("/voice")
 async def voice(request: Request, file: UploadFile = File(...)):
-    """Upload audio (webm/wav/mp3) -> transcribe -> run agent -> return JSON (transcript + answer text)."""
+    """Upload audio (webm/wav/mp3) -> transcribe -> run agent -> return JSON (transcript + answer text).
+
+    EVERY blocking step (ffmpeg decode, STT, kernel run) goes through
+    asyncio.to_thread: they used to run inline on the event loop, so the whole
+    server — /health, /face/state, and /cancel itself — froze for the whole
+    task (minutes on a model call)."""
     require_auth(request)
     if not _voice_available():
         return JSONResponse({"error": "voice STT not installed (pip install -r requirements-voice.txt)"},
@@ -259,7 +359,8 @@ async def voice(request: Request, file: UploadFile = File(...)):
     suffix = Path(file.filename or "audio.webm").suffix or ".webm"
     tmp = Path(tempfile.gettempdir()) / f"bee_upload_{uuid.uuid4().hex}{suffix}"
     tmp.write_bytes(await file.read())
-    try:
+
+    def _decode_and_transcribe() -> str:
         if suffix in (".wav",):
             audio, _ = mic.read_wav(tmp, target_rate=16000)
         else:
@@ -267,16 +368,21 @@ async def voice(request: Request, file: UploadFile = File(...)):
             wav = tmp.with_suffix(".wav")
             import subprocess, shutil
             if not shutil.which("ffmpeg"):
-                return JSONResponse({"error": "ffmpeg required to decode non-wav uploads"}, status_code=501)
+                raise RuntimeError("ffmpeg required to decode non-wav uploads")
             subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(tmp),
                             "-ar", "16000", "-ac", "1", "-f", "wav", str(wav)], timeout=60)
             audio, _ = mic.read_wav(wav, target_rate=16000)
-        text = transcribe.transcribe_audio(audio, model=ctx.cfg.voice.model,
+        return transcribe.transcribe_audio(audio, model=ctx.cfg.voice.model,
                                            device=ctx.cfg.voice.device,
                                            compute_type=ctx.cfg.voice.compute_type)
+
+    try:
+        text = await asyncio.to_thread(_decode_and_transcribe)
     except Exception as e:
         log.exception("voice endpoint failed")
-        return JSONResponse({"error": f"voice pipeline failed: {str(e)[:200]}"}, status_code=500)
+        code = 501 if "ffmpeg required" in str(e) else 500
+        return JSONResponse({"error": f"voice pipeline failed: {str(e)[:200]}"},
+                            status_code=code)
     finally:
         try:
             tmp.unlink()
@@ -287,7 +393,7 @@ async def voice(request: Request, file: UploadFile = File(...)):
     # Audit item 1: /voice runs through the SAME kernel as /chat (capability
     # gate, receipts, verification, telemetry) instead of raw run_agent.
     k = get_kernel(ctx)
-    tr = k.run(text, session_id="voice")
+    tr = await asyncio.to_thread(k.run, text, "voice")
     res = tr.agent_result
     return {"transcript": text, "output": tr.output, "ok": tr.ok,
             "model": res.model if res else None,
@@ -434,4 +540,10 @@ def livekit_state_push(body: dict, request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8787)
+
+    from .cli import _hard_exit
+    try:
+        uvicorn.run(app, host="127.0.0.1", port=8787)
+    except KeyboardInterrupt:
+        pass
+    _hard_exit(0)   # same finalization-deadlock guard as `python -m bee web`

@@ -9,9 +9,9 @@
 #                                  exactness: python -m bee.pipeline.train_router
 #   * CI 'ml' job installs THIS file, then runs: pytest tests -q -m ml
 #
-# requirements.txt intentionally keeps loose lower bounds for the rest of the
-# app; the ML stack is pinned here, separately, because serialized models are
-# sensitive to it.
+# requirements.txt is pinned to the same verified set (2026-10-15);
+# the ML stack is ALSO pinned here, separately, because serialized models
+# are sensitive to it — keep the four versions below identical in both files.
 # ============================================================
 scikit-learn==1.9.0
 numpy==2.4.6

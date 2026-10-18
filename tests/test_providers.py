@@ -159,3 +159,105 @@ def test_loop_cloud_up_uses_registry_not_hardcoded(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-oai")
     ok, reason = cloud_available(_cfg(llm="deepseek/deepseek-chat"))
     assert ok and "legacy" in reason            # labelled fallback, still honest
+
+
+# --------------------------------------- P0-2 second-provider quota failover
+def test_zai_provider_kind_and_keys(monkeypatch):
+    monkeypatch.setenv("ZAI_API_KEY", "zk-1")
+    monkeypatch.delenv("ZHIPUAI_API_KEY", raising=False)
+    assert providers.kind_for_model("zai/glm-5.3-flash") == ProviderKind.ZAI
+    assert providers.kind_for_model("zhipuai/glm-4") == ProviderKind.ZAI   # legacy spelling
+    assert env_key_for("zai/glm-5.3-flash") == "zk-1"
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    monkeypatch.setenv("ZHIPUAI_API_KEY", "zk-old")
+    assert providers.key_for(ProviderKind.ZAI) == "zk-old"
+
+
+def test_cloud_available_fallback_only(monkeypatch):
+    for v in _ALL_KEYS + ("ZAI_API_KEY", "ZHIPUAI_API_KEY"):
+        monkeypatch.delenv(v, raising=False)
+    c = _cfg(llm="gemini/gemini-3-flash-preview")
+    c.cloud.fallback_llm = "zai/glm-5.3-flash"
+    ok, reason = cloud_available(c)
+    assert not ok and "no API key" in reason       # uncredentialed fallback changes nothing
+    c.cloud.fallback_api_key = "sk-zai"
+    ok, reason = cloud_available(c)
+    assert ok and "fallback-only" in reason and "zai" in reason
+
+
+def _failover_client(monkeypatch):
+    """Config with a credentialed zai fallback + fresh cooldown state."""
+    from types import SimpleNamespace
+    from bee.agent import client as client_mod
+    if not client_mod.HAS_LITELLM:
+        pytest.skip("litellm not installed")
+    for v in _ALL_KEYS + ("ZAI_API_KEY", "ZHIPUAI_API_KEY"):
+        monkeypatch.delenv(v, raising=False)
+    c = _cfg(llm="gemini/gemini-3-flash-preview", api_key="sk-primary")
+    c.cloud.fallback_llm = "zai/glm-5.3-flash"
+    c.cloud.fallback_api_key = "sk-zai"
+    monkeypatch.setattr(client_mod, "_COOLDOWN", {})
+    return c, client_mod, SimpleNamespace
+
+
+def test_cloud_failover_switches_and_cools(monkeypatch):
+    """A rate-limited primary retries the SAME call on the second provider,
+    and the primary cools so later calls skip it (no re-probe of a known-
+    exhausted quota)."""
+    c, client_mod, SimpleNamespace = _failover_client(monkeypatch)
+    calls = []
+
+    def fake_completion(**kw):
+        calls.append(kw)
+        if str(kw["model"]).startswith("gemini"):
+            raise Exception("429 rate limit exceeded for gemini free tier")
+        msg = SimpleNamespace(content="answer from glm", tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)], usage=None)
+
+    monkeypatch.setattr(client_mod.litellm, "completion", fake_completion)
+    cl = client_mod.LLMClient(c)
+    out = cl.chat("cloud", [{"role": "user", "content": "hi"}], max_retries=0)
+    assert out["content"] == "answer from glm"
+    assert [k["model"] for k in calls] == ["gemini/gemini-3-flash-preview",
+                                           "zai/glm-5.3-flash"]
+    # per-call credentials never cross providers
+    assert calls[0].get("api_key") == "sk-primary"
+    assert calls[1].get("api_key") == "sk-zai"
+    # the primary is cooling: the NEXT call goes straight to the fallback
+    calls.clear()
+    out2 = cl.chat("cloud", [{"role": "user", "content": "again"}], max_retries=0)
+    assert out2["content"] == "answer from glm"
+    assert [k["model"] for k in calls] == ["zai/glm-5.3-flash"]
+
+
+def test_cloud_failover_requires_fallback_credentials(monkeypatch):
+    c, client_mod, _ = _failover_client(monkeypatch)
+    c.cloud.fallback_api_key = ""                  # no config key, no env key
+
+    def fake_completion(**kw):
+        raise Exception("429 rate limit exceeded")
+
+    monkeypatch.setattr(client_mod.litellm, "completion", fake_completion)
+    cl = client_mod.LLMClient(c)
+    with pytest.raises(client_mod.LLMError) as ei:
+        cl.chat("cloud", [{"role": "user", "content": "hi"}], max_retries=0)
+    assert ei.value.kind == "rate_limit"
+    assert client_mod._COOLDOWN == {}              # nothing cooled without a fallback
+
+
+def test_expired_cooldown_probes_primary_again(monkeypatch):
+    import time
+    c, client_mod, SimpleNamespace = _failover_client(monkeypatch)
+    client_mod._COOLDOWN["gemini"] = time.time() - 1     # stale cooldown
+    calls = []
+
+    def fake_completion(**kw):
+        calls.append(kw)
+        msg = SimpleNamespace(content=f"from {kw['model']}", tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)], usage=None)
+
+    monkeypatch.setattr(client_mod.litellm, "completion", fake_completion)
+    cl = client_mod.LLMClient(c)
+    out = cl.chat("cloud", [{"role": "user", "content": "hi"}], max_retries=0)
+    assert out["content"].startswith("from gemini")
+    assert [k["model"] for k in calls] == ["gemini/gemini-3-flash-preview"]

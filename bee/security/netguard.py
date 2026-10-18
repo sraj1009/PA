@@ -13,6 +13,9 @@ Rules (fail closed):
       192.168/16, fc00::/7), link-local (169.254.0.0/16, fe80::/10),
       unspecified (0.0.0.0, ::), multicast, CGNAT (100.64.0.0/10)
   - EVERY redirect hop is re-validated (open redirect bypass protection)
+  - the response host is re-resolved AFTER the fetch and the body is
+    discarded if DNS flipped to non-public in between (TOCTOU narrowing:
+    a flip can still open the connection, but hijacked bytes are never used)
   - connect + read timeouts enforced
   - response size cap enforced while streaming
   - content-type allow-list enforced
@@ -169,6 +172,36 @@ def safe_get(url: str, *,
                     raise NetGuardError(f"too many redirects (>{max_redirects})")
                 current = urljoin(str(resp.url), resp.headers["location"])
                 continue
+            # DNS-rebinding TOCTOU: the pre-fetch validate_url() resolved the
+            # host, but the client re-resolved independently at connect time —
+            # a record that flipped to non-public in between would silently
+            # serve attacker-chosen bytes. Re-resolve the host we actually
+            # talked to and refuse to USE a response whose post-hoc
+            # resolution is no longer public (IP literals were classified
+            # directly above and need no DNS round-trip).
+            host_now = (urlparse(current).hostname or "").lower()
+            try:
+                ipaddress.ip_address(host_now)
+                literal = True
+            except ValueError:
+                literal = False
+            if not literal:
+                try:
+                    ips_now = resolver(host_now)
+                except Exception as e:
+                    raise NetGuardError(
+                        f"post-fetch dns failure for {host_now}: "
+                        f"{str(e)[:120]} — discarding response")
+                if not ips_now:
+                    raise NetGuardError(
+                        f"post-fetch dns returned no addresses for {host_now} "
+                        "— discarding response")
+                for ip in ips_now:
+                    cls = _ip_class(ip)
+                    if cls:
+                        raise NetGuardError(
+                            f"dns for {host_now} changed mid-fetch to a {cls} "
+                            f"address ({ip}) — discarding response")
             ct = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
             ct_base = ct.split("+", 1)[0]
             if ct and ct not in allowed_content_types and ct_base not in allowed_content_types:

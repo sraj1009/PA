@@ -36,9 +36,44 @@ def print_status(cfg):
     return True
 
 
+def _voice_gate_confirmer(cap, reason: str) -> bool:
+    """Terminal approval for capability asks in voice mode.
+
+    Voice has no kernel approver UI, so without this every ASK-policy tool
+    would silently skip authorization (gate is None on kernel-less contexts)
+    or auto-deny. The terminal is present in voice mode, so ask there —
+    fail closed on any error or empty answer.
+    """
+    try:
+        print(f"  [permission] {getattr(cap, 'id', cap)}: {reason}")
+        ans = input("  approve? [y/N] ").strip().lower()
+        return ans in ("y", "yes")
+    except Exception:
+        return False
+
+
+def _ensure_gate(ctx) -> None:
+    """Attach a capability gate to kernel-less voice contexts.
+
+    The REPL/web/LiveKit paths get theirs from AgentKernel; standalone and
+    REPL voice loops build a bare create_context() with gate None, which the
+    agent loop then skips entirely. Attach a terminal-confirming gate so
+    voice tool calls are authorized, never skipped.
+    """
+    if getattr(ctx, "capability_gate", None) is not None:
+        return
+    try:
+        from ..security.capabilities import CapabilityGate, CapabilityStore
+        ctx.capability_gate = CapabilityGate(CapabilityStore(),
+                                             confirmer=_voice_gate_confirmer)
+    except Exception as e:
+        log.warning("voice capability gate unavailable: %s", e)
+
+
 def run_voice_loop(ctx, on_event=None, max_rounds: int = 0) -> None:
     from ..agent.loop import run_agent
     cfg = ctx.cfg
+    _ensure_gate(ctx)
     if not print_status(cfg):
         return
     wake = (cfg.voice.wake_word or "").lower()

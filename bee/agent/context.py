@@ -304,6 +304,57 @@ def build_sub_system(ctx: Context) -> str:
     )
 
 
+def canonical_system_prompt(cfg: Config | None = None) -> str:
+    """Stable counterpart of `build_system_prompt` for SFT/inference parity (P1).
+
+    Training rows used to be user-first with NONE of what inference carries (the
+    system prompt + tool surface, ~8k est tokens), so the model never saw the
+    frame it actually answers in. This renders the same STRUCTURE with
+    context-independent content: identity/persona, the environment rules, and
+    the tool surface the local route advertises (name + one-line description
+    from the P0-1 fitted subset). The full JSON schemas are deliberately NOT
+    inlined here: measured 8,330 chars ~= 2.1k tokens for the subset alone,
+    which does not fit this box's training budget (seq 2048/4096), while the
+    call FORMAT is already taught by the tool-call examples. The vocabulary and
+    the behavioral frame are what training was missing.
+    """
+    if cfg is None:
+        try:
+            from ..config import load_config
+            cfg = load_config()
+        except Exception:
+            cfg = None
+    u = getattr(cfg, "user", None)
+    who = ""
+    if u is not None and getattr(u, "name", ""):
+        region = f" · region: {u.region}" if getattr(u, "region", "") else ""
+        who = (f"\n## Who I serve\n- Name: **{u.name}** — address them as \"{u.name}\" "
+               f"when natural (never as 'user'). Timezone: {u.timezone}{region}.\n")
+    try:
+        from ..tools import LOCAL_TOOL_NAMES, build_default_tools
+        lines = []
+        for t in build_default_tools():
+            if t.name in LOCAL_TOOL_NAMES:
+                d = (t.description or "").strip().split("\n")[0]
+                lines.append(f"- {t.name} — {d[:90]}")
+        tool_block = "\n".join(lines) or "(no tools)"
+    except Exception:
+        tool_block = "(tool list unavailable)"
+    return f"""# BEE
+
+{PERSONA}
+
+## Environment
+- Workspace: the session workspace — all file/shell/code operations stay inside it.
+- Local model via Ollama; a cloud model is used for harder tasks when configured.
+- **Act, don't refuse:** for action tasks (open/launch/visit/check/compute), call a tool immediately — never reply that you cannot do it. If a tool fails, report the failure and the next step.
+- **Shell 'start' needs full URLs:** to open a site in the browser use `start "" "https://domain"`.
+{who}
+## Tools available (call them with JSON arguments)
+{tool_block}
+"""
+
+
 def _token_estimate(messages: list[dict], tools: list | None) -> int:
     """Cheap prompt-size estimator used for history budgeting.
 

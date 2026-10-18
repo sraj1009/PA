@@ -22,8 +22,9 @@ import time
 
 import pytest
 
-from bee.agent.client import LLMError
+from bee.agent.client import LLMClient, LLMError
 from bee.agent.context import Context
+from bee.agent.loop import run_agent
 from bee.config import load_config
 from bee.kernel import AgentKernel, AgentEventKind, TaskState
 
@@ -646,6 +647,145 @@ def test_a_non_plan_request_is_not_appended_with_plan_text(tmp_path, monkeypatch
     ])
     res = k.run("what is in the sales file?")
     assert "Plan as produced" not in res.output, res.output
+
+
+# ------------------------------------------------ P1: plan-first execution
+class PlanFirstClient(LLMClient):
+    """A REAL LLMClient (so the loop's real-client gates fire, exactly as they
+    do against Ollama) with a scripted chat() — no model, no network."""
+
+    def __init__(self, cfg, script):
+        super().__init__(cfg)
+        self.script = list(script)
+        self.calls: list[tuple] = []
+
+    def chat(self, name, messages, tools=None, **kw):
+        self.calls.append((name, [dict(m) for m in messages], dict(kw)))
+        if not self.script:
+            return {"content": "(scripted: no reply left)", "usage": {}}
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        if isinstance(item, str):
+            return {"content": item, "usage": {}}
+        return item
+
+    def chat_stream(self, name, messages, on_token=None, tools=None, **kw):
+        out = self.chat(name, messages, tools=tools, **kw)
+        if on_token and out.get("content"):
+            on_token(out["content"])
+        return out
+
+    def ollama_up(self):
+        return True
+
+    def models_list(self):
+        return ["bee4b"]
+
+
+def _plan_ctx(tmp_path, script, plan_first=True):
+    cfg = load_config()
+    cfg.cloud.enabled = False           # no real provider calls, ever
+    cfg.workspace = tmp_path
+    cfg.learning.plan_first = plan_first
+    client = PlanFirstClient(cfg, script)
+    ctx = Context(cfg, workspace=tmp_path, client=client, guard_on=True,
+                  guard_mode="unattended", episodes_on=False, rag_on=False,
+                  cancel_event=threading.Event())
+    return ctx, client
+
+
+MULTI_STEP_TASK = "Merge the two notes files, then write merged.txt into the workspace."
+PLAN_STEPS_SIMPLE = ("1. Read notes_a.txt and notes_b.txt with file_read\n"
+                     "2. Merge their contents\n"
+                     "3. Write merged.txt with file_write")
+
+
+def test_plan_first_runs_the_planner_before_a_multi_step_task(tmp_path, monkeypatch):
+    """P1: the planner used to run only when the user asked for a plan, as a
+    post-hoc rescue. A multi-step task now gets its plan BEFORE the loop and the
+    steps are injected into the working context."""
+    _no_fastpath(monkeypatch)
+    ctx, client = _plan_ctx(tmp_path, [PLAN_STEPS_SIMPLE, "Notes summary: two short files."])
+    res = run_agent(ctx, MULTI_STEP_TASK)
+    assert len(client.calls) == 2, [c[0] for c in client.calls]
+    # call 0 is the planner prompt; call 1 is the executing loop
+    assert "You are a planner" in str(client.calls[0][1][-1].get("content")), client.calls[0][1]
+    seen = " ".join(str(m.get("content")) for m in client.calls[1][1])
+    assert "[plan-first]" in seen and "1. Read notes_a.txt" in seen, seen[-600:]
+    # an execution request is told to FOLLOW the plan
+    assert "following these steps" in seen, seen[-600:]
+    assert res is not None
+
+
+def test_plan_first_switch_off_restores_the_old_single_call(tmp_path, monkeypatch):
+    _no_fastpath(monkeypatch)
+    ctx, client = _plan_ctx(tmp_path, ["Plain answer."], plan_first=False)
+    run_agent(ctx, MULTI_STEP_TASK)
+    assert len(client.calls) == 1, [c[0] for c in client.calls]
+    seen = " ".join(str(m.get("content")) for m in client.calls[0][1])
+    assert "[plan-first]" not in seen
+
+
+def test_plan_first_skips_single_action_tasks(tmp_path, monkeypatch):
+    """An ordinary one-tool request must not pay for an extra planner call."""
+    _no_fastpath(monkeypatch)
+    ctx, client = _plan_ctx(tmp_path, ["The note says hi."])
+    run_agent(ctx, "Read the file notes.txt in the workspace.")
+    assert len(client.calls) == 1, [c[0] for c in client.calls]
+
+
+def test_plan_first_never_fires_for_test_double_clients(tmp_path, monkeypatch):
+    """The call-order contract this suite depends on: a scripted stand-in that
+    is not a real LLMClient must see an untouched call sequence (SCRIPTED-LLM
+    tests break if an implicit model call fires — same rule as critique)."""
+    _no_fastpath(monkeypatch)
+    cfg = load_config()
+    cfg.cloud.enabled = False
+    cfg.workspace = tmp_path
+    client = ScriptedClient(["Plain answer."])       # deliberately NOT an LLMClient
+    ctx = Context(cfg, workspace=tmp_path, client=client, guard_on=True,
+                  guard_mode="unattended", episodes_on=False, rag_on=False,
+                  cancel_event=threading.Event())
+    run_agent(ctx, MULTI_STEP_TASK)
+    assert len(client.calls) == 1, [c[0] for c in client.calls]
+
+
+def test_plan_first_failure_never_blocks_execution(tmp_path, monkeypatch):
+    """A planner outage degrades to the old behavior — the task still runs."""
+    _no_fastpath(monkeypatch)
+    ctx, client = _plan_ctx(tmp_path, [LLMError("planner down"), "Plain answer."])
+    res = run_agent(ctx, MULTI_STEP_TASK)
+    assert res is not None and "Plain answer." in (res.output or "")
+    seen = " ".join(str(m.get("content")) for m in client.calls[-1][1])
+    assert "[plan-first]" not in seen
+
+
+def test_plan_first_runs_for_a_plan_request_through_the_kernel(tmp_path, monkeypatch):
+    """plan_complex: 'Use the planner tool.' The plan is produced BEFORE the
+    model's answer, so the answer can build on it (the A45b post-hoc relay is
+    now the backstop, not the mechanism)."""
+    _no_fastpath(monkeypatch)
+    cfg = load_config()
+    cfg.cloud.enabled = False
+    cfg.workspace = tmp_path
+    client = PlanFirstClient(cfg, [PLAN_STEPS, PLAN_STEPS])
+    ctx = Context(cfg, workspace=tmp_path, client=client, guard_on=True,
+                  guard_mode="unattended", episodes_on=False, rag_on=False,
+                  cancel_event=threading.Event())
+    k = AgentKernel(ctx, approver=lambda t, a, r: False,
+                    sessions_dir=tmp_path / "sessions",
+                    receipts_path=tmp_path / "receipts.jsonl")
+    ctx.kernel = k
+    res = k.run("Plan (do not execute) how you would analyze a 50MB CSV sales file. "
+                "Use the planner tool.")
+    assert len(client.calls) == 2, [c[0] for c in client.calls]
+    assert "You are a planner" in str(client.calls[0][1][-1].get("content"))
+    # a plan request is told the plan IS the answer — and NOT to execute it
+    seen = " ".join(str(m.get("content")) for m in client.calls[1][1])
+    assert "[plan-first]" in seen and "Do NOT execute" in seen, seen[-600:]
+    assert "pandas.read_csv" in res.output, res.output
+    assert res.output.count("pandas.read_csv") == 1, res.output
 
 
 SHOW_CODE = ("Here is the computation:\n\n```python\nimport math\n"

@@ -272,6 +272,38 @@ def _grounded_fallback(messages: list, n_tool_calls: int) -> str:
             "and I will run it.")
 
 
+def _validate_call(tname: str, args, meta: dict) -> str:
+    """Mechanical pre-check for one tool call. Returns "" when callable, else a
+    repair nudge for the model. Runs BEFORE gate/guard/execution so malformed
+    calls cannot burn permission breakers or iterations — the model gets one
+    targeted correction naming the exact defect (unknown name with close
+    matches, non-object args, missing required fields from the tool schema).
+    Shaped for the unknown-tool error path below (fail_streak, not denials).
+    """
+    import difflib
+    names = sorted(meta.keys()) if meta else []
+    if tname not in (meta or {}):
+        hint = ""
+        close = difflib.get_close_matches(tname, names, n=3, cutoff=0.6) if names else []
+        if close:
+            hint = f" Did you mean: {', '.join(close)}?"
+        avail = f" Available: {', '.join(names)}" if names else ""
+        return (f"unknown tool: {tname}.{hint}{avail} Reply with a corrected "
+                "call using an exact tool name, or answer without tools.")
+    if not isinstance(args, dict):
+        return (f"malformed arguments for {tname}: must be a JSON object, got "
+                f"{type(args).__name__}. Reply with a corrected call.")
+    try:
+        required = ((meta[tname].parameters or {}).get("required", []) or [])
+    except Exception:
+        required = []
+    missing = [r for r in required if r not in args]
+    if missing:
+        return (f"missing required arguments for {tname}: {', '.join(missing)}. "
+                "Reply with a corrected call including them.")
+    return ""
+
+
 def _extract_text_tool_calls(content: str) -> list:
     """Small local models sometimes emit tool calls as TEXT (JSON / JSONL / fenced).
     Recover them. Only dicts having both 'name' and 'arguments' are accepted."""
@@ -348,22 +380,61 @@ def _offline_result(task: str, workspace) -> AgentResult:
     return AgentResult(output=out, model="offline-rules", ok=True, route_source="offline")
 
 
+def _served_cloud(ctx, res: AgentResult) -> bool:
+    """True when the CLOUD tier produced this answer (teach-back material).
+
+    `res.escalated` alone under-counts: the hybrid speed tier routes routine
+    work to cloud and deliberately clears the flag, so cloud-first successes
+    never reached the golden corpus (measured 2026-10-17: 556 cloud-served
+    episodes in the ledger, 5 goldens). The serving model name is the honest
+    signal — plus `:cloud` Ollama models, which are remote."""
+    if getattr(res, "escalated", False):
+        return True
+    name = (getattr(res, "model", "") or "").strip().lower()
+    if not name:
+        return False
+    if name == "cloud" or name.endswith(":cloud"):
+        return True
+    try:
+        return bool(ctx.cfg.get_llm(name).get("cloud"))
+    except Exception:
+        return False
+
+
 def _golden(task: str, res: AgentResult) -> None:
     """Teach-back: a successful CLOUD answer becomes training material for the
-    local model (SFT pipeline) and skill distillation (nightly job)."""
+    local model (SFT pipeline) and skill distillation (nightly job).
+
+    Quality gate: an explicit verifier FAIL is never recorded — a cloud
+    hallucination that the verifier caught must not become a lesson.
+    verify=None (no verifier run) still records: absence of a check is not
+    evidence of wrongness, and starving the dataset would stall the loop."""
+    if (res.verify or "") == "fail":
+        return
     try:
         from .. import paths as _p, safeio as _safeio
+        from ..privacy import redact as _redact
         d = _p.TRAIN_DIR / "golden"
         d.mkdir(parents=True, exist_ok=True)
+        # Scrub at capture, not just at SFT build: the golden file sits on
+        # disk (and in backups) between runs, and cloud answers echo user
+        # PII back (see cloud_redaction). Best-effort — never block the loop.
+        try:
+            task_s, _ = _redact(task[:500])
+            resp_s, _ = _redact((res.output or "")[:4000])
+        except Exception:
+            task_s, resp_s = task[:500], (res.output or "")[:4000]
         _safeio.append_json(d / "cloud_golden.jsonl",
-                            {"task": task[:500], "response": res.output[:4000],
+                            {"task": task_s, "response": resp_s,
                              "model": res.model, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
     except Exception:
         pass
 
 
 def _finish(ctx, task, episode: Episode | None, res: AgentResult, start: float,
-            emit, sub: bool) -> AgentResult:
+            emit, sub: bool, raw: str = "") -> AgentResult:
+    # raw = the user's own wording (kernel route_text). Goldens record the
+    # request as asked, not the context-augmented prompt the model saw.
     if episode:
         episode.finish(res.ok, res.output, error=res.error, escalated=res.escalated,
                        verify={"verdict": res.verify}, tokens=res.est_tokens)
@@ -373,13 +444,22 @@ def _finish(ctx, task, episode: Episode | None, res: AgentResult, start: float,
                    verify=res.verify, source=res.route_source, error=res.error[:200])
     if not sub:
         _diary(task, res)
-        if res.ok and res.escalated and (res.output or "").strip():
-            _golden(task, res)
+        if res.ok and _served_cloud(ctx, res) and (res.output or "").strip():
+            _golden(raw or task, res)
+        if res.ok and (res.tool_calls or 0) > 0 and (res.output or "").strip():
+            # Success digest for memory recall (indexed; diary transcripts are
+            # not). Best-effort — recall must never break the main flow.
+            try:
+                from ..memory import md as _md
+                _md.record_win(task, res.output)
+            except Exception:
+                pass
     emit({"type": "done", "output": res.output, "verify": res.verify})
     return res
 
 
-def _run_fastpath(ctx, cfg, task: str, fp, m, episode, start: float, emit, sub: bool):
+def _run_fastpath(ctx, cfg, task: str, fp, m, episode, start: float, emit, sub: bool,
+                  on_ask=None):
     """Execute one matched fast path. Returns an AgentResult, or None to fall
     through to the normal (model) pipeline when the handler declines/errors."""
     from . import fastpaths
@@ -398,7 +478,11 @@ def _run_fastpath(ctx, cfg, task: str, fp, m, episode, start: float, emit, sub: 
         emit({"type": "fastpath", "name": fp.name, "tool": out.tool})
         proceed, action, reason = True, "allow", "not needed"
         if out.tool in guard.EXEC_TOOLS and ctx.guard_on and cfg.guard.enabled:
-            proceed, action, reason = guard.check(out.tool, out.args, True, ctx.guard_mode)
+            # same approver contract as the model tool-call path: the
+            # kernel-injected approver (web: SSE permission card) governs
+            # 'ask'; None keeps the legacy mode-approver behavior.
+            proceed, action, reason = guard.check(out.tool, out.args, True,
+                                                  ctx.guard_mode, approver=on_ask)
             metrics.record("guard", tool=out.tool, action=action, reason=reason)
             emit({"type": "guard", "tool": out.tool, "action": action, "reason": reason})
         if not proceed:
@@ -520,7 +604,8 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
         from . import fastpaths
         hit = fastpaths.match(said)
         if hit is not None:
-            done = _run_fastpath(ctx, cfg, said, hit[0], hit[1], episode, start, emit, sub)
+            done = _run_fastpath(ctx, cfg, said, hit[0], hit[1], episode, start, emit, sub,
+                                 on_ask=on_ask)
             if done is not None:
                 return done
 
@@ -552,6 +637,58 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
             res.ok = False
             return _finish(ctx, task, episode, res, start, emit, sub)
 
+    # ------------------------------------ P1: plan-first execution
+    # The planner used to run only when the user explicitly asked for a plan —
+    # post-hoc, as a rescue for dropped prose (A45b). Now every multi-step task
+    # (and every plan request) gets an explicit, tool-grounded plan BEFORE the
+    # loop starts, injected into the working context: the 3B executes a numbered
+    # step list far better than it re-invents the plan mid-task, and a plan-only
+    # request no longer depends on the model remembering to call the tool.
+    # Deterministic tiers returned above, so nothing instant pays for this; the
+    # real-client gate keeps scripted tests on an untouched call sequence (the
+    # same rule as critique/reflection).
+    plan_text = ""
+    plan_tool_calls = 0
+    if (not sub and local_up and not ev_cancel.is_set()
+            and getattr(getattr(cfg, "learning", None), "plan_first", True)):
+        _pf_kind = ""
+        try:
+            from ..kernel import planner as _kplanner
+            _pf_kind = _kplanner.classify_intent(said)[0]
+        except Exception:
+            _pf_kind = ""
+        if ((_pf_kind == "multi_step" or _WANTS_PLAN.search(said or ""))
+                and _pf_kind not in ("informational", "impossible", "ambiguous")):
+            from .client import LLMClient as _LLMClient
+            if isinstance(ctx.client, _LLMClient):
+                _pf_t0 = time.time()
+                try:
+                    bus2 = getattr(getattr(ctx, "kernel", None), "bus", None)
+                    if bus2 is not None:
+                        pv, _b1, _b2, _b3 = bus2.call(ctx, "planner", {"task": task},
+                                                      stop_check=ev_cancel.is_set)
+                    else:
+                        from ..tools import tools_by_name as _tbn_pf
+                        pv = _tbn_pf()["planner"](ctx, task=task)
+                except Exception as e:
+                    pv = {"error": f"{type(e).__name__}: {e}"}
+                _pf_dt = time.time() - _pf_t0
+                pv = pv if isinstance(pv, dict) else {}
+                ptxt = str(pv.get("plan") or "").strip()
+                okp = bool(ptxt) and not pv.get("error")
+                emit({"type": "tool_start", "tool": "planner",
+                      "args": {"task": task[:120]}})
+                emit({"type": "tool_result", "tool": "planner",
+                      "seconds": round(_pf_dt, 1), "ok": okp,
+                      "preview": (ptxt or str(pv.get("error") or ""))[:300]})
+                if episode:
+                    episode.tool("planner", {"task": task}, okp, _pf_dt, pv)
+                metrics.record("tool", tool="planner", ok=okp,
+                               seconds=round(_pf_dt, 2), blocked=False)
+                if okp:
+                    plan_text = ptxt
+                    plan_tool_calls = 1
+
     # ------------------------------------------------- messages + RAG
     system = system if system is not None else (build_sub_system(ctx) if sub else build_system_prompt(ctx))
     user_content = task
@@ -566,18 +703,45 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
         card = module_api_card(task)
         if card:
             user_content = f"{user_content}\n\n{card}"
+    if plan_text:
+        if _WANTS_PLAN.search(said or ""):
+            # the user asked for a PLAN — the plan is the deliverable; the
+            # injection must not read as an instruction to run it (live probe:
+            # the 3B started executing a plan-only request once handed steps).
+            _pf_note = ("[plan-first] A plan produced by the planner tool BEFORE "
+                        "this step. The user asked for a plan: present it "
+                        "(corrected or improved if you see a problem) as the "
+                        "answer. Do NOT execute the steps unless the user also "
+                        "asked for execution.")
+        else:
+            _pf_note = ("[plan-first] A plan produced by the planner tool BEFORE "
+                        "execution. Treat it as a starting point: execute the "
+                        "user's request following these steps where they fit, and "
+                        "replace a step if the evidence contradicts it.")
+        user_content = f"{user_content}\n\n{_pf_note}\n{plan_text[:1500]}"
     messages: list[dict] = [{"role": "system", "content": system}, {"role": "user", "content": user_content}]
     tools = None if sub else tools_litellm()
+    # P0-1: the local route gets the fitted schema subset — num_ctx 8192 cannot
+    # afford all 30 schemas (~5.2k est tokens) plus a conversation; cloud keeps
+    # the full set. The executor registry below stays complete either way.
+    tools_local = None if sub else tools_litellm(local=True)
     registry = tools_by_name() if tools else {}
     meta = tools_meta() if tools else {}
+
+    def tools_for(info: dict) -> list | None:
+        """Schemas for one call: full for cloud, fitted subset for local."""
+        if tools is None:
+            return None
+        return tools if info.get("cloud") else tools_local
 
     def llm_call(cur_name: str):
         # A59/A60: Ollama silently truncates to ~num_ctx/2 when the prompt does not
         # fit. Compact old tool history *before* the call so the model at least keeps
         # the most recent context, and so the truncation is logged rather than hidden.
         info = cfg.get_llm(cur_name)
+        cur_tools = tools_for(info)
         if not info.get("cloud") and cfg.ollama.num_ctx:
-            compacted, compact_info = compact_messages(messages, tools, cfg.ollama.num_ctx,
+            compacted, compact_info = compact_messages(messages, cur_tools, cfg.ollama.num_ctx,
                                                         completion_reserve=cfg.ollama.max_tokens)
             if compacted is not messages:
                 messages[:] = compacted
@@ -600,11 +764,11 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                 try:
                     out = ctx.client.chat_stream(cur_name, msgs,
                                                  on_token=lambda t: emit({"type": "token", "text": t}),
-                                                 tools=tools)
+                                                 tools=cur_tools)
                 except LLMError:
-                    out = ctx.client.chat(cur_name, msgs, tools=tools)  # one fallback
+                    out = ctx.client.chat(cur_name, msgs, tools=cur_tools)  # one fallback
             else:
-                out = ctx.client.chat(cur_name, msgs, tools=tools)
+                out = ctx.client.chat(cur_name, msgs, tools=cur_tools)
             usage = (out or {}).get("usage") or {}
             metrics.record("llm", model=cur_name, seconds=round(time.time() - t0, 2),
                            ok=True, stream=streaming,
@@ -617,10 +781,11 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
             raise
 
     iters = 0
-    n_tool_calls = 0
+    n_tool_calls = plan_tool_calls   # the plan-first planner call is a real tool call
     tokens = 0
     sub_results: list[str] = []
     verify_rounds = 0
+    rejected_drafts: list[str] = []  # verify-FAILed drafts, for preference pairs
     vres = {"verdict": "pass", "findings": []}
     cancelled = False
     final_output = ""
@@ -650,9 +815,9 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
     # single task is plenty of evidence that the model is looping.
     attempts: dict = {}
     TOOL_ATTEMPT_CAP = 6
-    # the planner tool's own numbered steps, kept so the user can be given the plan
-    # rather than the model's vague paraphrase of it
-    plan_text = ""
+    # plan_text was filled by the plan-first block (P1) before the loop; it is
+    # kept so the user can be given the planner's own numbered steps rather than
+    # the model's vague paraphrase of them.
     # did any Python actually run in this task? decides whether the answer's own
     # code block has to be executed to be worth anything
     ran_code = False
@@ -782,6 +947,31 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                 final_output = _grounded_fallback(messages, n_tool_calls)
             else:
                 final_output = (content or "").strip()
+            if not sub and not empty_final:
+                # Self-critique (local Chain-of-Thought Verification): one
+                # bounded local pass over the draft for recomputed math,
+                # missed constraints, invented details, and clarity — before
+                # the deterministic verifier and before the user sees it.
+                try:
+                    from . import critique as _critique
+                    if _critique.should_critique(ctx, task, final_output):
+                        draft_pre = final_output
+                        final_output = _critique.critique_answer(
+                            ctx, final_output, task, emit)
+                        # Pair only when LOCAL served the task: the critique pass
+                        # itself is a local call, so for a cloud-served draft it
+                        # would record "prefer the 3B's rewrite over the cloud
+                        # answer" — the wrong direction for teaching bee4b.
+                        if (name == "local"
+                                and final_output.strip() != draft_pre.strip()):
+                            # The critique rewrote the draft: a free preference
+                            # pair (chosen=rewrite, rejected=draft) — the RLAIF
+                            # corpus must not wait for hand-typed /correct.
+                            from ..memory import ratings as _ratings
+                            _ratings.record_pair(said, final_output, draft_pre,
+                                                 source="critique", model=name)
+                except Exception:
+                    pass  # critique must never break the main flow
             if not sub:
                 try:
                     vres = verifier.verify(task, final_output, ctx.workspace,
@@ -804,6 +994,8 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                 problems = "; ".join(
                     str(f.get("detail") or f.get("check") or "")
                     for f in vres["findings"])[:400].strip()
+                if len(rejected_drafts) < 3:
+                    rejected_drafts.append(final_output)
                 messages.append({"role": "assistant", "content": final_output})
                 messages.append({"role": "user", "content":
                     "What you just wrote describes something that did not happen. "
@@ -813,6 +1005,18 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                     "part could not be done, say that plainly. Do not talk about tools, "
                     f"checks or this message.\n\nRequest:\n{task[:600]}"})
                 continue
+            # A verifier-FAILED draft that the loop then fixed is a free
+            # preference pair (chosen=shipped fix, rejected=the draft the
+            # verifier caught) — machine-derived RLAIF (P0-4, 2026-10-17).
+            if rejected_drafts and vres.get("verdict") != "fail" and (final_output or "").strip():
+                try:
+                    from ..memory import ratings as _ratings
+                    for bad in rejected_drafts:
+                        if (bad or "").strip() and bad.strip() != final_output.strip():
+                            _ratings.record_pair(said, final_output, bad,
+                                                 source="verify-fix", model=name)
+                except Exception:
+                    pass
             break
 
         # ------------------------------------------------------------ tool calls
@@ -870,12 +1074,20 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                     res_v = {"note": f"{tname} has been called {attempts[tname]}x in this task and "
                                      "was not run again. Stop looping on it: give your final answer "
                                      "from the results you already have, or say what is missing."}
+            # Mechanical validation BEFORE the gate: unknown names and
+            # missing required args are rejected here with a repair nudge, so
+            # malformed calls cannot burn permission breakers or iterations.
+            # Shaped as an error (like unknown-tool below): fail_streak counts
+            # it, denial/failure breakers do not confuse it with a refusal.
+            if res_v is None and tools:
+                _bad = _validate_call(tname, args, meta)
+                if _bad:
+                    res_v = {"error": _bad}
             # Phase 3: capability gate — authorization is checked BEFORE
             # execution. Kernel-injected (ctx.capability_gate); legacy direct
             # run_agent paths without a kernel skip it. A denial feeds the
             # same blocked-result flow as the guard, so audit/episode/telemetry
-            # and the model's 'explain the refusal' behavior all work.
-            # Phase 12 (N1 CRITICAL): the gate is the kernel's authorization
+            # and the model's 'explain the refusal' behavior all work.            # Phase 12 (N1 CRITICAL): the gate is the kernel's authorization
             # layer and MUST run even when the user toggles the interactive
             # command guard off (`/guard off`) — a REPL convenience flag can
             # never bypass capability authorization. The legacy command
@@ -1276,4 +1488,4 @@ def run_agent(ctx: Context, task: str, on_event=None, model: str | None = None,
                              else ("no answer after wrap" if degraded
                                    else ("empty answer" if empty_final else ""))),
                       verify=vres["verdict"], route_source=rinfo.get("source", ""))
-    return _finish(ctx, task, episode, res, start, emit, sub)
+    return _finish(ctx, task, episode, res, start, emit, sub, raw=said)

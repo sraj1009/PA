@@ -114,3 +114,51 @@ def test_personalization_in_prompt():
     prompt = build_system_prompt(ctx)
     assert cfg.user.name in prompt
     assert cfg.user.timezone in prompt
+
+
+def test_entrypoint_session_call_matches_installed_sdk():
+    """Live-room regression (2026-10-15): a real dispatched job crashed with
+    TypeError because entrypoint() passed start_agent= to AgentSession —
+    a kwarg the pinned livekit-agents 1.4.6 SDK does not accept. No mocked
+    test could reach it, so pin the call shape here at two levels."""
+    import ast
+    from pathlib import Path
+    src = Path("bee/livekit/agent.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    ctor_calls = [n for n in ast.walk(tree)
+                  if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "AgentSession"]
+    assert ctor_calls, "AgentSession construction disappeared from entrypoint"
+    for call in ctor_calls:
+        kw = {k.arg for k in call.keywords}
+        assert "start_agent" not in kw, \
+            "AgentSession(start_agent=...) crashes the pinned SDK — pass the agent to start()"
+    # livekit-agents 1.4.6 callback shapes (second live-room crash class):
+    # on_enter() / on_user_turn_completed() take no session arg, and the
+    # offline BeeSTT must be wrapped in a StreamAdapter with a VAD.
+    src_fns = {n.name: n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert [a.arg for a in src_fns["on_enter"].args.args] == ["self"]
+    user_turn_args = [a.arg for a in src_fns["on_user_turn_completed"].args.args]
+    assert "agent_session" not in user_turn_args, \
+        "1.4.6 calls on_user_turn_completed without a session arg"
+    assert "StreamAdapter" in src, "BeeSTT must be wrapped in StreamAdapter+VAD"
+    # runtime level: the installed SDK must accept the exact call shape
+    livekit = pytest.importorskip("livekit", reason="livekit SDK required")
+    import inspect
+    sig = inspect.signature(livekit.agents.AgentSession.__init__)
+    assert "start_agent" not in sig.parameters
+    assert "stt" in sig.parameters and "tts" in sig.parameters
+    assert "agent" in inspect.signature(livekit.agents.AgentSession.start).parameters
+
+
+def test_pyttsx3_fallback_produces_audio():
+    """Live-room regression (2026-10-15): the greeting failed with 'TTS
+    produced no audio' because save_to_file to a BytesIO yields 0 bytes AND
+    edge-tts returned 403 in this environment. The offline fallback must
+    produce real bytes through a temp file path."""
+    import os
+    if os.name != "nt":
+        pytest.skip("pyttsx3 SAPI probe is Windows-only")
+    from bee.livekit.agent import _pyttsx3_wav
+    out = _pyttsx3_wav("Hello test one two three", "", 190)
+    assert len(out) > 44, "WAV output is empty — fallback is broken"

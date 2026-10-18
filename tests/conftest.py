@@ -101,8 +101,8 @@ _INTEGRATION = [
     "test_engine_speed", "test_engines_session", "test_webauth",
     "test_structured_memory", "test_sft",
     "test_eval_gate", "test_skill_gate", "test_livekit_bridge",
-    "test_scheduling_unified",
-    # Phase 7 (2026-10-08): verified PORTABLE by running each file with its
+    "test_livekit_live",
+    "test_scheduling_unified",    # Phase 7 (2026-10-08): verified PORTABLE by running each file with its
     # "optional" package imports blocked (temp/blocker_plugin.py) — synthetic
     # audio / mocked desktop / stubbed subprocess, no real deps needed.
     "test_voice_engine", "test_stt_device", "test_computeruse",
@@ -147,6 +147,22 @@ _INTEGRATION = [
     # A55/A56 (2026-10-10): the verify-retry ask names no mechanism and restates
     # the request; an honest refusal is no longer graded as a fabricated claim.
     "test_verify_retry",
+    # Layering (2026-10-15): bee.tools must not statically depend on bee.agent
+    # (the graph-reported cycle is a sanctioned call-time edge; pin it).
+    "test_layering",
+    # Self-improving bee4b (2026-10-16): pre-finalize self-critique loop,
+    # SQLite ratings (RLAIF input), success-digest recall, SFT integration.
+    "test_self_improve",
+    # Security batch (2026-10-16): secret-free child env, always-refusal,
+    # file-jail hardening, golden scrub-at-capture, recursive metrics scrub.
+    "test_security_batch",
+    # Web /voice route (2026-10-17): get_kernel NameError on every upload and
+    # the float64 np.interp resample that crashed the ONNX VAD.
+    "test_webapp_voice",
+    # Web approvals (2026-10-17): interactive permission card over the /chat
+    # SSE stream (bearer auth, one-time ids, timeout-deny) + the /voice route
+    # staying off the event loop (live uvicorn, not TestClient).
+    "test_web_approvals",
 ]
 # Files that need OPTIONAL packages / a specific platform — the default CORE
 # suite must not fail because these are absent (Program Phase 7). Phase 7
@@ -161,7 +177,7 @@ _OPTIONAL_DEPS = {
     "test_livekit": "livekit SDK",
 }
 _WINDOWS = ["test_computeruse", "test_jarvis_features"]
-_LIVEKIT = ["test_livekit", "test_livekit_bridge"]
+_LIVEKIT = ["test_livekit", "test_livekit_bridge", "test_livekit_live"]
 _ML = ["test_mlrouter", "test_pipeline", "test_router_tiers", "test_rag",
        "test_phase7_repro"]
 _CORE = [f for f in (_UNIT + _INTEGRATION) if f not in _OPTIONAL_DEPS]
@@ -173,6 +189,7 @@ MARKERS = {
         "test_guard", "test_risk", "test_capabilities", "test_privacy",
         "test_netguard", "test_secretscan", "test_webauth", "test_sandbox",
         "test_audit", "test_injection", "test_computeruse_safety",
+        "test_security_batch", "test_web_approvals",
     ],
     "agent": [
         "test_kernel_integration", "test_kernel_unit", "test_jarvis_features",
@@ -185,7 +202,7 @@ MARKERS = {
     ],
     "voice": [
         "test_voice_engine", "test_stt_device", "test_livekit",
-        "test_voice_tts",
+        "test_voice_tts", "test_webapp_voice",
     ],
     "scheduler": [
         "test_automation", "test_scheduling_unified", "test_pipeline",

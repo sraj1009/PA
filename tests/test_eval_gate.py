@@ -42,13 +42,15 @@ def env(tmp_path, monkeypatch):
                           client=FakeClient(["bee4b", "bee4b-v2"]))
     baselines = tmp_path / "baselines.json"
     models_yaml = tmp_path / "models.yaml"
+    gate_candidate = tmp_path / "train" / "gate_candidate.json"
     monkeypatch.setattr(gate, "BASELINES_FILE", baselines)
     monkeypatch.setattr(paths, "MODELS_YAML", models_yaml)
+    monkeypatch.setattr(gate, "GATE_CANDIDATE_FILE", gate_candidate)
     monkeypatch.setattr(gate, "structural_task_ids", lambda: ["t1", "t2"])
     import bee.memory.md as md
     monkeypatch.setattr(md, "diary_add", lambda s: None)
     return {"ctx": ctx, "baselines": baselines, "models_yaml": models_yaml,
-            "cfg": cfg}
+            "gate_candidate": gate_candidate, "cfg": cfg}
 
 
 def _fake_suite(score_map: dict[str, dict], monkeypatch):
@@ -146,6 +148,49 @@ def test_candidate_never_invoked_is_rejected(env, monkeypatch):
     assert not env["models_yaml"].exists()
 
 
+def test_rate_limited_candidate_arm_voids_the_comparison(env, monkeypatch):
+    """LIVE 2026-10-17: the Gemini quota died between the two arms; the
+    candidate's cloud-dependent tasks failed with litellm.RateLimitError and
+    the gate printed "14/21 < baseline 16/21 + margin 1" — reading as model
+    quality when it was provider availability. A 429-dead candidate arm must
+    void the comparison (no promotion), not count as a rejection, and must not
+    be recorded as the candidate's score."""
+    def fake_run_suite(ctx, model=None, only=None):
+        rows = _rows({f"t{i}": True for i in range(10)}, model)
+        if model == "bee4b-v2":
+            rows.append({"id": "cloud_task", "ok": False, "skipped": False,
+                         "model": model, "seconds": 1.0, "ts": "2026-10-17T00:00:00",
+                         "repeat": 1, "expect": None, "output_excerpt": "",
+                         "error": 'LLM error: litellm.RateLimitError: geminiException - '
+                                  '{"error": {"code": 429, "message": "You exceeded your '
+                                  'current quota"}}'})
+        return rows
+    monkeypatch.setattr("bee.evals.runner.run_suite", fake_run_suite)
+    assert gate.set_baseline(env["ctx"], "bee4b")["ok"]
+    r = gate.model_quality_gate(env["ctx"], candidate="bee4b-v2", margin=1)
+    assert not r["ok"] and r.get("void"), r
+    assert "rate limit" in r["reasons"][0].lower()
+    assert r["rate_limited"] == ["cloud_task"]
+    assert not env["models_yaml"].exists()
+    assert "bee4b-v2" not in gate.load_baselines()["models"]
+
+
+def test_rate_limited_baseline_seed_is_refused(env, monkeypatch):
+    """The other half: a quota-dead arm must not become the BASELINE either —
+    every later comparison would inherit the lie."""
+    def fake_run_suite(ctx, model=None, only=None):
+        rows = _rows({f"t{i}": True for i in range(3)}, model)
+        rows.append({"id": "cloud_task", "ok": False, "skipped": False,
+                     "model": model, "seconds": 1.0, "ts": "2026-10-17T00:00:00",
+                     "repeat": 1, "expect": None, "output_excerpt": "",
+                     "error": "litellm.RateLimitError: 429 Too Many Requests"})
+        return rows
+    monkeypatch.setattr("bee.evals.runner.run_suite", fake_run_suite)
+    r = gate.set_baseline(env["ctx"], "bee4b")
+    assert not r["ok"] and "rate limit" in r["reason"].lower(), r
+    assert not env["baselines"].exists()
+
+
 def test_rollback_removes_override(env):
     gate.promote_model("bee4b-v2")
     assert env["models_yaml"].exists()
@@ -174,6 +219,105 @@ def test_baselines_file_corruption_is_safe(env, monkeypatch):
     env["baselines"].write_text("{not json", encoding="utf-8")
     data = gate.load_baselines()
     assert data == {"models": {}, "promotions": []}
+
+
+# --------------------------------- P0-5: candidate queue + adjudication power
+def test_queued_candidate_is_picked_up_and_consumed_on_reject(env, monkeypatch):
+    """The auto-chain queue (train/gate_candidate.json) feeds the gate exactly
+    once: a decided verdict consumes it (see the void test for the exception)."""
+    gate.queue_candidate("bee4b-v2", src="auto-chain")
+    assert env["gate_candidate"].exists()
+    assert gate.pending_candidate() == "bee4b-v2"
+    _fake_suite({"bee4b": {f"t{i}": True for i in range(10)},
+                 "bee4b-v2": {**{f"t{i}": True for i in range(10)}, "t99": False}},
+                monkeypatch)
+    r = gate.model_quality_gate(env["ctx"], margin=1)      # no explicit candidate
+    assert not r["ok"] and any("score" in x for x in r["reasons"]), r
+    assert not env["gate_candidate"].exists()              # consumed
+    assert "bee4b-v2" in gate.load_baselines()["models"]   # attempt recorded
+
+
+def test_queued_candidate_promotes_and_is_consumed(env, monkeypatch):
+    gate.queue_candidate("bee4b-v2", src="auto-chain")
+    _fake_suite({"bee4b": {f"t{i}": True for i in range(10)},
+                 "bee4b-v2": {f"t{i}": True for i in range(11)}}, monkeypatch)
+    r = gate.model_quality_gate(env["ctx"], margin=1)
+    assert r["ok"] and r.get("promoted") == "bee4b-v2", r
+    assert not env["gate_candidate"].exists()
+
+
+def test_queued_candidate_survives_a_void(env, monkeypatch):
+    """A 429-dead arm is not an attempt: the queued artifact must stay so the
+    nightly gate retries when the quota recovers (the live 2026-10-17 lesson)."""
+    gate.queue_candidate("bee4b-v2", src="auto-chain")
+
+    def fake_run_suite(ctx, model=None, only=None):
+        rows = _rows({f"t{i}": True for i in range(10)}, model)
+        if model == "bee4b-v2":
+            rows.append({"id": "cloud_task", "ok": False, "skipped": False,
+                         "model": model, "seconds": 1.0, "ts": "2026-10-17T00:00:00",
+                         "repeat": 1, "expect": None, "output_excerpt": "",
+                         "error": "litellm.RateLimitError: 429 Too Many Requests"})
+        return rows
+    monkeypatch.setattr("bee.evals.runner.run_suite", fake_run_suite)
+    assert gate.set_baseline(env["ctx"], "bee4b")["ok"]
+    r = gate.model_quality_gate(env["ctx"], margin=1)
+    assert not r["ok"] and r.get("void"), r
+    assert env["gate_candidate"].exists()                  # retry later
+
+
+def test_explicit_candidate_never_consumes_the_queue(env, monkeypatch):
+    """`/gate other-model` evaluates the operator's choice; the queued artifact
+    is a DIFFERENT candidate and must survive for its own attempt."""
+    gate.queue_candidate("bee4b-v3", src="auto-chain")
+    _fake_suite({"bee4b": {f"t{i}": True for i in range(10)},
+                 "bee4b-v2": {f"t{i}": True for i in range(11)}}, monkeypatch)
+    r = gate.model_quality_gate(env["ctx"], candidate="bee4b-v2", margin=1)
+    assert r["ok"] and r.get("promoted") == "bee4b-v2", r
+    assert gate.pending_candidate() == "bee4b-v3"          # untouched
+
+
+def test_adjudication_flips_a_flaky_verdict(env, monkeypatch):
+    """P0-5: at n=21, one flaky task could flip a verdict either way (the live
+    2026-10-17 run sat inside ±2-3 stochastic noise). Tasks the two arms
+    DISAGREE on are re-run per side and a majority decides: a single flaky
+    fail is no longer a structural regression."""
+    calls = []
+
+    def fake_run_suite(ctx, model=None, only=None):
+        calls.append((model, list(only) if only else None))
+        if only:      # adjudication re-runs of the disputed task all pass
+            return _rows({tid: True for tid in only}, model)
+        per = {f"t{i}": True for i in range(10)}
+        if model == "bee4b-v2":
+            per = {**per, "t1": False, "t10": True}   # flaky t1 + one extra win
+        return _rows(per, model)
+    monkeypatch.setattr("bee.evals.runner.run_suite", fake_run_suite)
+    assert gate.set_baseline(env["ctx"], "bee4b")["ok"]
+    r = gate.model_quality_gate(env["ctx"], candidate="bee4b-v2", margin=1)
+    assert r["ok"] and r.get("promoted") == "bee4b-v2", r
+    reruns = [c for c in calls if c[1] is not None]
+    assert reruns and all(c[1] == ["t1"] for c in reruns), calls
+    assert len(reruns) == 4                                # 2 rounds × 2 sides
+    data = gate.load_baselines()
+    assert data["models"]["bee4b-v2"]["per_task"]["t1"] is True    # majority vote
+
+
+def test_adjudication_rounds_zero_restores_single_shot(env, monkeypatch):
+    env["cfg"].model_gate.adjudication_rounds = 0
+    calls = []
+
+    def fake_run_suite(ctx, model=None, only=None):
+        calls.append((model, only))
+        per = {f"t{i}": True for i in range(10)}
+        if model == "bee4b-v2":
+            per = {**per, "t1": False, "t10": True}
+        return _rows(per, model)
+    monkeypatch.setattr("bee.evals.runner.run_suite", fake_run_suite)
+    assert gate.set_baseline(env["ctx"], "bee4b")["ok"]
+    r = gate.model_quality_gate(env["ctx"], candidate="bee4b-v2", margin=1)
+    assert not r["ok"] and r["regressed"] == ["t1"]        # single-shot verdict
+    assert all(o is None for _, o in calls)                # no re-runs at all
 
 
 # ------------------------------------------- eval permission posture + workspace (A36)

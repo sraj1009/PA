@@ -13,5 +13,6 @@ bitsandbytes>=0.44.0
 datasets>=3.0
 accelerate>=1.0
 sentencepiece
+trl>=0.11          # DPO stage (training/dpo/) — same 4-bit + LoRA stack
 # optional experiment tracking:
 # mlflow

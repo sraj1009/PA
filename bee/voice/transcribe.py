@@ -95,6 +95,15 @@ def transcribe_audio(audio, sample_rate: int = 16000, model: str = "base.en",
                      device: str = "auto", compute_type: str = "int8",
                      language: str = "en") -> str:
     """audio: float32 1-D numpy array at sample_rate."""
+    # Chokepoint coercion: every caller (web upload, mic loop, clap, livekit)
+    # lands here, and faster-whisper's ONNX VAD dies on float64 input with
+    # "Unexpected input data type. Actual: (tensor(double))". Cheap insurance
+    # so a future caller's resample/mean cannot crash the pipeline.
+    try:
+        import numpy as _np
+        audio = _np.asarray(audio, dtype=_np.float32)
+    except Exception:
+        pass
     m = _load(model, device, compute_type)
     try:
         text = _once(m, audio, language)

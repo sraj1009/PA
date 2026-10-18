@@ -28,6 +28,7 @@ class ProviderKind(str, Enum):
     DEEPSEEK = "deepseek"
     OPENROUTER = "openrouter"
     XAI = "xai"
+    ZAI = "zai"              # z.ai (GLM) — P0-2 second-provider fallback
 
 
 # kind -> (env vars that credential it, litellm prefix)
@@ -41,12 +42,14 @@ PROVIDERS: dict[ProviderKind, tuple[tuple[str, ...], str]] = {
     ProviderKind.DEEPSEEK:   (("DEEPSEEK_API_KEY",), "deepseek"),
     ProviderKind.OPENROUTER: (("OPENROUTER_API_KEY",), "openrouter"),
     ProviderKind.XAI:        (("XAI_API_KEY",), "xai"),
+    ProviderKind.ZAI:        (("ZAI_API_KEY", "ZHIPUAI_API_KEY"), "zai"),
 }
 
 # model-name prefix -> kind (extra aliases first, then canonical)
 _PREFIX_ALIASES = {
     "grok": ProviderKind.XAI,
     "x_ai": ProviderKind.XAI,
+    "zhipuai": ProviderKind.ZAI,   # legacy litellm spelling of zai
 }
 
 
@@ -157,11 +160,20 @@ class ProviderRegistry:
             Provider(ProviderConfig(ProviderKind.OLLAMA, cfg.ollama.model,
                                     cfg.ollama.base_url, "env"))
         ]
-        if cfg.cloud.llm:
-            kind = kind_for_model(cfg.cloud.llm) or ProviderKind.GEMINI
-            via = "config" if cfg.cloud.api_key else ("env" if key_for(kind) else "")
-            provs.append(Provider(ProviderConfig(kind, cfg.cloud.llm,
-                                                 cfg.cloud.base_url, via)))
+        # primary first (so self.cloud is it), then the P0-2 fallback so
+        # health()/for_model() see the second provider too. (A same-kind
+        # fallback overwrites its slot in the kind-keyed dict — a fallback on
+        # the SAME provider shares its quota, so there is nothing to list
+        # separately anyway.)
+        for ref, base, key in ((cfg.cloud.llm, cfg.cloud.base_url, cfg.cloud.api_key),
+                               (getattr(cfg.cloud, "fallback_llm", ""),
+                                getattr(cfg.cloud, "fallback_base_url", ""),
+                                getattr(cfg.cloud, "fallback_api_key", ""))):
+            if not ref:
+                continue
+            kind = kind_for_model(ref) or ProviderKind.GEMINI
+            via = "config" if key else ("env" if key_for(kind) else "")
+            provs.append(Provider(ProviderConfig(kind, ref, base, via)))
         return cls(provs)
 
     # ---------------------------------------------------------------- lookups
@@ -188,6 +200,15 @@ class ProviderRegistry:
             vars_ = env_vars_for(kind)
             present = next(v for v in vars_ if os.environ.get(v))
             return True, f"{kind.value}: {present} present"
+        # P0-2: a credentialed FALLBACK provider also makes the tier usable —
+        # client-side failover moves calls there when the primary errors — so
+        # the tier is UP; the reason names the fallback-only state explicitly.
+        fb = (getattr(cfg.cloud, "fallback_llm", "") or "").strip()
+        if fb:
+            fb_kind = kind_for_model(fb)
+            if fb_kind is not None and (cfg.cloud.fallback_api_key or key_for(fb_kind)):
+                return True, (f"fallback-only: {fb_kind.value} credentials present "
+                              f"(primary {kind.value} has none)")
         for k in ProviderKind:
             if k == ProviderKind.OLLAMA:
                 continue

@@ -71,6 +71,16 @@ class CloudCfg:
     # when cloud is down. Explicit 'local:' prefixes / "use local" / engine=local
     # always win. Set false for classic local-first hybrid.
     cloud_first: bool = True
+    # --- P0-2 (2026-10-17): the cloud quota is a MANAGED resource ---
+    # Second provider for the SAME call when the primary hits a rate limit /
+    # auth error / 5xx: client.py cools the primary's provider kind down for
+    # quota_cooldown seconds and retries on fallback_llm (its own credentials:
+    # fallback_api_key, else the provider env key — zai -> ZAI_API_KEY /
+    # ZHIPUAI_API_KEY). Empty fallback_llm = no failover (old behavior).
+    fallback_llm: str = ""          # e.g. "zai/glm-5.3-flash"
+    fallback_api_key: str = ""
+    fallback_base_url: str = ""
+    quota_cooldown: int = 900       # seconds a failing provider kind is skipped
 
 
 @dataclass
@@ -281,10 +291,16 @@ class ModelGateCfg:
     """J3 — model-upgrade quality gate. A candidate local model is promoted
     (models.yaml) only when it beats the active model's recorded eval baseline
     by `margin` AND causes no structural-task regression. Empty `candidate`
-    = the nightly gate idles (nothing to test)."""
+    = the nightly gate idles (nothing to test); the P0-5 auto-chain queues the
+    night's model in train/gate_candidate.json, which this gate consumes."""
     enabled: bool = True
     candidate: str = ""      # e.g. "bee4b-v2" — set when a new model is trained/pulled
     margin: int = 1          # candidate must score at least baseline + margin
+    # P0-5: statistical power. Tasks the two arms DISAGREE on are re-run this
+    # many extra times per side; majority decides. At n=21, a single flaky task
+    # could flip a verdict either way (the live 2026-10-17 gate run sat inside
+    # the suite's ±2-3 stochastic noise). 0 = single-shot (old behavior).
+    adjudication_rounds: int = 2
 
 
 @dataclass
@@ -292,8 +308,42 @@ class LearningCfg:
     """Self-improvement flywheel. `reflect` writes a short self-review per
     non-trivial task into memory/lessons/, which `context.recent_lessons()` then
     injects into every future system prompt — so it is an operator-visible
-    kill-switch, not an internal detail (read by `AgentKernel._reflect`)."""
+    kill-switch, not an internal detail (read by `AgentKernel._reflect`).
+    `self_critique` runs one bounded local draft->critique->refine pass over
+    the final answer before verification (read by the agent loop).
+    `plan_first` runs the local planner tool BEFORE the loop on multi-step
+    work (and on requests that ask for a plan) so the steps are in context
+    while the small model executes — the planner used to run only as an
+    after-the-fact rescue for plan requests (read by the agent loop)."""
     reflect: bool = True
+    self_critique: bool = True
+    critique_min_chars: int = 200
+    plan_first: bool = True
+
+
+@dataclass
+class TrainingCfg:
+    """Nightly QLoRA refresh (training/qlora/train.py on train/sft_v1.jsonl).
+
+    `auto_qlora` is the opt-in for automatic GPU training: a multi-hour burn
+    must never start by surprise on a daily-driver machine. Capture (golden
+    cloud answers) and dataset rebuild run regardless — this switch gates only
+    the torch run. Promotion is separate: the J3 model_gate adopts an adapter
+    only on eval win (set model_gate.candidate to the finished adapter)."""
+    auto_qlora: bool = False
+    min_samples: int = 150      # don't train below this (overfit risk)
+    max_samples: int = 500      # bound one night's run (newest samples first)
+    preset: str = "fast"        # fast (r=8/seq2048/1ep) | full (r=16/seq4096/2ep)
+    min_interval_days: float = 7.0
+    max_seconds: float = 21600.0  # 6 h cap per run
+    # P0-5: auto-chain merge->gate after a successful nightly training: merge
+    # the adapter (merge_export.py), convert to f16 GGUF + quantize Q4_K_M,
+    # `ollama create` the model, and queue it for the J3 gate
+    # (train/gate_candidate.json). Needs an unpacked llama.cpp here:
+    # convert_hf_to_gguf.py at this dir's root and llama-quantize*.exe
+    # alongside (release zip + source zip, e.g. b11711). Empty = merge +
+    # Modelfile only, no automatic import/queue.
+    llama_cpp_dir: str = ""
 
 
 @dataclass
@@ -317,6 +367,7 @@ class Config:
     alerts: AlertsCfg = field(default_factory=AlertsCfg)
     model_gate: ModelGateCfg = field(default_factory=ModelGateCfg)
     learning: LearningCfg = field(default_factory=LearningCfg)
+    training: TrainingCfg = field(default_factory=TrainingCfg)
     workspace: Path = paths.WORKSPACE
     # M14: where each resolvable field actually came from (default | config.yaml
     # | models.yaml | .env | process-env | env-provider-key). Attached by
@@ -423,6 +474,15 @@ def _apply_env(c: Config) -> Config:
         c.livekit.api_secret = os.environ["LIVEKIT_API_SECRET"]
     if os.environ.get("BEE_USER_NAME"):
         c.user.name = os.environ["BEE_USER_NAME"]
+    if str(getattr(c.guard, "mode", "cli")).lower() == "always":
+        # The one-line footgun: auto-approve-everything must never come from
+        # operator config. Programmatic/test use via make_approver("always")
+        # still works (with a warning); config falls back to prompting.
+        import logging as _logging
+        _logging.getLogger("bee.config").warning(
+            "config: guard.mode 'always' is refused (auto-approves every "
+            "destructive call) — falling back to 'cli'")
+        c.guard.mode = "cli"
     return c
 
 
@@ -480,6 +540,7 @@ def _build_from_yaml(data: dict) -> Config:
     c.alerts = _section(AlertsCfg, c.alerts, data.get("alerts"))
     c.model_gate = _section(ModelGateCfg, c.model_gate, data.get("model_gate"))
     c.learning = _section(LearningCfg, c.learning, data.get("learning"))
+    c.training = _section(TrainingCfg, c.training, data.get("training"))
     return c
 
 
@@ -570,6 +631,16 @@ def load_config(path: str | Path | None = None) -> Config:
     paths.ensure_core_dirs()
     _load_dotenv()                          # fills .env vars (process env wins)
     c = _apply_env(c)                       # layer 1+2 (highest)
+    if (data.get("cloud") or {}).get("api_key") and _env_key_for(c.cloud.llm):
+        # A plaintext key in the tracked, OneDrive-synced config.yaml shadows
+        # the env key (documented exception) — so a rotated env key silently
+        # stops working AND the stale secret persists in VCS + sync. Loud by
+        # design: prefer env-only credentials.
+        import logging as _logging
+        _logging.getLogger("bee.config").warning(
+            "config: cloud.api_key is set in config.yaml AND a provider env key "
+            "exists — the file wins, so env rotation is silently ignored and a "
+            "plaintext secret sits in a synced file. Prefer env-only credentials.")
     # workspace resolved LAST so .env's BEE_WORKSPACE also counts (M14)
     ws = os_environ_get("BEE_WORKSPACE")
     if ws:

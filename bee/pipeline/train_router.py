@@ -3,7 +3,9 @@
 Labels derived from outcomes (only unambiguous episodes label anything):
   det   — task is a pure math expression
   cloud — episode escalated to cloud and succeeded
-  local — succeeded on local without escalation
+  local — succeeded on the local model (or legacy rows with no model field)
+  (none) — cloud-served WITHOUT escalation (hybrid speed tier): the 3B was
+           never tried, so "could local have done it" is unknown; skipped
 Failed episodes are skipped (label is ambiguous).
 
 Run:  python -m bee.pipeline.train_router [--min 50]
@@ -47,7 +49,19 @@ def label_row(row: dict) -> str | None:
         return None
     if DET_EXPR.match(task.replace("^", "")) and DET_OP.search(task) and len(task) < 200:
         return "det"
-    return "cloud" if row.get("escalated") else "local"
+    if row.get("escalated"):
+        return "cloud"
+    # `escalated` alone lost the truth about WHO served the task (measured
+    # 2026-10-17): the hybrid speed tier sends routine work to cloud and
+    # deliberately clears the flag, so cloud-first successes used to train the
+    # classifier as "local" — labels for tasks the 3B never even attempted.
+    # Whether local could have handled a speed-tier task is UNKNOWN from the
+    # episode (it was never tried): skip it instead of asserting a side. Rows
+    # with no model field (legacy episodes) keep the old local behavior.
+    model = (row.get("model") or "").strip().lower()
+    if model == "cloud" or model.endswith(":cloud"):
+        return None
+    return "local"
 
 
 def dataset_version(pairs: list[tuple[str, str]]) -> str:

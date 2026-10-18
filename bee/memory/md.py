@@ -163,9 +163,49 @@ def all_chunks() -> list[tuple[str, str]]:
         out.extend(chunk_md(f))
     for f in sorted(paths.LESSONS_DIR.glob("*.md")):
         out.extend(chunk_md(f))
-    for f in (paths.PROFILE_MD, paths.LONGTERM_MD):
+    for f in (paths.PROFILE_MD, paths.LONGTERM_MD, paths.MEMORY_DIR / "wins.md"):
         out.extend(chunk_md(f))
+    # Capability workflows: what each skill does lives in its SKILL.md, so
+    # "how do I ..." questions retrieve the workflow, not just the fact that
+    # a skill with that name exists (system prompt carries only the index).
+    try:
+        for f in sorted(paths.SKILLS_DIR.glob("*/SKILL.md")):
+            out.extend(chunk_md(f))
+    except Exception:
+        pass
     return out
+
+
+def record_win(task: str, output: str, cap: int = 500) -> bool:
+    """One-line digest of a SUCCESSFUL tool-using task (task -> outcome).
+
+    Diary transcripts are deliberately unindexed (they crowd out facts), so
+    past successes would otherwise be invisible to recall. One line each,
+    successes only, capped file — the compact form the anti-crowding lesson
+    allows. Returns True when written.
+    """
+    task, output = (task or "").strip(), (output or "").strip()
+    if not task or not output:
+        return False
+    line = f"- {task[:160]} => {(output[:200]).replace(chr(10), ' ')}"
+    try:
+        p = paths.MEMORY_DIR / "wins.md"
+        lines = []
+        if p.exists():
+            lines = [ln for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()
+                     if ln.strip()]
+        if lines and lines[-1] == line:
+            return False  # already the latest — no dup growth
+        lines.append(line)
+        p.write_text("\n".join(lines[-cap:]) + "\n", encoding="utf-8")
+        try:
+            from .search import mark_dirty
+            mark_dirty(str(p))
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
 
 
 _TOKEN = re.compile(r"[a-z0-9_]{3,}")

@@ -1,7 +1,7 @@
-# BEE voice (optional but recommended)
-faster-whisper>=1.0
-sounddevice>=0.4
-numpy>=1.26
-pyttsx3>=2.90
+# BEE voice (optional but recommended) — pinned 2026-10-15.
+faster-whisper==1.2.1
+sounddevice==0.5.6
+numpy==2.4.6
+pyttsx3==2.99
 # better (network) voice — optional:
 # edge-tts>=6.1

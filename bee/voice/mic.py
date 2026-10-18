@@ -106,7 +106,9 @@ def _read_wav(wf: Path, target_rate: int = 16000) -> "array":
         arr = arr.reshape(-1, ch).mean(axis=1)
     if rate != target_rate:  # naive linear resample
         idx = np.linspace(0, len(arr) - 1, int(len(arr) * target_rate / rate))
-        arr = np.interp(idx, np.arange(len(arr)), arr)
+        # np.interp returns float64; faster-whisper's ONNX VAD rejects
+        # double tensors ("Unexpected input data type") — cast back.
+        arr = np.interp(idx, np.arange(len(arr)), arr).astype(np.float32)
     try:
         wf.unlink()
     except Exception:
@@ -158,5 +160,6 @@ def read_wav(path: str | Path, target_rate: int = 16000):
         arr = arr.reshape(-1, ch).mean(axis=1)
     if rate != target_rate:
         idx = np.linspace(0, len(arr) - 1, int(len(arr) * target_rate / rate))
-        arr = np.interp(idx, np.arange(len(arr)), arr)
+        # np.interp returns float64 — see _read_wav note (ONNX VAD dtype)
+        arr = np.interp(idx, np.arange(len(arr)), arr).astype(np.float32)
     return arr, target_rate

@@ -27,6 +27,7 @@ via `/gate`.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import datetime
 from pathlib import Path
@@ -35,8 +36,13 @@ import yaml
 
 from .. import paths
 
+log = logging.getLogger("bee.gate")
+
 
 BASELINES_FILE: Path = paths.EVALS_DIR / "baselines.json"
+# P0-5: the auto-chain (scheduler.maybe_train_qlora) writes the night's model
+# here; model_quality_gate consumes it (explicit arg > queue > config.yaml).
+GATE_CANDIDATE_FILE: Path = paths.TRAIN_DIR / "gate_candidate.json"
 
 
 def _now() -> str:
@@ -62,6 +68,36 @@ def save_baselines(data: dict) -> None:
     tmp = BASELINES_FILE.with_name(BASELINES_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
     tmp.replace(BASELINES_FILE)
+
+
+# ------------------------------------------------------ gate candidate queue
+def pending_candidate() -> str:
+    """Model queued by the P0-5 auto-chain, else '' (missing/corrupt = '')."""
+    try:
+        if GATE_CANDIDATE_FILE.exists():
+            data = json.loads(GATE_CANDIDATE_FILE.read_text(encoding="utf-8"))
+            return str(data.get("model") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def queue_candidate(model: str, src: str = "", **extra) -> None:
+    """Queue `model` for the next gate run (atomic write)."""
+    GATE_CANDIDATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"model": model, "src": src, "ts": _now(), **extra}
+    tmp = GATE_CANDIDATE_FILE.with_name(GATE_CANDIDATE_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=1, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(GATE_CANDIDATE_FILE)
+
+
+def clear_pending_candidate() -> None:
+    """Consume the queue — one decisive gate attempt per queued artifact
+    (VOID verdicts keep it: a quota-dead arm is not an attempt)."""
+    try:
+        GATE_CANDIDATE_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 # -------------------------------------------------------- structural tasks
@@ -108,6 +144,68 @@ def baseline_record(model: str, score: dict) -> dict:
     }
 
 
+def _adjudicate(ctx, active: str, candidate: str, base: dict, cand: dict,
+                rounds: int) -> list[dict]:
+    """P0-5: re-run tasks the two arms DISAGREE on; majority decides.
+
+    Mutates `base` / `cand` (per_task + passed) in place and returns every
+    re-run row (the caller's 429 check). Only disagreements are re-run — a
+    verdict costs a couple of minutes, not a second full suite — and at n=21
+    a single flaky task can no longer flip a verdict: it must lose a majority
+    of `rounds` extra votes per side. `rounds < 1` = single-shot (old
+    behavior)."""
+    if rounds < 1:
+        return []
+    disagree = sorted(tid for tid, ok in cand["per_task"].items()
+                      if tid in base["per_task"] and base["per_task"][tid] != ok)
+    if not disagree:
+        return []
+    rerun_rows: list[dict] = []
+    for score, model in ((base, active), (cand, candidate)):
+        votes = {tid: [score["per_task"][tid]] for tid in disagree}
+        for _ in range(rounds):
+            try:
+                from . import runner
+                rows = runner.run_suite(ctx, model=model, only=disagree)
+            except Exception as e:
+                log.warning("adjudication re-run failed for %s (%s); votes so far stand",
+                            model, e)
+                break
+            rerun_rows.extend(rows)
+            for r in rows:
+                if r.get("skipped"):
+                    continue
+                tid = str(r.get("id", ""))
+                if tid in votes:
+                    votes[tid].append(bool(r.get("ok")))
+                # only the LIVE candidate score carries a models_used set —
+                # the stored baseline record must stay JSON-safe (no new keys)
+                if r.get("model") and isinstance(score.get("models_used"), set):
+                    score["models_used"].add(str(r["model"]))
+        for tid, v in votes.items():
+            score["per_task"][tid] = sum(1 for x in v if x) * 2 > len(v)
+        score["passed"] = sum(1 for v in score["per_task"].values() if v)
+    return rerun_rows
+
+
+def _rate_limited_ids(score: dict) -> list[str]:
+    """Task ids whose failure was a provider rate limit (HTTP 429), not a model
+    verdict. A quota-dead arm is not comparable: on 2026-10-17 the Gemini quota
+    died between the seeded baseline arm and the candidate arm, three
+    cloud-dependent tasks failed with `litellm.RateLimitError`, and the gate
+    printed "score 14/21 < baseline 16/21 + margin 1" — a line that reads like
+    model quality but is provider availability. Fail closed (never promote) but
+    say "void", and allow a re-run once the quota recovers."""
+    out = []
+    for r in score.get("rows") or []:
+        if r.get("skipped") or r.get("ok"):
+            continue
+        err = str(r.get("error") or "").lower()
+        if "ratelimiterror" in err or "rate limit" in err or "429" in err:
+            out.append(str(r.get("id")))
+    return sorted(out)
+
+
 def set_baseline(ctx, model: str | None = None) -> dict:
     """Record (or re-record) the baseline for `model` (default: the active
     local model). Costs one full eval run — that is deliberate."""
@@ -118,6 +216,12 @@ def set_baseline(ctx, model: str | None = None) -> dict:
     if model not in score["models_used"]:
         return {"ok": False, "reason": f"model {model!r} was never invoked during the "
                                         "suite — check the name against `ollama list`"}
+    rl = _rate_limited_ids(score)
+    if rl:
+        return {"ok": False, "reason": "eval hit provider rate limits (429) on: "
+                                        + ", ".join(rl) + " — baseline NOT seeded (a "
+                                        "quota-dead arm is not a baseline); re-run when "
+                                        "the quota recovers"}
     data = load_baselines()
     data["models"][model] = baseline_record(model, score)
     save_baselines(data)
@@ -160,23 +264,30 @@ def rollback_model() -> dict:
 
 # ------------------------------------------------------------------ gate
 def model_quality_gate(ctx, candidate: str | None = None, margin: int | None = None) -> dict:
-    """J3 gate. `candidate` defaults to config.yaml model_gate.candidate.
+    """J3 gate. `candidate` defaults to the P0-5 auto-chain queue
+    (train/gate_candidate.json), then config.yaml model_gate.candidate.
 
     Outcomes:
       {"ok": True,  "promoted": ...}     candidate beats baseline -> models.yaml updated
       {"ok": True,  "seeded": ...}       no baseline for the active model yet -> recorded
       {"ok": False, "reasons": [...]}    candidate rejected (kept on the current model)
+      {"ok": False, "void": True, ...}   provider rate-limit (429) corrupted an arm -> retry later
       {"ok": True,  "skipped": ...}      nothing to do (no candidate configured)
     """
     mg = getattr(ctx.cfg, "model_gate", None)
     if mg is not None and not getattr(mg, "enabled", True):
         return {"ok": True, "skipped": "model_gate.enabled=false (config)"}
-    candidate = candidate or (getattr(mg, "candidate", "") if mg else "")
+    # P0-5: explicit arg > auto-chain queue > config.yaml. Only a candidate
+    # that CAME from the queue is consumed here (one attempt per artifact).
+    queued = "" if candidate else pending_candidate()
+    candidate = candidate or queued or (getattr(mg, "candidate", "") if mg else "")
     if not candidate:
         return {"ok": True, "skipped": "no candidate configured (config.yaml: model_gate.candidate)"}
     margin = int(margin if margin is not None else (getattr(mg, "margin", 1) if mg else 1))
     active = ctx.cfg.ollama.model
     if candidate == active:
+        if queued:
+            clear_pending_candidate()   # the queue pointed at the already-active model
         return {"ok": True, "skipped": f"candidate == active model ({candidate})"}
 
     # candidate must actually exist in Ollama before we spend an eval on it
@@ -207,6 +318,14 @@ def model_quality_gate(ctx, candidate: str | None = None, margin: int | None = N
         return {"ok": False, "reasons": [f"candidate {candidate!r} was never invoked during the "
                                          "suite (escalation/fallback?) — cannot score"]}
 
+    rl = _rate_limited_ids(cand)
+    if rl:
+        # not recorded: a 429-dead arm is not an attempt (see _rate_limited_ids)
+        return {"ok": False, "void": True, "rate_limited": rl, "reasons": [
+            "candidate arm hit provider rate limits (429) on: " + ", ".join(rl)
+            + " — comparison void (provider availability, not model quality); "
+            "re-run when the quota recovers"]}
+
     # A62: both sides count only tasks that actually RAN (skipped rows are excluded),
     # so their denominators can differ — and the score test below is a raw pass COUNT.
     # A candidate that skipped the hard half of the suite therefore read as a clean
@@ -216,6 +335,18 @@ def model_quality_gate(ctx, candidate: str | None = None, margin: int | None = N
             f"candidate was scored on {cand['total']} task(s) but the {active} baseline "
             f"has {base['total']} — a smaller task set is not comparable. Re-run with "
             "the skipped tasks available (usually: cloud up)."]}
+
+    # P0-5: majority-vote re-runs for the tasks the two arms DISAGREE on, BEFORE
+    # judging (statistical power; see ModelGateCfg.adjudication_rounds). A
+    # failed re-run degrades to fewer votes, never to a crash (see _adjudicate).
+    rerun_rows = _adjudicate(ctx, active, candidate, base, cand,
+                             int(getattr(mg, "adjudication_rounds", 2) or 0))
+    rl_rerun = _rate_limited_ids({"rows": rerun_rows})
+    if rl_rerun:
+        return {"ok": False, "void": True, "rate_limited": rl_rerun, "reasons": [
+            "adjudication re-runs hit provider rate limits (429) on: " + ", ".join(rl_rerun)
+            + " — comparison void (provider availability, not model quality); "
+            "re-run when the quota recovers"]}
 
     structural = set(structural_task_ids())
     regressed = sorted(tid for tid, ok in (base.get("per_task") or {}).items()
@@ -230,6 +361,8 @@ def model_quality_gate(ctx, candidate: str | None = None, margin: int | None = N
     # record the candidate's attempt either way (useful history, bounded)
     data["models"][candidate] = baseline_record(candidate, cand)
     if reasons:
+        if queued:
+            clear_pending_candidate()
         save_baselines(data)
         try:
             from ..memory.md import diary_add
@@ -241,6 +374,8 @@ def model_quality_gate(ctx, candidate: str | None = None, margin: int | None = N
                 "regressed": regressed}
 
     # ---- promote
+    if queued:
+        clear_pending_candidate()
     promote_model(candidate)
     data["promotions"].append({
         "ts": _now(), "from": active, "to": candidate,

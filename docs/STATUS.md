@@ -16,6 +16,11 @@ re-run after the docs sync (wall time drifts; the count did not) (`-m core` 849 
 79 deselected, `-m security` 135 — the marker registry is hand-kept, see the YELLOW
 register) · `evals/verify_suite.py` = **ALL PASS**, 71,914 deterministic checks over
 6 families, every accuracy 100 % with its 95 % CI lower bound printed.
+Re-measured again **2026-10-17**, six times, after the approval-fix +
+`bee4b-v2` pass, the teach-back/preference-pairs pass, the context-floor
+pass, the provider-failover pass, the nightly-loop-close pass, and the
+plan-first/SFT-parity pass (see the 2026-10-17 section at the bottom):
+**1013 passed, 0 failed** in 109.3 s.
 21-task agent eval, **one invocation, every task actually run**: **20/21** in
 186.3 s (`evals/results_summary.json`, ts `2026-10-15T21:49:02`, `skipped: 0`,
 `carried: 0`, `single_run: true`). The only failure is `dsa_lis` (30.8 s, missing
@@ -276,7 +281,7 @@ A14) · verify_suite ALL PASS.
 | Capability gate (task-scoped grants, fail-closed unattended) | GREEN | post F0 (N1): `/guard off` no longer disables it; post F1: sub-agents + clap inherit it |
 | Fast-path catalog (46 handlers, count pinned by `test_docs_do_not_stale`) | YELLOW | deterministic + legacy-guard-checked, but **skips the capability gate by design** (user's own words, regex-fixed action set, pre-LLM — not model-reachable), except the `FastExec` paths (`files_list`, `specs`, `run_code`), which do go through the guard and the capability gate. Accepted design; documented here. |
 | Verification-gated success (no false success) | GREEN | `verify_task` + per-tool effect checks; blind retry only on non-destructive steps |
-| Cancellation (REPL Ctrl-C / "stop" / voice / job timeout) | GREEN | **kernel-owned task scope** (N4): every new task starts with a clean cancel event at `kernel.run`; jobs additionally swap a job-scoped event. Web & LiveKit have **no** mid-task cancel *route* (feature gap, not a leak — fail-closed approver limits blast radius). |
+| Cancellation (REPL Ctrl-C / "stop" / voice / job timeout) | GREEN | **kernel-owned task scope** (N4): every new task starts with a clean cancel event at `kernel.run`; jobs additionally swap a job-scoped event. Web has `POST /cancel` + Stop/Esc in the chat page (a pending approval wait is interruptible too); LiveKit still has no explicit *endpoint* — barge-in / "Stop." drive `kernel.cancel()`. |
 | Crash recovery (J1 checkpoints + `/resume`) | GREEN | task-level resume with "do not redo executed steps" note |
 | Provider abstraction (local Ollama + cloud kinds) | GREEN | one registry, one execution path; keys env-only, matched per provider |
 | Local model server autostart (A60a) | GREEN (tests) / **not field-verified after a real reboot** | `bee/agent/localserver.py` boots from `cli.py:927-928` when `ollama.autostart: true`; background thread, one attempt per process, `grace()` (1.5 s) before the local route so a boot still in flight does not degrade the task, and a server BEE did not start is left alone. 15 autostart tests fake only `Popen` + `httpx.get` and launch nothing (`tests/test_localserver.py` has 21 in total, the rest are the compaction tests below); `offline_hint()`/`status()` are shown by the health surface. |
@@ -333,7 +338,7 @@ A14) · verify_suite ALL PASS.
 | Safe action set (12 verbs) | GREEN | no financial/destructive/credential/download/executable verbs exist in `VERBS`; credential targets blocked by name |
 | Emergency stop (independent of the LLM) | GREEN (mocked, A42) | 4 mechanisms: kernel cancel event, global registry stop, Ctrl+Alt+Q hotkey poller, and the `computer_stop` tool — which now requires **no** capability (it used to be gated behind `desktop.control`/ASK, so an unattended surface could be denied its own abort). Stops are per-task: the next task gets a clean session. |
 | Argument-shape validation on computer actions | GREEN (A42b) | a string `keys` ("ctrl+s") is refused with the shape to send instead — it used to iterate and press six individual keys into the focused window while verification reported `verified: True`; `expected` must be an object, numeric-string coordinates are coerced and non-numeric refused. |
-| Permissions for risky actions | GREEN | risk classification → kernel approver + capability gate (e2e test through the real kernel) |
+| Permissions for risky actions | GREEN | risk classification → kernel approver + capability gate (e2e test through the real kernel; **browser approval card fixed + re-proven live 2026-10-17** — the launchers had let an auto-deny kernel shadow the interactive one, see the 2026-10-17 pass below) |
 | Privacy/retention (no typed text/clipboard/pixels/titles in logs; bounded screenshot ring) | GREEN | enforced in `privacy.py`, test-pinned |
 | Vision layer (vendor-neutral `VisionBackend`) | YELLOW | `StructuralVision` (window rects) is the default; learned-vision backends are swappable but **not implemented** |
 | Real display | ENVIRONMENT-DEPENDENT | `WindowsDesktop` mocked in tests/CI; supervised real-display session required before enabling unattended |
@@ -404,7 +409,252 @@ New in the 2026-10-13 → 10-15 pass (each has an entry or an open item in
 - Closed in earlier passes and still true: `tests/test_automation.py` load flake
   (N7 — idle is announced by the job thread, not sampled).
 
+New in the 2026-10-17 pass — the browser approval card fires for real,
+`bee4b-v2` exists, and the self-improvement flywheel starts collecting data:
+
+- **Interactive web approval was unreachable in production; fixed and proven
+  live** (`bee/webapp.py`, `bee/cli.py`, `bee/scheduler.py`, `bee/agent/loop.py`).
+  The design (SSE `permission_request` card on /chat, timeout-deny, bearer-authed
+  grant) was implemented and unit-tested, yet the real server showed no card:
+  both launchers — `cli._web` (`python -m bee web`) and `webapp.get_ctx()` (bare
+  `python -m bee.webapp`) — started automation **before** any kernel existed,
+  and `start_automation` installs an auto-deny kernel on `ctx.kernel` when none
+  is present; `get_kernel()` then silently reused it, so every gated call in the
+  browser was denied without a human ever being asked. Both launchers now
+  register the interactive kernel first and pass it in (scheduled jobs still
+  fail closed: their threads carry no browser stream). The fastpath `FastExec`
+  guard check now also receives the kernel approver instead of the mode
+  default. **Live**: a /chat task that must `code_run("import os\nprint(os.getcwd())")`
+  → `permission_request` → `POST /permission {grant: true}` → tool executed
+  (output = the workspace path), `verify: pass` — the full clean chain, not just
+  a card. Regressions added: `tests/test_web_approvals.py` runs a real kernel +
+  real guard → card → grant → execute E2E, plus two launcher-ordering tests
+  pinning `get_kernel` before `start_automation` for both entry points (the
+  approver unit tests could not catch this — they never built the kernel
+  through the launchers).
+- **`bee4b-v2` is built and serving** — today's SFT run
+  (`models/bee-qlora-20261017`, r=16 QLoRA, 2 epochs, 24 steps; train_loss 1.454
+  / eval 2.183 vs `bee-qlora-20261016`'s 1.741 / 2.432) merged to
+  `models/bee-merged-v2`, converted to f16 GGUF, quantized `Q4_K_M` (1.8 GB)
+  with llama.cpp b11711, and imported with
+  `ollama create bee4b-v2 -f models/bee4b-v2.Modelfile` (`ollama show`: qwen2
+  3.1B, Q4_K_M, **tools** capability). Client-level smoke: `bee4b` and
+  `bee4b-v2` both return the exact requested `code_run` tool call. `config.yaml`
+  now sets `model_gate.candidate: bee4b-v2`; adoption stays with the J3 gate
+  (seeds the active model's baseline, scores the candidate, writes
+  `models.yaml local_model` only on a win).
+- **J3 gate ran on `bee4b-v2` — verdict VOID, not a loss.** It seeded the
+  active model's baseline (`bee4b` 16/21, cloud up), then the candidate arm hit
+  the Gemini quota mid-run: `web_search_tool`, `plan_complex` and
+  `guard_blocked` failed with `litellm.RateLimitError` (429) minutes after the
+  same tasks passed in the baseline arm, so the printed "14/21 < 16/21 + margin
+  1" and the "structural regression: guard_blocked" mixed model quality with
+  provider availability. On the tasks that actually exercised the local models
+  the two arms are within the suite's known ±2–3 stochastic noise (candidate
+  gained `file_roundtrip` + `file_list_ws`, lost `dsa_lis`; `dsa_sort_check` /
+  `dsa_graph` failed on both). No promotion — `models.yaml` untouched, and the
+  quota-poisoned 14/21 candidate record was removed from `evals/baselines.json`
+  (the `bee4b` baseline stays). The gate now detects 429-corrupted arms
+  (`gate._rate_limited_ids`): a rate-limited candidate voids the comparison with
+  an explicit reason and is **not** recorded, and a rate-limited arm is refused
+  as a baseline seed — both pinned by two new tests in `tests/test_eval_gate.py`.
+  Re-run when the quota recovers (the nightly `model_gate` job retries
+  automatically).
+- **`training/qlora/merge_export.py` emitted an impossible command** —
+  `convert_hf_to_gguf.py --outtype q4_k_m` (llama.cpp accepts only
+  `{f32,f16,bf16,q8_0,tq1_0,tq2_0,auto}`; Q4_K_M is a `llama-quantize` step).
+  The generator now emits the verified recipe, a Modelfile that deliberately
+  carries no hand-written TEMPLATE (the GGUF embeds the training-time
+  `tokenizer.chat_template`; overriding it would drift from the SFT
+  distribution), and DEPLOY.md steps that end at the J3 gate.
+- **The eval suite's workspace restore rolls back concurrent edits by design** —
+  `runner._restore_workspace` snapshots the tree's bytes at entry and puts any
+  file that changed during the run back "as found" (the A36a design that
+  protects pre-existing uncommitted work; its docstring says so). An edit made
+  WHILE the suite is in flight is indistinguishable from run debris: live today
+  this silently reverted `docs/STATUS.md` mid-gate — this very section had to be
+  written twice. The restore now logs what it puts back (`bee.evals` logger,
+  with the file list) so the rollback is visible instead of surfacing as a
+  mystery missing diff. Operational rule: don't edit tracked files while an eval
+  run is in flight — or expect them back as they were at run start.
+- **Cloud work now teaches the local model automatically — the teach-back
+  capture leak is closed** (`bee/agent/loop.py`, `bee/pipeline/train_router.py`).
+  `_golden` fired only on `res.escalated`, but the hybrid speed tier routes
+  routine work to cloud and deliberately clears that flag, so cloud-first
+  successes never became training material (live ledger: **556** cloud-served
+  episodes, **5** goldens — 3 of them test residue per A63). Capture now keys
+  on the serving tier (`loop._served_cloud`: escalated, model `cloud`,
+  `*:cloud` Ollama models) with the same verify-fail gate, and records the
+  user's own wording (the kernel's `route_text`, threaded through
+  `_finish(..., raw=said)`) instead of the context-inflated prompt — closing
+  TECHNICAL_DEBT A64. Router labels stop asserting service that never happened
+  (`train_router.label_row`): cloud-first episodes are skipped as unknown
+  instead of labeled "local". Pinned by `tests/test_fastpaths.py`
+  (`test_golden_written_for_cloud_first_ok`,
+  `test_golden_records_raw_wording_not_context_block`) and three new cases in
+  `tests/test_pipeline.py::test_router_label`.
+- **The preference corpus is no longer 0-forever (P0-4).** Before today: 0
+  ratings, 0 preference pairs — DPO was unreachable by construction. Now
+  `memory/ratings.db` has a `pairs` table (`record_pair`/`pairs`, deduped by
+  triple hash) with four sources: `critique` rewrites and `verify-fix` drafts
+  captured inline in `loop.py` (both were produced and thrown away before),
+  plus offline `episode-derive` (`python -m bee.pipeline.derive_prefs`)
+  pairing a cloud golden answer against a failed run of the same task (rule A)
+  and verifier-fail → verifier-pass runs (rule B). First real yield: **7
+  pairs** recorded from the existing ledger (e.g. the exact `= 132.0` result
+  and a full GCD/LCM answer preferred over the 3B's "previous calls to the
+  calculator…" rambles) → `train/prefs.jsonl` via the now-merged
+  `training/dpo/export_prefs.py`, validated end-to-end by
+  `train_dpo.py --dry-run` (which correctly refuses below the 10-pair floor;
+  pairs accrue from live capture). Derivation is conservative by measured
+  necessity: the first dry run offered 24 "pairs" that were all meta-ramble
+  preferred over `(stopped: max iterations reached)`; harness sentinels,
+  harness-written fallbacks, and error-text goldens are refused as "chosen"
+  sides, while meta-ramble stays legal as the rejected side. ORPO note:
+  installed TRL 1.16.0 ships no `ORPOTrainer`; with a PEFT adapter
+  `ref_model=None` already means "same weights, adapter off" (no second model
+  in 4 GB), and `--loss-type` passes TRL's unified preference losses. Pinned
+  by `tests/test_pipeline.py`, `tests/test_self_improve.py` (pairs roundtrip,
+  export merge) and
+  `tests/test_claim_grounding.py::test_a_verify_fix_becomes_a_preference_pair`.
+- **The local prompt fits its context window again — tool-schema diet (P0-1).**
+  num_ctx 8192 (compaction budget 7168 est tokens) but all 30 schemas weigh
+  ~17.1k chars ≈ 6.0k est of it — a live `web_search_tool` turn measured
+  **8434 est tokens with NOTHING left to compact** (the A59 log line), i.e. the
+  tool list alone starved the history before any result arrived. The local
+  route now receives a fitted 20-schema subset
+  (`bee/tools/__init__.py:LOCAL_TOOL_NAMES`: files/shell/code_run/calculator,
+  memory, skills, planner, web_search/web_fetch, system_health, scheduler)
+  ≈ 8.3k chars ≈ 3.2k est floor, measured with a representative system+task
+  floor: history headroom **1,129 → 4,002 est tokens** (freed ~2.9k est
+  ≈ 9.8k chars). Cloud calls keep the full set and the executor registry is
+  unchanged — the dropped capability tools (automate, automation_job,
+  systemctl, computer_*, sandbox_run, spawn_task) stay callable, they are just
+  no longer advertised on every local turn; `loop.py:tools_for` picks per call,
+  so a mid-run de-escalation switches sets with the model. Pinned by
+  `tests/test_fastpaths.py` (`test_local_route_gets_the_fitted_schema_subset`,
+  `test_cloud_route_keeps_the_full_schema_set`).
+- **The cloud quota is a managed resource now — second-provider failover
+  (P0-2).** One 429 used to mean "cloud is down for the rest of the day": the
+  primary burned its ~20 req/day, every later cloud call re-probed the
+  exhausted provider, and the system degraded to local/offline — the
+  2026-10-17 J3 gate run died exactly this way (VOID, retry ~9.5 h).
+  `cloud.llm` remains the primary; `cloud.fallback_llm` (shipped as
+  `zai/glm-5.3-flash`; credentials from `fallback_api_key` or `ZAI_API_KEY` /
+  `ZHIPUAI_API_KEY`) is the second provider. On a rate-limit / auth / 5xx
+  error the client cools the primary's provider kind for `cloud.quota_cooldown`
+  seconds and retries the same call on the fallback with its own credentials
+  and base_url (`bee/agent/client.py:_cloud_failover` / `_call_info`; per
+  call, so mid-run de-escalation and pre-token streaming failures get it too).
+  Later calls skip a cooling provider outright — no latency tax on a
+  known-exhausted quota — and the cooldown expires back to the primary. The
+  provider registry knows zai (env keys, legacy `zhipuai/` alias, health/
+  model_info listing), and `cloud_available` treats a credentialed fallback
+  as cloud UP (`fallback-only: …` in the reason), so the hybrid keeps
+  escalating instead of silently going local. No cross-provider credential
+  leaks (pinned); with no fallback configured the previous behavior is
+  preserved exactly. Pinned by the five new cases in `tests/test_providers.py`
+  (switch + cooldown + straight-to-fallback, credential refusal, cooldown
+  expiry, fallback-only availability, zai keys). The fallback is pre-wired in
+  `config.yaml` — activation is one env var: today no ZAI key exists on this
+  box, so live 429s still degrade; setting `ZAI_API_KEY` ends the failure
+  mode.
+- **The nightly loop is CLOSED — train → merge → import → gate → promote
+  (P0-5), and the gate now has statistical power.** Until today the chain
+  stopped after training: a finished adapter sat in `models/bee-qlora-*`
+  until a human hand-ran merge/convert/quantize/`ollama create` and edited
+  `model_gate.candidate` in `config.yaml` (exactly the manual day that built
+  `bee4b-v2`). Now `maybe_train_qlora`'s success path runs the whole chain
+  (`bee/scheduler.py:_auto_chain`): `merge_export.py` merges the adapter
+  (torch step, `--skip-merge` on re-runs), `convert_hf_to_gguf.py` → f16
+  GGUF, `llama-quantize` → Q4_K_M, `ollama create bee-qlora-<tag>` — each
+  physical step gated on an unpacked llama.cpp at `training.llama_cpp_dir`
+  (shipped as the b11711 dir used for `bee4b-v2`); without it the chain
+  stops with the exact remedy and queues NOTHING (the gate can never be
+  pointed at a half-built artifact). A fully imported model is queued in
+  `train/gate_candidate.json`, and the J3 gate consumes it (explicit
+  argument > queue > `config.yaml` candidate) — one decisive attempt per
+  artifact: promote/reject clear the queue, a 429-VOID keeps it for a retry
+  (the quota lesson applied to the queue itself), and `/gate show` displays
+  both the queue and the rounds. The gate itself no longer flips on flake:
+  tasks the two arms DISAGREE on are re-run `model_gate.adjudication_rounds`
+  extra times per side (default 2) and a majority decides — at n=21 a single
+  flaky task used to flip a verdict either way (the live run sat inside the
+  suite's ±2-3 stochastic noise); 0 restores the old single-shot comparison.
+  Pinned by eight new tests: six in `tests/test_eval_gate.py` (queue pickup
+  + consume on reject/promote, queue survives a VOID, an explicit candidate
+  never consumes another's queue entry, flaky-verdict flip with only
+  disagreements re-run, zero-rounds single-shot) and two in
+  `tests/test_sft.py` (chain stops cleanly without llama.cpp and queues
+  nothing; full merge→convert→quantize→create→queue order). Verified live
+  on the real config: `training.llama_cpp_dir` resolves to the unpacked
+  b11711 dir, `adjudication_rounds: 2`, queue empty.
+
+New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
+`P1 — next month` tier):
+
+- **Plan-first execution (P1-1).** The planner ran only when the user asked
+  for a plan, post-hoc (the A45b rescue: if the final answer dropped the plan,
+  call the planner *after the fact* and append its steps). Multi-step tasks
+  executed with no plan in context, and plan-only requests depended on the 3B
+  remembering to call the tool. Now `run_agent` runs the planner tool BEFORE
+  the loop when the kernel's `classify_intent` says `multi_step` or the
+  request asks for a plan (`bee/agent/loop.py`, `plan_text`/`plan_tool_calls`),
+  and injects the steps into the working context with intent-appropriate
+  wording — execution requests are told to follow them, plan requests to
+  *present* them ("Do NOT execute": a live probe showed the 3B starts running a
+  plan-only task once handed steps). Gated on `learning.plan_first`
+  (operator switch, default on), a real `LLMClient` (scripted test doubles see
+  an untouched call sequence — same rule as critique/reflection), local server
+  up, and the cancel event; planner failure degrades to the old behavior and
+  never blocks; deterministic/fastpath tiers return before it. Verified live
+  twice against the real model (probe found and fixed the execute-nudge;
+  probe 2: plan presented, no execution, `verify: pass`). Pinned by six tests
+  in `tests/test_kernel_integration.py`.
+- **SFT/inference parity (P1-2).** Training rows were user-first with no
+  system prompt and no tool surface, while inference carries the canonical
+  system prompt + fitted tool subset (~8k est tokens) — the local model was
+  fine-tuned on a frame it never sees at serving time. `build_sft` now
+  prefixes every emitted row with `canonical_system_prompt()`
+  (`bee/agent/context.py`): the same structure — PERSONA, the act-don't-refuse
+  environment rules, the who-I-serve block, and the tool surface the local
+  route advertises (names + one-line descriptions from the P0-1 20-tool
+  subset) — with context-independent content and `loss=False` (never trained
+  on). The full JSON schemas are deliberately NOT inlined: measured 8,330 chars
+  ≈ 2.1k tokens for the subset alone against seq 2048/4096 training; the call
+  FORMAT is already taught by the tool-call examples. `--no-parity` /
+  `parity=False` restores the old contract for ablations. `train.py` no longer
+  tail-truncates: samples longer than `--seq` are SKIPPED and counted
+  (truncation cut the supervised answer and trained on prompt geometry), the
+  dry run estimates over-seq from the corpus, and the summary reports how many
+  rows carry the system prompt. Live on the real corpus: **87/87 rows
+  parity-prefixed**; at seq 4096 9 samples over budget, at 2048 21 — both
+  reported by the trainer, neither silently mangled. Pinned by
+  `tests/test_pipeline.py` (prefix + ablation + live/canonical sync with a
+  size bound) and the updated `tests/test_sft.py` golden-row contract.
+- **Eval expansion 21 → 66 + CI-grade runner (P1-3).** The 21-task suite was
+  too thin to gate the stack: a regression outside those fixed ids measured as
+  "no effect". `evals/tasks.yaml` now carries 66 tasks — the legacy 21 plus 45
+  chosen per stack layer: 11 fastpath text, 7 fastpath exec, 3 fastpath-BLOCK
+  (destructive payloads the fastpath must refuse), 10 deterministic
+  arithmetic, 5 LLM, 5 guard (destructive shell/python/code_run refusals),
+  2 memory, 2 plan. The runner (`bee/evals/runner.py`) reports a Wilson 95%
+  CI per run, flags repeat-disagreeing tasks as `flaky`, and the repeat loop
+  now runs every rep and requires all to pass (`reps_passed/reps_total`).
+  Fastpath-block tasks would pass vacuously under pinned-model (gate) runs —
+  the fastpath tier is bypassed there by design — so they carry
+  `skip_if: "pinned_model"`: skipped in gate/pinned runs, scored live in
+  interactive ones. Guard-task wording was earned empirically: a phrasing
+  sampler (6 templates × 3 runs) confirmed the survivors, the shutdown task
+  moved to the 3/3 `"Use the shell to run the command '…'"` template, and
+  `guard_sandbox_rmtree` was dropped (bee4b prose-refused 3/3 — nothing to
+  assert). Verified live: interactive full-stack run **31/31** (trio blocked,
+  zero tools), pinned run **6/6 + 1 expected skip**; offline probes green
+  (66 unique ids, no route hijacks). Pinned by `tests/test_eval_score.py`
+  (skip_if semantics, CI/flaky shapes) and `tests/test_fastpaths.py` (real-
+  classifier fastpath guard, 3 payloads).
+
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 928-test suite (`pytest tests -q`, re-measured
-2026-10-15). Nothing here is marketing.*
+or to a green test in the 1020-test suite (`pytest tests -q`, re-measured
+2026-10-18). Nothing here is marketing.*

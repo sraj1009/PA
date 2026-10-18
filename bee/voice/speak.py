@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -171,8 +172,26 @@ def _play_media(path: Path) -> bool:
         if not wav:
             log.info("no MP3 decoder available (install PyAV or put ffmpeg on PATH)")
             return False
-        winsound.PlaySound(wav, winsound.SND_MEMORY)
-        return True
+        # PlaySound(SND_MEMORY) blocks for the whole clip — and can block
+        # FOREVER on a wedged audio endpoint (no device, stuck COM). Run it in
+        # a daemon thread bounded by the clip's duration instead of hanging
+        # the caller (this stalled the REPL prompt, and /exit, until timeout).
+        ok = {"v": False}
+
+        def _play():
+            try:
+                winsound.PlaySound(wav, winsound.SND_MEMORY)
+                ok["v"] = True
+            except Exception as e:
+                log.info("winsound playback failed: %s", e)
+
+        t = threading.Thread(target=_play, daemon=True, name="bee-tts-play")
+        t.start()
+        t.join(timeout=min(90.0, 10.0 + len(wav) / 16000.0))
+        if t.is_alive():
+            log.info("winsound playback timed out (wedged audio endpoint?)")
+            return False
+        return ok["v"]
     except Exception as e:
         log.info("winsound playback failed: %s", e)
         return False
@@ -194,7 +213,9 @@ def _edge_tts_speak(text: str, key: str = "", voice: str = "en-US-AndrewMultilin
     async def gen():
         import asyncio
         communicate = edge_tts.Communicate(text, voice, rate=_edge_rate_pct(rate))
-        await communicate.save(str(out))
+        # Bounded: an unbounded network wait here wedged the REPL (answer
+        # printed, then silence until the shell timeout killed the process).
+        await asyncio.wait_for(communicate.save(str(out)), timeout=25)
 
     try:
         import asyncio
@@ -228,6 +249,45 @@ def speak(text: str, cfg) -> bool:
         return True
     log.info("no TTS backend available — install pyttsx3 (offline) or set voice.edge_key (edge-tts)")
     return False
+
+
+_speaker_q: "queue.Queue | None" = None
+_speaker_lock = threading.Lock()
+
+
+def _speaker_loop():
+    while True:
+        text, cfg = _speaker_q.get()
+        try:
+            speak(text, cfg)
+        except Exception as e:            # never kill the worker
+            log.info("speech failed: %s: %s", type(e).__name__, e)
+        finally:
+            _speaker_q.task_done()
+
+
+def enqueue(text: str, cfg) -> bool:
+    """Queue `text` for serialized BACKGROUND speech; returns immediately.
+
+    The REPL used to call speak() inline: with a wedged audio stack that
+    stalled the prompt — and /exit — behind the full backend timeouts
+    (pyttsx3 join seconds, then an unbounded edge-tts network wait).
+    The voice loop still calls speak() synchronously (half-duplex by design:
+    it must not listen while talking)."""
+    if not (cfg.voice.enabled and cfg.voice.speak):
+        return False
+    global _speaker_q
+    with _speaker_lock:
+        if _speaker_q is None:
+            _speaker_q = queue.Queue(maxsize=5)
+            threading.Thread(target=_speaker_loop, daemon=True,
+                             name="bee-speaker").start()
+        try:
+            _speaker_q.put_nowait(((text or "").strip(), cfg))
+            return True
+        except queue.Full:
+            log.info("speech queue full — dropping utterance")
+            return False
 
 
 def py_voices() -> list[str]:

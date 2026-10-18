@@ -112,8 +112,125 @@ def test_a_cloud_golden_is_trained_on_its_real_task_not_its_dedupe_key(tmp_path,
     stats = build_sft.build(out=out)
     assert stats["golden_in"] == 1
     sample = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
-    prompt = sample["messages"][0]["content"]
+    # P1 parity: messages[0] is the canonical system prompt (loss=False);
+    # the trained-on prompt is the first user message.
+    assert sample["messages"][0]["role"] == "system"
+    assert sample["messages"][0]["loss"] is False
+    prompt = next(m["content"] for m in sample["messages"] if m["role"] == "user")
     assert prompt == "explain photosynthesis"
     assert not re.fullmatch(r"[0-9a-f]{32}", prompt), prompt
     assert sample["messages"][-1]["content"] == "Plants turn light into food."
     assert sample["metadata"]["date"] == "2026-10-13"
+
+
+def test_nightly_qlora_trigger_opts_out_by_default():
+    """A multi-hour GPU burn must never start by surprise: with the default
+    config the trigger reports why it skips and runs nothing."""
+    import types
+    from bee.config import load_config
+    from bee import scheduler
+    cfg = load_config()
+    assert cfg.training.auto_qlora is False
+    ctx = types.SimpleNamespace(cfg=cfg, workspace=cfg.workspace)
+    out = scheduler.maybe_train_qlora(ctx)
+    assert "skipped" in out and "auto_qlora" in out["skipped"], out
+
+
+def test_auto_chain_stops_cleanly_without_llama_cpp(tmp_path, monkeypatch):
+    """P0-5: a successful training run is merged; without an unpacked
+    llama.cpp the chain reports the exact remedy and queues NOTHING — the
+    gate must never be pointed at a half-built artifact."""
+    import subprocess
+    from types import SimpleNamespace
+    from bee import paths, scheduler
+    from bee.evals import gate
+
+    monkeypatch.setattr(paths, "PROJECT_ROOT", tmp_path)
+    adapter = tmp_path / "models" / "bee-qlora-20261017"
+    adapter.mkdir(parents=True)
+    (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+    queued = tmp_path / "train" / "gate_candidate.json"
+    monkeypatch.setattr(gate, "GATE_CANDIDATE_FILE", queued)
+
+    def fake_run(cmd, **kw):
+        cmd = [str(c) for c in cmd]
+        if "merge_export.py" in " ".join(cmd):
+            out = Path(cmd[cmd.index("--out") + 1])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "Modelfile").write_text("FROM x\n", encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    cfg = SimpleNamespace(training=SimpleNamespace(llama_cpp_dir=""))
+    out = scheduler._auto_chain(SimpleNamespace(cfg=cfg), adapter,
+                                tmp_path / "train" / "qlora.log")
+    assert "llama_cpp_dir" in out.get("note", "") and not out.get("queued"), out
+    assert not queued.exists()
+    assert (tmp_path / "models" / "bee-merged-20261017" / "Modelfile").exists()
+
+
+def test_auto_chain_imports_and_queues_the_model(tmp_path, monkeypatch):
+    """The full P0-5 chain: merge -> f16 GGUF -> Q4_K_M -> `ollama create` ->
+    gate queue. The queue write is the LAST step (only a fully imported model
+    is ever queued)."""
+    import subprocess
+    from types import SimpleNamespace
+    from bee import paths, scheduler
+    from bee.evals import gate
+
+    monkeypatch.setattr(paths, "PROJECT_ROOT", tmp_path)
+    adapter = tmp_path / "models" / "bee-qlora-20261017"
+    adapter.mkdir(parents=True)
+    llama = tmp_path / "llamacpp"
+    llama.mkdir()
+    (llama / "convert_hf_to_gguf.py").write_text("# stub\n", encoding="utf-8")
+    (llama / "llama-quantize.exe").write_text("", encoding="utf-8")
+    queued = tmp_path / "train" / "gate_candidate.json"
+    monkeypatch.setattr(gate, "GATE_CANDIDATE_FILE", queued)
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        cmd = [str(c) for c in cmd]
+        seen.append(cmd)
+        joined = " ".join(cmd)
+        if "merge_export.py" in joined:
+            out = Path(cmd[cmd.index("--out") + 1])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "Modelfile").write_text("FROM q4\n", encoding="utf-8")
+        elif "convert_hf_to_gguf.py" in joined:
+            Path(cmd[cmd.index("--outfile") + 1]).write_text("f16", encoding="utf-8")
+        elif "llama-quantize" in joined:
+            Path(cmd[2]).write_text("q4", encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    cfg = SimpleNamespace(training=SimpleNamespace(llama_cpp_dir=str(llama)))
+    out = scheduler._auto_chain(SimpleNamespace(cfg=cfg), adapter,
+                                tmp_path / "train" / "qlora.log")
+    assert out.get("queued") and out["model"] == "bee-qlora-20261017", out
+    data = json.loads(queued.read_text(encoding="utf-8"))
+    assert data["model"] == "bee-qlora-20261017" and data["src"] == "auto-chain"
+    kinds = ["merge" if "merge_export.py" in " ".join(c) else
+             "convert" if "convert_hf_to_gguf.py" in " ".join(c) else
+             "quantize" if "llama-quantize" in " ".join(c) else
+             "ollama" if "create" in c else "?" for c in seen]
+    assert kinds == ["merge", "convert", "quantize", "ollama"], kinds
+
+
+def test_nightly_build_uses_loose_plus_quality(tmp_path, monkeypatch):
+    """The nightly dataset must not starve: unknown-verdict episodes with a
+    substantive output are included above the quality floor, while fail
+    verdicts are still never trained on."""
+    from bee.pipeline import build_sft
+    good_unknown = {
+        "task": "explain in detail how photosynthesis works in desert plants",
+        "output": "Desert plants use CAM photosynthesis. " * 20,
+        "ok": True, "events": [], "model": "cloud"}
+    failed = {"task": "do the thing", "output": "error: broke",
+              "ok": False, "events": [], "model": "local"}
+    monkeypatch.setattr(build_sft, "load_episodes", lambda: [good_unknown, failed])
+    monkeypatch.setattr(build_sft, "load_golden", lambda: [])
+    out = tmp_path / "sft.jsonl"
+    stats = build_sft.build(out=out, keep_unknown=True, min_quality=0.6)
+    assert stats["samples_out"] == 1, stats
+    assert stats["by_verdict"].get("fail", 0) == 1

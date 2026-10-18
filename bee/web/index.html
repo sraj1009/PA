@@ -25,6 +25,10 @@
   .msg.bee { border-left:3px solid #4da3ff; }
   .msg.tool { font-size:12px; color:var(--dim); border-left:3px solid #39424e; background:#0e1218; }
   .msg.err { border-left:3px solid var(--err); color:var(--err); }
+  .msg.perm { border-left:3px solid #ffb020; }
+  .perm .prow { display:flex; gap:10px; margin-top:10px; }
+  .perm .prow button { padding:4px 16px; font-size:13px; }
+  .perm button.allow { background:var(--acc); color:#0b0d10; font-weight:700; border:none; }
   .meta { font-size:11px; color:var(--dim); margin-top:8px; }
   .row { display:flex; gap:10px; margin-top:18px; }
   textarea { flex:1; background:#0e1218; color:var(--txt); border:1px solid var(--line); border-radius:10px;
@@ -129,6 +133,36 @@ async function send(task) {
   }
 }
 
+// guard 'ask' raised mid-task: the server waits for this card's answer
+// (Allow/Deny, bearer-authed) instead of auto-denying an unattended server.
+function showApproval(ev) {
+  const d = add('perm', '⚠ approval needed: ' + (ev.tool||'') +
+                       (ev.preview ? '  —  ' + ev.preview : ''),
+                ev.reason || '');
+  const row = document.createElement('div'); row.className = 'prow';
+  const mk = (label, cls, grant) => {
+    const b = document.createElement('button'); b.textContent = label; if (cls) b.className = cls;
+    b.onclick = async () => {
+      row.remove();
+      const stamp = document.createElement('div'); stamp.className = 'meta';
+      try {
+        const r = await authedFetch('/permission', {method:'POST',
+          headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: ev.id, grant})});
+        const j = await r.json();
+        stamp.textContent = j.ok ? (grant ? '✔ allowed' : '✘ denied')
+                                 : ('✘ ' + (j.error || 'approval failed'));
+      } catch (e) { stamp.textContent = '✘ approval failed: ' + e; }
+      d.appendChild(stamp);
+      log.scrollTop = log.scrollHeight;
+    };
+    return b;
+  };
+  row.appendChild(mk('Allow', 'allow', true));
+  row.appendChild(mk('Deny', 'rec', false));
+  d.appendChild(row);
+  log.scrollTop = log.scrollHeight;
+}
+
 async function sendInner(task) {
   add('user', task);
   const d = add('bee', 'thinking…');
@@ -148,8 +182,9 @@ async function sendInner(task) {
       if (!line.startsWith('data: ')) continue;
       let ev; try { ev = JSON.parse(line.slice(6)); } catch(e){ continue; }
       if (ev.type === 'result') { final = ev; break; }
-      if (ev.type === 'tool_call') add('tool', '→ ' + ev.tool + ' ' + JSON.stringify(ev.args||{}).slice(0,160));
+      if (ev.type === 'tool_start') add('tool', '→ ' + ev.tool + ' ' + JSON.stringify(ev.args||{}).slice(0,160));
       if (ev.type === 'tool_result') add('tool', (ev.ok?'✓':'✗') + ' ' + ev.tool + ' (' + ev.seconds + 's) ' + (ev.preview||'').slice(0,120));
+      if (ev.type === 'permission_request') showApproval(ev);
     }
   }
   d.textContent = final.output || final.error || '(no output)';

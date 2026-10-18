@@ -20,6 +20,23 @@ from ..monitor import metrics
 CLOUD_HINT = re.compile(r"\b(use cloud|cloud mode|deep reasoning|use llm cloud)\b", re.I)
 LOCAL_HINT = re.compile(r"\b(use local|local model|local only|offline)\b", re.I)
 CLOUD_PREFIX = re.compile(r"^\s*cloud:\s*", re.I)
+# Local bee4b is text-only: image-bearing tasks need the multimodal cloud
+# tier. Explicit LOCAL_HINT still wins (offline intent is a privacy choice —
+# the loop then answers best-effort or fails honestly). "docker image" is
+# excluded: a container reference, not a picture.
+IMAGE_EXT = re.compile(r"\.(png|jpe?g|webp|gif|bmp|tiff?)\b", re.I)
+IMAGE_WORDS = re.compile(
+    r"\b(photo|picture|screenshot|selfie|image|painting|diagram|meme|camera"
+    r"|take a photo|describe (this|the) image|what (is in|does) (this|the) (photo|picture|image))\b", re.I)
+_DOCKER_IMAGE = re.compile(r"\bdocker\s+image\b", re.I)
+
+
+def needs_vision(task: str) -> bool:
+    """True when the task refers to an actual picture (not a docker image)."""
+    t = task or ""
+    if _DOCKER_IMAGE.search(t):
+        return False
+    return bool(IMAGE_EXT.search(t) or IMAGE_WORDS.search(t))
 
 COMPLEX_CUES = [
     "architect", "design a system", "design a solution", "refactor", "audit",
@@ -262,6 +279,8 @@ def route(task: str, cfg: Config, model: str | None = None) -> dict:
         return {"name": "cloud", "escalated": True, "source": "explicit", "conf": 1.0}
     if LOCAL_HINT.search(t):
         return {"name": "local", "escalated": False, "source": "explicit", "conf": 1.0}
+    if needs_vision(t) and cfg.cloud.enabled and cfg.cloud.llm:
+        return {"name": "cloud", "escalated": True, "source": "vision", "conf": 1.0}
     st = smalltalk(t)
     if st is not None:
         return {"name": "smalltalk", "escalated": False, "source": "deterministic",

@@ -82,6 +82,21 @@ def test_skips_do_not_rescue_a_failing_run():
     assert s["skipped"] == 1 and s["single_run"] is False
 
 
+def test_pinned_model_skips_fastpath_only_tasks():
+    """P1-3: a task asserting the fastpath tier has nothing to measure when the
+    suite pins a model (the fastpath tier is bypassed by design), so it is
+    SKIPPED — not failed — in both gate arms, and still scored interactively."""
+    from bee.evals.runner import _should_skip
+
+    class _Ctx:
+        cfg = None
+
+    t = {"id": "fp_block_run_code_rmtree", "skip_if": "pinned_model"}
+    assert _should_skip(t, _Ctx(), model=None) is False
+    assert _should_skip(t, _Ctx(), model="bee4b") is True
+    assert _should_skip({"id": "x"}, _Ctx(), model="bee4b") is False
+
+
 def test_the_resume_helper_takes_the_latest_row_by_ts(tmp_path, monkeypatch):
     """eval_resume.py picked "last row in file order", the runner's own summary
     compares `ts`, and the two definitions diverge on any ledger that was rotated,
@@ -134,3 +149,109 @@ def test_the_report_never_calls_the_ledger_the_latest_run(tmp_path, monkeypatch)
     assert "historical" not in one, one
     assert agent_eval_lines(None) == [
         "- Agent eval suite: no runs recorded yet — `python -m bee.cli eval` (needs the LLM)."]
+
+
+# ------------------------------------------- P1-3: CI, repeats, suite shape
+def test_wilson_interval_matches_the_textbook_values():
+    """The printed score is a point estimate over tens of tasks; P1-3 publishes
+    its 95% interval so a one-task gate delta is not read as a measurement.
+    Normal approximation is useless at k=0/k=n (zero width where certainty is
+    lowest), Wilson is not — pinned against its closed-form values."""
+    from bee.evals.runner import wilson_interval
+    assert wilson_interval(0, 0) is None
+    lo, hi = wilson_interval(10, 10)
+    assert hi == 1.0 and 0.70 < lo < 0.75
+    lo0, hi0 = wilson_interval(0, 10)
+    assert lo0 == 0.0 and abs(hi0 - 0.2775) < 0.005
+    lo3, hi3 = wilson_interval(3, 4)
+    assert abs(lo3 - 0.3006) < 0.005 and abs(hi3 - 0.9544) < 0.005
+
+
+def test_the_run_score_is_published_with_its_confidence_interval():
+    rows = [{"id": f"t{i}", "ok": i < 4} for i in range(6)]      # 4/6 = 66.7%
+    s = summarize(_history(6, ok_ids={f"t{i}" for i in range(4)}), rows)
+    assert s["run_score"] == "4/6"
+    lo, hi = s["ci95"]
+    assert lo < 66.7 < hi, s
+    assert s["ci95_str"] == f"{lo:.1f}-{hi:.1f}%"
+    assert summarize({"x": {"id": "x", "ts": "x", "ok": True}}, [])["ci95"] is None
+
+
+def test_repeat_tasks_publish_per_rep_counts_and_a_flake_list():
+    """A repeat task that failed some reps reports WHICH reps — "2/3" is flake
+    evidence, "0/3" is a break; the flake list is what the gate prints next to
+    a near-threshold verdict."""
+    rows = [{"id": "rep", "ok": False, "reps_passed": 2, "reps_total": 3},
+            {"id": "clean", "ok": True, "reps_passed": 2, "reps_total": 2}]
+    s = summarize({"rep": {"id": "rep", "ts": "x", "ok": False},
+                   "clean": {"id": "clean", "ts": "x", "ok": True}}, rows)
+    assert s["flaky"] == [{"id": "rep", "passed": 2, "total": 3}]
+    assert s["run_score"] == "1/2"
+
+
+def test_every_repeat_rep_must_pass_and_all_reps_run(monkeypatch):
+    """The old loop let a later passing rep overwrite an earlier failure, so
+    `repeat: N` was documented as "every run must pass" and computed as "the
+    last run passed". P1-3 also needs the true count: a failed middle rep with
+    a passing last rep row would have been hidden."""
+    from types import SimpleNamespace
+    from bee.agent.loop import AgentResult
+    from bee.evals import runner
+
+    class FakeKernel:
+        def __init__(self, oks):
+            self.oks = list(oks)
+            self.calls = []
+
+        def run(self, task, session_id=None, model=None, on_event=None, max_iters=15):
+            self.calls.append(session_id)
+            ok = self.oks.pop(0)
+            return SimpleNamespace(agent_result=AgentResult(
+                output="19 * 23 = 437", ok=ok, error="" if ok else "rep failed"))
+
+    tasks = [{"id": "rep_task", "task": "What is 19 * 23? Answer with just the number.",
+              "expect": ["437"], "repeat": 3}]
+    monkeypatch.setattr(runner, "load_tasks", lambda: tasks)
+
+    ctx = SimpleNamespace(kernel=FakeKernel([True, False, True]), cancel_event=None)
+    row = runner._run_tasks(ctx, None, None)[0]
+    assert len(ctx.kernel.calls) == 3, "all reps run — the flake count is the evidence"
+    assert row["ok"] is False, "a failed middle rep fails the task"
+    assert (row["reps_passed"], row["reps_total"]) == (2, 3)
+
+    ctx2 = SimpleNamespace(kernel=FakeKernel([True, True, True]), cancel_event=None)
+    row2 = runner._run_tasks(ctx2, None, None)[0]
+    assert row2["ok"] is True and row2["reps_passed"] == 3
+
+
+def test_the_eval_suite_tasks_are_all_scored_by_a_nonvacuous_rubric():
+    """P1-3 expanded the suite 21 -> ~60 for statistical power. An `expect: []`
+    task with no event assertion can only ever pass vacuously, and the tier
+    assertions have to respect how the events actually flow: fastpath tasks
+    emit no fastpath route event (the first route event is the router's), while
+    det tasks do (model="det")."""
+    import pathlib
+    import yaml
+    tasks = yaml.safe_load(
+        pathlib.Path("evals/tasks.yaml").read_text(encoding="utf-8"))["tasks"]
+    ids = [t["id"] for t in tasks]
+    assert len(ids) == len(set(ids))
+    assert len(tasks) >= 60, f"expansion target is ~60 tasks, found {len(tasks)}"
+    rubric = ("expect", "expect_any", "expect_tool", "expect_route",
+              "expect_guard", "expect_verify", "expect_redact")
+    for t in tasks:
+        assert any(t.get(k) for k in rubric), f"{t['id']} has no rubric"
+        rep = t.get("repeat", 1)
+        assert isinstance(rep, int) and rep >= 1, t["id"]
+    known_skip = {"cloud", "pinned_model"}
+    for t in tasks:
+        if t.get("skip_if"):
+            assert t["skip_if"] in known_skip, (
+                f"{t['id']}: unknown skip_if {t['skip_if']!r} would be silently ignored")
+    for t in tasks:
+        if str(t["id"]).startswith("fp_"):
+            assert not t.get("expect_route"), (
+                f"{t['id']} asserts a route event a fastpath never emits")
+        if str(t["id"]).startswith("det_"):
+            assert t.get("expect_route") == "det", (
+                f"{t['id']} must pin the deterministic tier ticket")

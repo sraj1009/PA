@@ -27,6 +27,21 @@ except Exception:  # pragma: no cover
     HAS_LITELLM = False
 
 
+# P0-2 (2026-10-17): provider-level cooldown. A rate-limited / auth-failed /
+# 5xx cloud provider kind is "cooling" for cfg.cloud.quota_cooldown seconds,
+# during which "cloud" resolves to cfg.cloud.fallback_llm (second provider).
+# Keyed by provider KIND — a quota belongs to the account, not the model.
+# In-process by design: a fresh process re-probes once, and a failed probe
+# is cheap next to the day-long freeze a single-provider quota exhaustion
+# used to cause (the 2026-10-17 J3 gate VOID).
+_COOLDOWN: dict[str, float] = {}
+
+
+def _cooling(kind) -> bool:
+    """Is this provider kind currently in quota/error cooldown?"""
+    return _COOLDOWN.get(kind.value, 0.0) > time.time()
+
+
 def _is_gemini3plus(model: str) -> bool:
     """True for Gemini 3+ (gemini-3-flash-preview, gemini-3.6-flash, flash-latest/preview).
 
@@ -120,7 +135,7 @@ class LLMClient:
         partial result is returned (not retried — retrying would duplicate
         text). Tool calls accumulate from deltas into the final shape.
         """
-        info = self.cfg.get_llm(name)
+        info = self._call_info(name)
         model = self._model_ref(info)
         kwargs = dict(
             model=model,
@@ -161,6 +176,12 @@ class LLMClient:
                 return self._ollama_stream(info, kwargs, tools, on_token, tok, emitted)
             except LLMError as e:
                 last_err = e
+                # P0-2: start-of-stream cloud errors fail over to the second
+                # provider too (nothing reached the user yet).
+                if emitted["n"] == 0 and self._cloud_failover(name, e):
+                    return self.chat_stream(name, messages, on_token, tools, max_retries,
+                                            max_tokens=max_tokens, temperature=temperature,
+                                            timeout=timeout)
                 if e.retryable and attempt < max_retries and emitted["n"] == 0:
                     time.sleep(1.0 * (2 ** attempt))
                     continue
@@ -172,6 +193,10 @@ class LLMClient:
             except Exception as e:
                 err = LLMError.classify(str(e))
                 last_err = err
+                if emitted["n"] == 0 and self._cloud_failover(name, err):
+                    return self.chat_stream(name, messages, on_token, tools, max_retries,
+                                            max_tokens=max_tokens, temperature=temperature,
+                                            timeout=timeout)
                 if err.retryable and attempt < max_retries and emitted["n"] == 0:
                     time.sleep(1.0 * (2 ** attempt))
                     continue
@@ -273,7 +298,7 @@ class LLMClient:
         them for short, focused calls. Gemini 3+ always omits sampling params
         (Google deprecates them; temp<1.0 degrades reasoning there).
         """
-        info = self.cfg.get_llm(name)
+        info = self._call_info(name)
         model = self._model_ref(info)
         kwargs = dict(
             model=model,
@@ -306,12 +331,22 @@ class LLMClient:
                                            max_tokens, temperature, timeout)
             except LLMError as e:
                 last_err = e
+                # P0-2: a quota/auth/5xx cloud failure fails over NOW — no
+                # backoff burn re-probing a known-exhausted provider.
+                if self._cloud_failover(name, e):
+                    return self.chat(name, messages, tools, max_retries, on_tool_call,
+                                     max_tokens=max_tokens, temperature=temperature,
+                                     timeout=timeout)
                 if not e.retryable or attempt >= max_retries:
                     raise
                 time.sleep(1.5 * (2 ** attempt))
             except Exception as e:  # classify unknowns
                 err = LLMError.classify(str(e))
                 last_err = err
+                if self._cloud_failover(name, err):
+                    return self.chat(name, messages, tools, max_retries, on_tool_call,
+                                     max_tokens=max_tokens, temperature=temperature,
+                                     timeout=timeout)
                 if not err.retryable or attempt >= max_retries:
                     raise LLMError(str(e), err.kind, err.retryable) from e
                 time.sleep(1.5 * (2 ** attempt))
@@ -393,6 +428,73 @@ class LLMClient:
         if info["cloud"]:
             return info["name"]
         return f"ollama_chat/{info['name']}" if HAS_LITELLM else info["name"]
+
+    # ------------------------------------------------- P0-2 provider failover
+    def _call_info(self, name: str) -> dict:
+        """cfg.get_llm(name) + P0-2 cooldown: while the configured cloud
+        primary's provider kind is cooling and cfg.cloud.fallback_llm is
+        configured + credentialed, 'cloud' (and the primary ref itself)
+        resolve to the fallback — same call shape, second provider, its own
+        credentials/base_url. Everything else is untouched."""
+        info = self.cfg.get_llm(name)
+        fb = self._fallback_model(info)
+        if not fb:
+            return info
+        out = dict(info)
+        out["name"] = fb
+        out["base_url"] = getattr(self.cfg.cloud, "fallback_base_url", "") or ""
+        out["api_key"] = getattr(self.cfg.cloud, "fallback_api_key", "") or ""
+        return out
+
+    def _fallback_model(self, info: dict) -> str:
+        """The fallback ref when it may serve this call, else ''."""
+        cfg = self.cfg
+        if not info.get("cloud") or info.get("name") != cfg.cloud.llm:
+            return ""                   # only the managed primary fails over
+        fb = (getattr(cfg.cloud, "fallback_llm", "") or "").strip()
+        if not fb or fb == cfg.cloud.llm:
+            return ""
+        from . import providers as pv
+        fb_kind = pv.kind_for_model(fb)
+        if fb_kind is None:
+            return ""                   # a bare name is a LOCAL model — not cloud
+        if not (getattr(cfg.cloud, "fallback_api_key", "") or pv.key_for(fb_kind)):
+            return ""                   # never promise failover without credentials
+        primary_kind = pv.kind_for_model(cfg.cloud.llm) or pv.ProviderKind.GEMINI
+        if not _cooling(primary_kind) or _cooling(fb_kind):
+            return ""
+        return fb
+
+    def _cloud_failover(self, cur_name: str, err: "LLMError") -> bool:
+        """Cool the primary's provider down and let the caller retry.
+
+        Returns True exactly ONCE per failure episode: the first quota/auth/
+        5xx error while the primary is healthy cools its provider kind
+        (quota_cooldown seconds, floor 30s) and the caller re-issues the call
+        — `_call_info` then resolves the fallback. If the fallback fails too,
+        `_cooling(primary)` is already set, so this returns False and the
+        error surfaces honestly (rather than ping-ponging providers)."""
+        cfg = self.cfg
+        if err.kind not in ("rate_limit", "auth", "overloaded", "server"):
+            return False
+        if cur_name != "cloud" and cur_name != cfg.cloud.llm:
+            return False
+        fb = (getattr(cfg.cloud, "fallback_llm", "") or "").strip()
+        if not fb or fb == cfg.cloud.llm:
+            return False
+        from . import providers as pv
+        fb_kind = pv.kind_for_model(fb)
+        if fb_kind is None or not (getattr(cfg.cloud, "fallback_api_key", "")
+                                   or pv.key_for(fb_kind)):
+            return False
+        primary_kind = pv.kind_for_model(cfg.cloud.llm) or pv.ProviderKind.GEMINI
+        if _cooling(primary_kind):
+            return False                # this failing call was already the fallback
+        cooldown = max(30.0, float(getattr(cfg.cloud, "quota_cooldown", 900) or 900))
+        _COOLDOWN[primary_kind.value] = time.time() + cooldown
+        log.warning("cloud primary %s failed (%s) — cooling %ss, failing over to %s",
+                    cfg.cloud.llm, err.kind, int(cooldown), fb)
+        return True
 
     def _apply_local_options(self, info: dict, kwargs: dict) -> None:
         """Put the Ollama *server* options onto the primary (litellm) request.

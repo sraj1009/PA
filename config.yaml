@@ -40,6 +40,15 @@ cloud:
   llm: "gemini/gemini-3.6-flash"
   api_key: ""              # env-var driven (OPENAI_API_KEY / GOOGLE_API_KEY / XAI_API_KEY)
   base_url: ""
+  # P0-2: second provider for the SAME call when the primary hits a rate
+  # limit / auth error / 5xx. The primary's provider is then skipped for
+  # quota_cooldown seconds and calls go to fallback_llm (its own credentials:
+  # fallback_api_key, else the provider env key). z.ai (GLM) = ZAI_API_KEY:
+  #   zai/glm-5.3-flash   xai/grok-2-latest   deepseek/deepseek-chat
+  fallback_llm: "zai/glm-5.3-flash"
+  fallback_api_key: ""
+  fallback_base_url: ""
+  quota_cooldown: 900      # seconds to skip a provider kind after 429/auth/5xx
   max_tokens: 8192
   temperature: 0.3     # non-Gemini-3 cloud models only; Gemini 3+ omits it (Google:
                        # default 1.0 — temp<1.0 degrades reasoning + loops; see client.py)
@@ -78,7 +87,7 @@ scheduler:
 
 guard:
   enabled: true
-  mode: cli          # cli (prompt to approve) | unattended (auto-deny) | always (auto-approve, unsafe)
+  mode: cli          # cli (prompt) | unattended (auto-deny). "always" is REFUSED at load (falls back to cli).
 
 privacy:
   redact_cloud: true # PII (email/phone/card/keys/Aadhaar/secrets) redacted before CLOUD calls; local never redacted
@@ -174,3 +183,36 @@ automation:
 # AgentKernel._reflect; the eval turns it off to keep scored runs deterministic.
 learning:
   reflect: true                # false = never write or spend a reflection call
+  # P1: plan-first execution. Multi-step tasks (and requests that ask for a
+  # plan) get an explicit plan from the local planner tool BEFORE the loop
+  # starts, injected into the working context — the 3B follows numbered steps
+  # far better than it invents them mid-task. One local call per qualifying
+  # task; deterministic tiers never reach it. Gated on a real LLMClient, so
+  # scripted tests see an untouched call sequence (same rule as critique).
+  plan_first: true
+
+# J3 — model-upgrade quality gate (bee.evals.gate; nightly `model_gate` job,
+# manual run: /gate in the REPL). After a training run + merge + `ollama create`,
+# set `candidate` to the new local model. The gate seeds the ACTIVE model's
+# baseline (one full eval run), scores the candidate, and promotes it — by
+# writing models.yaml (local_model) — only when it beats the baseline by
+# `margin` with no structural regressions.
+model_gate:
+  enabled: true
+  candidate: "bee4b-v2"        # SFT adapter 2026-10-17 (merged -> Q4_K_M gguf)
+  margin: 1
+  # P0-5: tasks the two arms disagree on are re-run this many EXTRA times per
+  # side; majority decides (one flaky task can no longer flip a verdict).
+  adjudication_rounds: 2
+
+# P0-5: nightly self-improvement chain. auto_qlora (opt-in) trains nightly on
+# train/sft_v1.jsonl; after a successful run the adapter is merged, GGUF-
+# converted + Q4_K_M-quantized and imported into Ollama when llama_cpp_dir
+# points at an unpacked llama.cpp (convert_hf_to_gguf.py at its root,
+# llama-quantize*.exe alongside) — and the finished model is queued for the
+# J3 gate (train/gate_candidate.json): no hand-edited candidate needed.
+# The path below is the unpacked b11711 release+source used for bee4b-v2;
+# move llama.cpp somewhere stable and update it (empty = merge-only).
+training:
+  auto_qlora: false
+  llama_cpp_dir: "C:/Users/mshri/AppData/Local/Temp/opencode/llamacpp"

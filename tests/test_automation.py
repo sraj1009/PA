@@ -580,7 +580,7 @@ def test_function_job_real_registered_work_and_unknown_fails(tmp_path):
     # the five nightly functions are registered as REAL scheduler work
     for fn in ("bee.scheduler.consolidate", "bee.scheduler.rebuild_vectors",
                "bee.scheduler.maybe_train_router", "bee.scheduler.maybe_teach_back",
-               "bee.scheduler.maybe_build_sft"):
+               "bee.scheduler.maybe_build_sft", "bee.scheduler.maybe_train_qlora"):
         assert fn in FUNCTIONS
 
     tmp_ws = tmp_path / "ws"

@@ -10,11 +10,33 @@ def resolve(root: Path, p: str | None) -> Path:
     root = root.resolve()
     if not p:
         return root
+    _reject_unsafe_name(p)
     q = Path(p)
     target = (root / q).resolve() if not q.is_absolute() else q.resolve()
     if target != root and root not in target.parents:
         raise ValueError(f"path escapes workspace: {p}")
     return target
+
+
+def _reject_unsafe_name(p: str) -> None:
+    """Windows name-shape attacks the resolve() check cannot see: ADS streams
+    (evil.txt:secret), trailing dots/spaces (stripped by Win32 to a different
+    file), and NTFS reserved names. Credential files are refused outright —
+    tools must never overwrite the workspace .env."""
+    low = (p or "").replace("/", "\\").lower()
+    parts = [seg for seg in low.split("\\") if seg not in ("", ".")]
+    if ".env" in parts:
+        raise ValueError("refused: tools must never write the workspace .env")
+    for seg in parts:
+        if seg == "..":
+            continue  # resolve() judges traversal by the real path, not text
+        if ":" in seg:
+            raise ValueError(f"refused ADS/drive-qualified segment: {seg}")
+        if seg != seg.rstrip(" ."):
+            raise ValueError(f"refused trailing dot/space segment: {seg}")
+        if seg.split(".")[0] in ("con", "prn", "aux", "nul") or any(
+                seg.split(".")[0] == f"{n}{i}" for n in ("com", "lpt") for i in range(1, 10)):
+            raise ValueError(f"refused reserved device name: {seg}")
 
 def _read_file(root: Path, path: str, start: int = 0, end: int = 0, limit: int = 120000) -> dict:
     try:
@@ -48,6 +70,10 @@ def _write_file(root: Path, path: str, content: str, append: bool = False, creat
     try:
         if create_dirs:
             f.parent.mkdir(parents=True, exist_ok=True)
+        # Check-then-use: re-resolve after mkdir — a symlink swapped in
+        # between (or a pre-planted dir symlink) resolves outside and is
+        # refused by the containment check above instead of being written.
+        f = resolve(root, path)
         mode = "a" if append else "w"
         with f.open(mode, encoding="utf-8") as fh:
             fh.write(content)
@@ -88,6 +114,7 @@ def _edit_file(root: Path, path: str, old: str, new: str, replace_all: bool = Fa
         return {"error": f"old_string found {count} times — provide more context or set replace_all=true"}
     text2 = text.replace(old, new) if replace_all else text.replace(old, new, 1)
     try:
+        f = resolve(root, path)  # re-resolve: see _write_file TOCTOU note
         f.write_text(text2, encoding="utf-8")
         return {"path": str(f), "replacements": count if replace_all else 1}
     except Exception as e:

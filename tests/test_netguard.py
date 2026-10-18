@@ -63,6 +63,33 @@ def test_dns_rebinding_reloopback_blocked():
     assert "loopback" in ng.validate_url("https://ok.com", resolver=r)
 
 
+def test_fetch_discards_response_on_mid_fetch_dns_flip():
+    """TOCTOU: pre-fetch resolution public, post-fetch re-resolution
+    private (record flipped between validate and connect) — the already
+    received body must be discarded, never returned."""
+
+    class FlipResolver:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, host):
+            self.calls += 1
+            if self.calls == 1:
+                return ["93.184.216.34"]
+            return ["169.254.169.254"]
+
+    c = FakeClient([FakeResp(200, {"content-type": "text/plain"}, b"stolen-metadata")])
+    with pytest.raises(ng.NetGuardError, match="changed mid-fetch|discarding"):
+        ng.safe_get("https://flip.example", transport=c, resolver=FlipResolver())
+
+
+def test_fetch_stable_dns_passes_post_check():
+    c = FakeClient([FakeResp(200, {"content-type": "text/plain"}, b"fine")])
+    out = ng.safe_get("https://example.com", transport=c,
+                      resolver=_fake_resolver({"example.com": ["93.184.216.34"]}))
+    assert out.text == "fine"
+
+
 def test_dns_failure_blocks():
     assert "dns failure" in ng.validate_url("https://nope.invalid", resolver=_fake_resolver({}))
 

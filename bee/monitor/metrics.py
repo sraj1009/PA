@@ -36,13 +36,21 @@ def reset_enabled_cache_for_tests(value: bool | None = None) -> None:
     _enabled = value
 
 
-def _scrub(value):
+def _scrub(value, _depth: int = 0):
     """Privacy chokepoint (audit 2026-10-06): every string that reaches the
     metrics stream is redacted — passwords, API keys, auth tokens, card
     numbers, phones etc. are replaced BEFORE the row is written. Short
-    strings (tool names, enums, numbers-as-strings) are skipped for speed;
-    anything a user could have written is not.
+    top-level strings (tool names, enums, numbers-as-strings) are skipped for
+    speed; anything a user could have written is not. Nested dict/list values
+    are scrubbed recursively (depth-capped): PII inside structured args used
+    to pass through untouched.
     """
+    if _depth > 4:
+        return value
+    if isinstance(value, dict):
+        return {k: _scrub(v, _depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_scrub(v, _depth + 1) for v in value]
     if isinstance(value, str) and len(value) > 12:
         try:
             from .. import privacy
