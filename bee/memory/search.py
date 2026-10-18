@@ -78,6 +78,15 @@ class _VecStore:
         res = t.search(list(map(float, e))).limit(k).to_list()
         return [{"score": float(r.get("_distance", 0)), "source": r["source"], "text": r["text"]} for r in res]
 
+    def _drop_source(self, src: str, t=None) -> None:
+        """Delete every row of one source. Paths come from our own code, but
+        this is a filter expression — quote-escape rather than interpolate."""
+        try:
+            t = t or self._table()
+            t.delete("source = '" + str(src).replace("'", "''") + "'")
+        except Exception as e:
+            log.info("could not drop old rows for %s: %s", src, e)
+
     def replace_source(self, src: str, chunks: list[str]) -> int:
         """Re-index ONE memory file: drop its old rows, add the current chunks.
 
@@ -86,17 +95,18 @@ class _VecStore:
         the only job that refreshed the index). This is the incremental path."""
         texts = [c.strip() for c in chunks if c and c.strip()]
         if not texts:
+            # A file that now yields ZERO indexable chunks (e.g. a diary that is
+            # all log entries) must still drop whatever rows an earlier version
+            # of the filter indexed for it — returning early left those log rows
+            # retrievable until the next full rebuild.
+            if self._has_table():
+                self._drop_source(src)
             return 0
         embs = []
         for i in range(0, len(texts), 8):
             embs.extend(self.client.embed(texts[i:i + 8]))
         t = self._table()
-        try:
-            # paths come from our own code, but this is a filter expression —
-            # quote-escape rather than interpolate blindly
-            t.delete("source = '" + str(src).replace("'", "''") + "'")
-        except Exception as e:
-            log.info("could not drop old rows for %s: %s", src, e)
+        self._drop_source(src, t)
         t.add([{"id": f"{src}#{c[:60]}", "text": c[:1000], "source": src,
                 "vector": list(map(float, e))} for c, e in zip(texts, embs)])
         return len(texts)

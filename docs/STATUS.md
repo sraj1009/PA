@@ -145,8 +145,9 @@ rows below were therefore **overclaimed** and are now corrected:
   `## HH:MM [model=…] task:/result:` LOGS were indexed as memory, and because
   they quote the question they embed closest to the next time it is asked —
   ~1,300 a day, so 'Remember the hardware?' retrieved a past *failure* instead
-  of the profile line naming the RTX 3050. Logs are now dropped per paragraph
-  before chunking (1,900+ chunks -> 44 real ones). A28c records the honest
+  of the profile line naming the RTX 3050. Logs are dropped before chunking
+  (1,900+ chunks -> 44 real ones; later hardened to whole `##` sections — see the
+  2026-10-18 log). A28c records the honest
   lesson: my first version bound the new method inside `get_store` instead of the
   class, production raised `AttributeError`, and every fake-store test was green;
   there is now a test that drives the real store with only the embedder faked.)
@@ -764,9 +765,34 @@ New in the 2026-10-17 **P1 pass** (first items of the delivered roadmap's
   probes mocked, includes a no-secrets leak test and a dispatch test that
   fails if a background service starts). `-m core` green (970 passed /
   84 deselected).
+- **Memory indexing hardening — logs can never be indexed as facts (2026-10-18).**
+  Three gaps closed on top of A28d: (1) `chunk_md` drops a WHOLE `##` log
+  section, not just the header paragraph — only an entry's first paragraph
+  carries the `[model=]` marker, so a multi-paragraph log re-admitted its
+  continuation paragraphs as memory; (2) `is_transcript` also recognizes the
+  headerless log shape (a line-start `task:` + `result:` pair — tool-authored
+  diary text and older writers); (3) `replace_source` now DELETES a source's
+  rows when a file yields zero indexable chunks, so rows a pre-filter index
+  wrote for a log file stop being retrievable instead of waiting for the 12 h
+  rebuild. The nightly `consolidate()` no longer appends its summary bullets
+  raw into `longterm.md` — it goes through `md.add_facts` (dedupe/update by
+  subject, self-talk filter) and is thereby marked dirty, so consolidated
+  facts reach vector recall (the raw append had piled duplicates and never
+  queued the file). Chunking also now bounds at `##` headings: one
+  heading-dense 4 KB skill with no blank lines used to be a single whole-file
+  embedding; it is 12 section chunks now, every byte preserved. Corpus check on
+  the real memory (27 files, diary/lessons/profile/longterm/wins/skills):
+  4,295 log sections dropped — byte-identical chunks to the old filter
+  everywhere else (the single skill-file granularity diff aside). New
+  `memory status` (`python -m bee.cli memory status` / `/mem status`) shows
+  chunk counts per source, entries excluded, index age + rows, dirty queue.
+  Tests: +6 in `tests/test_rag.py` (incl. end-to-end "the log quoting the
+  question no longer outranks the profile fact" and stale-row deletion against
+  a real LanceDB store) and +4 `tests/test_memory_status.py` (hermetic).
+  Full suite green.
 
 ---
 *Every row above is traceable to the evidence column of the acceptance audit
-or to a green test in the 1054-test suite (`pytest tests -q`, re-measured
-2026-10-18 after the loop refactor + routing facade + doctor). Nothing here is
-marketing.*
+or to a green test in the 1064-test suite (`pytest tests -q`, re-measured
+2026-10-18 after the loop refactor + routing facade + doctor + memory
+hardening). Nothing here is marketing.*

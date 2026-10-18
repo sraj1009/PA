@@ -49,10 +49,14 @@ def consolidate(ctx, keep_days: int = KEEP_DAYS) -> dict:
         return {"pruned": 0, "added": 0, "error": str(e)}
     bullets = [ln.strip().lstrip("-* ").strip() for ln in summary.splitlines() if ln.strip()]
     bullets = [b for b in bullets if b][:8]
+    written = {"added": 0, "updated": 0, "duplicates": 0}
     if bullets:
-        lt = paths.LONGTERM_MD
-        cur = lt.read_text(encoding="utf-8") if lt.exists() else "# Long-term memory\n"
-        lt.write_text(cur.rstrip() + "\n\n" + "\n".join(f"- {b}" for b in bullets) + "\n", encoding="utf-8")
+        # Through add_facts, not a raw append: the raw append re-piled the same
+        # summary facts on every nightly run (no dedupe/update, no self-talk
+        # filter) and never marked the file dirty, so fresh facts stayed
+        # invisible to vector recall until the 12 h rebuild.
+        from .memory import md
+        written = md.add_facts(paths.LONGTERM_MD, "\n".join(bullets))
     # Archive (NOT delete): a bad summary must never destroy the originals.
     # Archived diaries stay under memory/diary/archive/ for inspection/restore.
     arch = paths.DIARY_DIR / "archive"
@@ -69,7 +73,9 @@ def consolidate(ctx, keep_days: int = KEEP_DAYS) -> dict:
             moved += 1
         except Exception as e:
             log.warning("could not archive %s: %s", f, e)
-    return {"pruned": moved, "added": len(bullets), "archived_to": str(arch)}
+    return {"pruned": moved, "added": written.get("added", 0),
+            "updated": written.get("updated", 0),
+            "duplicates": written.get("duplicates", 0), "archived_to": str(arch)}
 
 
 def rebuild_vectors(ctx) -> dict:

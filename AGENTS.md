@@ -42,8 +42,12 @@
   exception (yaml wins over env). New `config.yaml` sections need a dataclass +
   `_section()` loader line + yaml block, all three.
 - Memory/RAG is LanceDB + keyword RRF (`bee/brain/rag.py`, `bee/memory/`). Do not
-  add a second vector store. Diary transcripts are deliberately unindexed;
-  successes go to `memory/wins.md`, skills via `skills/*/SKILL.md`.
+  add a second vector store. Diary log entries are dropped as whole `##` sections
+  before chunking (never indexed — `md.chunk_md`); successes go to
+  `memory/wins.md`, skills via `skills/*/SKILL.md`. Durable facts
+  (profile/longterm) always write through `md.add_facts` (dedupe + update by
+  subject); the nightly consolidate goes through it too. `/mem status`
+  (`python -m bee.cli memory status`) shows source counts + index age.
 - Requirements are pinned (`==`) in every file; ML pins must match between
   `requirements.txt` and `requirements-ml.txt` (router artifact refuses major drift).
 

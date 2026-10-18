@@ -67,7 +67,7 @@ def _cmd_help(p: _Print):
         "  /model [local|cloud|name]   view or override the model for this session\n"
         "  /tools           list available tools\n"
         "  /skills          list skills\n"
-        "  /mem <query>     search memory (hybrid vector+keyword)\n"
+        "  /mem [status|<query>]  memory: hybrid search, or index status (sources, age, queue)\n"
         "  /reflect         run self-review on the last task now\n"
         "  /like | /dislike  rate the last answer (+1/-1) for training\n"
         "  /correct <text>  supply the wording it should have used (teacher sample)\n"
@@ -285,8 +285,12 @@ def _repl(cfg):
                 else:
                     p.error("usage: /speak <text>")
             elif cmd == "/mem":
+                if arg.strip().lower() == "status":
+                    from .memory import status as memstatus
+                    p.info(memstatus.render(memstatus.collect()))
+                    continue
                 if not arg:
-                    p.error("usage: /mem <query>")
+                    p.error("usage: /mem <query>   (or /mem status for the index report)")
                     continue
                 from .memory.search import memory_search_hybrid
                 res = memory_search_hybrid(ctx, arg, k=5)
@@ -974,7 +978,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="bee", description="BEE - local-first self-improving PA")
     ap.add_argument("mode", nargs="?", default="repl",
                     choices=["repl", "voice", "clap", "web", "plan", "speak", "eval", "setup",
-                              "consolidate", "livekit", "realtime", "full", "health", "doctor"])
+                              "consolidate", "livekit", "realtime", "full", "health", "doctor",
+                              "memory"])
     ap.add_argument("rest", nargs="*")
     ap.add_argument("--config", default=None, help="path to config.yaml")
     ap.add_argument("--host", default="127.0.0.1")
@@ -997,6 +1002,11 @@ def main(argv=None):
         # config itself, exit 2) and before any background service starts.
         from .monitor import doctor
         return doctor.run(args.config)
+
+    if args.mode == "memory":
+        # Read-only index status (source counts, age, queue); no services.
+        from .memory import status as memstatus
+        return memstatus.run(args.rest)
 
     from .config import load_config
     cfg = load_config(args.config)

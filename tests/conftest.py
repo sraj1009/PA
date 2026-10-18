@@ -104,6 +104,9 @@ _UNIT = [
     # Doctor (2026-10-18): `python -m bee.cli doctor` / `/doctor` — read-only
     # report; probes mocked and CLI dispatch verified to start no service.
     "test_doctor",
+    # Memory hardening (2026-10-18): `memory status` report (source counts,
+    # index age, dirty queue) over a hermetic tmp memory tree.
+    "test_memory_status",
 ]
 _INTEGRATION = [
     "test_kernel_integration", "test_automation", "test_episodes",

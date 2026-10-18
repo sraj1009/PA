@@ -236,3 +236,146 @@ def test_diary_logs_are_not_indexed_as_memory(tmp_path):
     assert "wifi password" in chunks[0]
     assert not any("I'm sorry" in c for c in chunks)
     assert not any("what time is it" in c for c in chunks)
+
+
+def test_log_entry_continuation_paragraphs_are_not_indexed(tmp_path):
+    """Only an entry's FIRST paragraph carries the [model=] header; a
+    paragraph-level filter re-admitted every continuation paragraph of a
+    multi-paragraph log as if it were memory."""
+    from bee.memory import md
+
+    f = tmp_path / "2026-10-18.md"
+    f.write_text(
+        "# diary\n\n"
+        "## 19:41:16 [model=local]\n"
+        "task: Search your memory for 'hardware'\n"
+        "result: I'm sorry, but I don't have specific information.\n\n"
+        "The honest summary: nothing is stored about the GPU yet.\n\n"
+        "## 19:45:02\nnote: the user rotated the wifi password to hunter2\n",
+        encoding="utf-8")
+    chunks = [c for _s, c in md.chunk_md(f)]
+    assert not any("GPU" in c for c in chunks), chunks
+    assert not any("honest summary" in c for c in chunks), chunks
+    assert any("hunter2" in c for c in chunks), chunks
+
+
+def test_log_shaped_entry_without_the_model_tag_is_dropped(tmp_path):
+    """Tool-authored diary text and older writers can log a task/result pair
+    without the [model=] header; the shape alone is disqualifying."""
+    from bee.memory import md
+
+    f = tmp_path / "2026-10-18.md"
+    f.write_text(
+        "# diary\n\n"
+        "## 18:02:11\n"
+        "task: what did I say about the deadline?\n"
+        "result: You said the deadline is 2026-11-01.\n\n"
+        "## 18:03:40\nnote: deadline confirmed as 2026-11-01 by the user\n",
+        encoding="utf-8")
+    chunks = [c for _s, c in md.chunk_md(f)]
+    assert not any("result:" in c for c in chunks), chunks
+    assert any("confirmed" in c for c in chunks), chunks
+
+
+def test_is_transcript_detector():
+    from bee.memory import md
+    assert md.is_transcript("## 21:41:16 [model=local]\ntask: x\nresult: y")
+    assert md.is_transcript("task: do a thing\nresult: done")
+    assert not md.is_transcript("note (fast path): the wifi password was rotated")
+    assert not md.is_transcript("## 09:12:03\nmy result: the build passed")  # anchors
+    assert not md.is_transcript("check the result: build status")
+
+
+def test_diary_log_entry_is_not_retrieved_as_a_user_fact(tmp_path, monkeypatch):
+    """End to end: the loop logs each exchange to the diary, quoting the user's
+    question; the real fact lives in the profile. Asking the question must
+    retrieve the profile fact — never the log of the last exchange."""
+    from bee import paths
+    from bee.memory import md, search as S
+
+    diary = tmp_path / "diary"
+    diary.mkdir()
+    monkeypatch.setattr(paths, "DIARY_DIR", diary)
+    monkeypatch.setattr(paths, "LESSONS_DIR", tmp_path / "lessons")
+    monkeypatch.setattr(paths, "MEMORY_DIR", tmp_path)
+    monkeypatch.setattr(paths, "PROFILE_MD", tmp_path / "profile.md")
+    monkeypatch.setattr(paths, "LONGTERM_MD", tmp_path / "longterm.md")
+    monkeypatch.setattr(paths, "SKILLS_DIR", tmp_path / "skills")
+    monkeypatch.setattr(S, "mark_dirty", lambda p: None)   # keep the write hermetic
+
+    md.add_facts(paths.PROFILE_MD, "Hardware: Windows (MoRa), NVIDIA RTX 3050 8 GB GPU")
+    md.diary_add("task: Remember the hardware of this machine?\n"
+                 "result: I'm sorry, but I don't have specific information about the GPU.",
+                 model="local")
+
+    res = md.memory_search(None, "Remember the hardware of this machine?", k=5)
+    texts = [r["text"] for r in res]
+    assert any("RTX 3050" in t for t in texts), texts
+    assert not any("I'm sorry" in t for t in texts), texts
+    assert all(r["source"].endswith("profile.md") for r in res), res
+
+
+def test_reflush_drops_rows_when_a_file_becomes_all_logs(tmp_path, monkeypatch):
+    """An index built before the log filter can hold rows from a diary file.
+    Re-flushing that file must DELETE them: `replace_source` used to return
+    early on zero chunks and leave the stale log rows retrievable until the
+    next full rebuild."""
+    from bee import paths
+    from bee.memory import md, search as S
+
+    class _FakeClient:
+        def embed(self, texts):
+            return [[0.3] * 768 for _ in texts]
+
+    vec_dir = tmp_path / "vectors"
+    vec_dir.mkdir()
+    monkeypatch.setattr(paths, "VECTOR_DIR", vec_dir)
+    S._cache = None
+    try:
+        f = tmp_path / "diary.md"
+        f.write_text("## 09:00:00 [model=local]\ntask: x\nresult: y\n", encoding="utf-8")
+        ctx = types.SimpleNamespace(cfg=None, client=_FakeClient())
+        store = S.get_store(ctx)
+        # simulate a pre-filter index: the file's log chunk is already a row
+        store.replace_source(str(f), ["## 09:00:00 [model=local]\ntask: x\nresult: y"])
+        assert store._table().count_rows() == 1
+        n = store.replace_source(str(f), [c for _s, c in md.chunk_md(f)])
+        assert n == 0
+        assert store._table().count_rows() == 0, "stale log rows must be dropped"
+    finally:
+        S._cache = None
+
+
+def test_consolidation_writes_longterm_through_add_facts(tmp_path, monkeypatch):
+    """The nightly summary used to APPEND its bullets raw: repeated runs piled
+    the same facts up again (no dedupe/update, no self-talk filter) and nothing
+    marked the file dirty, so fresh facts stayed invisible to vector recall."""
+    from bee import paths, scheduler
+    from bee.memory import search as S
+
+    diary = tmp_path / "diary"
+    diary.mkdir()
+    (diary / "2026-09-01.md").write_text("## 09:00:00\nnote: an old day\n", encoding="utf-8")
+    lt = tmp_path / "longterm.md"
+    monkeypatch.setattr(paths, "DIARY_DIR", diary)
+    monkeypatch.setattr(paths, "LONGTERM_MD", lt)
+    marked = []
+    monkeypatch.setattr(S, "mark_dirty", lambda p: marked.append(str(p)))
+    monkeypatch.setattr(scheduler, "summarize_diary",
+                        lambda ctx, files: "Project deadline: 2026-11-01\n"
+                                           "Project deadline: 2026-11-01\n"
+                                           "Completed task. Remember to save it.")
+
+    out = scheduler.consolidate(None, keep_days=0)
+    assert out["pruned"] == 1, out
+    body = lt.read_text(encoding="utf-8")
+    assert body.count("Project deadline") == 1, body       # deduped inside one run
+    assert "Remember to save" not in body, body            # self-talk rejected
+    assert marked == [str(lt)], marked                     # queued for indexing
+
+    # next nightly run, same fact: it must not pile up a second copy
+    (diary / "2026-09-02.md").write_text("## 09:00:00\nnote: another old day\n",
+                                         encoding="utf-8")
+    scheduler.consolidate(None, keep_days=0)
+    body2 = lt.read_text(encoding="utf-8")
+    assert body2.count("Project deadline") == 1, body2

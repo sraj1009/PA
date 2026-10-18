@@ -443,6 +443,7 @@ tool calls — a fast path can never bypass permissions.
 | `/model [local\|cloud\|name]` | view/override the session model |
 | `/tools` · `/skills` | list agent tools / skill cards |
 | `/mem <query>` | hybrid vector+keyword memory search |
+| `/mem status` | memory index status: chunk counts per source, log entries excluded, index age + rows, dirty queue |
 | `/reflect` · `/consolidate` | run self-review / nightly consolidation now |
 | `/eval` | run the 21-task agent eval suite |
 | `/health` · `/dashboard` | environment report / metrics dashboard **snapshot** (the web app serves the same page **live** at `GET /dashboard?token=…`, refreshing every 30 s) |

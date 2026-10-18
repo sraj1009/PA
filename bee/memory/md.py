@@ -120,16 +120,24 @@ def _subject(s: str) -> str:
 
 
 def chunk_md(p: Path) -> list[tuple[str, str]]:
-    """(source, chunk) pairs — chunked at ~400 chars on blank lines.
+    """(source, chunk) pairs — chunked at ~400 chars on blank lines AND on `##`
+    headings (a heading-dense file with no blank lines used to become a single
+    whole-file embedding, far over the cap).
 
-    Logs are dropped PER PARAGRAPH, before the ~400-char merge: filtering the
-    merged chunk instead lets one transcript block drag a genuine neighbouring
-    note out of memory with it."""
+    Log entries are dropped WHOLE — one `##` section at a time — before the
+    ~400-char merge: only an entry's first paragraph carries the
+    `## HH:MM:SS [model=]` header, so a paragraph-level filter alone re-admitted
+    every continuation paragraph of a multi-paragraph log as memory. Filtering
+    the merged chunk instead would let one transcript block drag a genuine
+    neighbouring note out of memory with it."""
     if not p.exists():
         return []
     txt = p.read_text(encoding="utf-8", errors="ignore")
-    paras = [pp.strip() for pp in re.split(r"\n\s*\n", txt)
-             if pp.strip() and not is_transcript(pp)]
+    paras: list[str] = []
+    for section in _sections(txt):
+        if is_transcript(section):
+            continue
+        paras.extend(pp.strip() for pp in re.split(r"\n\s*\n", section) if pp.strip())
     chunks, cur = [], ""
     for para in paras:
         if len(cur) + len(para) + 2 > 400 and cur:
@@ -142,6 +150,11 @@ def chunk_md(p: Path) -> list[tuple[str, str]]:
     return [(str(p), c) for c in chunks if c]
 
 
+def _sections(txt: str) -> list[str]:
+    """`## `-headed sections (heading + body kept together) + any preamble."""
+    return [s for s in re.split(r"(?m)^(?=##\s)", txt) if s.strip()]
+
+
 # A diary block written by the agent loop is a LOG of one exchange:
 # "## 21:41:16 [model=local]\ntask: …\nresult: …". Those blocks are not facts —
 # and because they quote the question, they embed very close to the next time the
@@ -151,10 +164,18 @@ def chunk_md(p: Path) -> list[tuple[str, str]]:
 # Genuine diary notes (`## 09:12:03` + "note (fast path): …") have no [model= tag
 # and stay indexed.
 TRANSCRIPT_RE = re.compile(r"^##\s*\d{1,2}:\d{2}(?::\d{2})?\s*\[model=", re.M)
+# A log can also arrive without the header (older writers, tool-authored diary
+# text): a line-start `task:` followed by a line-start `result:` is an agent
+# exchange, not a fact. The anchors keep genuine prose safe — "my result: …"
+# mid-line never matches.
+_TASK_LINE = re.compile(r"(?m)^task:\s*\S")
+_RESULT_LINE = re.compile(r"(?m)^result:\s*\S")
 
 
 def is_transcript(chunk: str) -> bool:
-    return bool(TRANSCRIPT_RE.search(chunk or ""))
+    s = chunk or ""
+    return bool(TRANSCRIPT_RE.search(s)
+                or (_TASK_LINE.search(s) and _RESULT_LINE.search(s)))
 
 
 def all_chunks() -> list[tuple[str, str]]:
